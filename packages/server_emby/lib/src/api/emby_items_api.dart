@@ -7,6 +7,46 @@ class EmbyItemsApi implements ItemsApi {
 
   EmbyItemsApi(this._dio, this._getUserId);
 
+  /// Emby-specific browse queries reuse this client's authentication and TLS.
+  /// The user is always supplied by the client, never by a query parameter.
+  Future<dynamic> browse(
+    String resource, {
+    String? itemId,
+    Map<String, dynamic> parameters = const {},
+    CancelToken? cancelToken,
+  }) async {
+    final user = _getUserId();
+    final id = itemId == null ? null : Uri.encodeComponent(itemId);
+    final path = switch (resource) {
+      'items' => '/Users/$user/Items',
+      'item' when id != null => '/Users/$user/Items/$id',
+      'views' => '/Users/$user/Views',
+      'resume' => '/Users/$user/Items/Resume',
+      'seasons' when id != null => '/Shows/$id/Seasons',
+      'episodes' when id != null => '/Shows/$id/Episodes',
+      'similar' when id != null => '/Items/$id/Similar',
+      'theme' when id != null => '/Items/$id/ThemeMedia',
+      'trailers' when id != null => '/Users/$user/Items/$id/LocalTrailers',
+      'nextUp' => '/Shows/NextUp',
+      'genres' => '/Genres',
+      'persons' => '/Persons',
+      'videoTypes' => '/ExtendedVideoTypes',
+      'audioLayouts' => '/AudioLayouts',
+      _ => throw ArgumentError.value(resource, 'resource'),
+    };
+    final response = await _dio.get<dynamic>(
+      path,
+      queryParameters: {
+        ...parameters,
+        if (parameters['Fields'] is String)
+          'Fields': _knownFields(parameters['Fields'] as String),
+        'UserId': user,
+      },
+      cancelToken: cancelToken,
+    );
+    return response.data;
+  }
+
   /// Field names with no Emby equivalent, dropped here rather than at every
   /// call site because a name Emby has never heard of turns down the whole
   /// request. ItemCounts is a Jellyfin name, and the counts it asks for

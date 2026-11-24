@@ -140,7 +140,7 @@ class EmbyMediaServerClient extends MediaServerClient {
   late final AuthApi authApi = EmbyAuthApi(_dio);
 
   @override
-  late final ItemsApi itemsApi = EmbyItemsApi(_dio, _requireUserId);
+  late final EmbyItemsApi itemsApi = EmbyItemsApi(_dio, _requireUserId);
 
   @override
   late final PlaybackApi playbackApi =
