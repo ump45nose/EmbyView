@@ -435,7 +435,7 @@ class MainFlutterWindow: NSWindow {
 
   private func mediaFolderStatus() -> [String: Any] {
     guard let data = UserDefaults.standard.data(forKey: "EmbyViewMediaFolderBookmark") else {
-      return ["authorized": false, "stale": false]
+      return ["authorized": false, "stale": false, "state": "unconfigured"]
     }
     do {
       var stale = false
@@ -445,24 +445,35 @@ class MainFlutterWindow: NSWindow {
         accessedMediaURL?.stopAccessingSecurityScopedResource()
         accessedMediaURL = nil
         guard url.startAccessingSecurityScopedResource() else {
-          return ["authorized": false, "stale": stale, "reason": "目录访问授权已失效，请重新选择"]
+          return ["authorized": false, "stale": stale, "state": "denied",
+            "embyRoot": UserDefaults.standard.string(forKey: "EmbyViewMediaFolderRoot") ?? "",
+            "reason": "目录访问授权已失效，请重新选择"]
         }
         accessedMediaURL = url
       }
       var directory: ObjCBool = false
-      guard FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue,
-        FileManager.default.isReadableFile(atPath: url.path) else {
-        return ["authorized": false, "stale": stale, "reason": "授权目录当前不可访问"]
+      guard FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue else {
+        return ["authorized": false, "stale": stale, "state": "unmounted",
+          "embyRoot": UserDefaults.standard.string(forKey: "EmbyViewMediaFolderRoot") ?? "",
+          "reason": "授权目录当前未挂载"]
+      }
+      guard FileManager.default.isReadableFile(atPath: url.path) else {
+        return ["authorized": false, "stale": stale, "state": "denied",
+          "embyRoot": UserDefaults.standard.string(forKey: "EmbyViewMediaFolderRoot") ?? "",
+          "reason": "授权目录当前不可读取"]
       }
       if stale {
         let fresh = try url.bookmarkData(options: .withSecurityScope,
           includingResourceValuesForKeys: nil, relativeTo: nil)
         UserDefaults.standard.set(fresh, forKey: "EmbyViewMediaFolderBookmark")
       }
-      return ["authorized": true, "path": url.path,
+      return ["authorized": true, "state": "authorized", "path": url.path,
+        "writable": FileManager.default.isWritableFile(atPath: url.path),
         "embyRoot": UserDefaults.standard.string(forKey: "EmbyViewMediaFolderRoot") ?? "", "stale": false]
     } catch {
-      return ["authorized": false, "stale": true, "reason": error.localizedDescription]
+      return ["authorized": false, "stale": true, "state": "invalid",
+        "embyRoot": UserDefaults.standard.string(forKey: "EmbyViewMediaFolderRoot") ?? "",
+        "reason": error.localizedDescription]
     }
   }
 
