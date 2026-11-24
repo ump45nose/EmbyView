@@ -188,6 +188,9 @@ class MainFlutterWindow: NSWindow {
   private var touchBridge: DirectTouchBridge?
   private var sfSymbolChannel: FlutterMethodChannel?
   private var downloadDirChannel: FlutterMethodChannel?
+  private var mediaFolderChannel: FlutterMethodChannel?
+  private var accessedMediaURL: URL?
+  private var embyViewAudioChannel: EmbyViewAudioChannel?
   private var gameChannel: NativeGameChannel?
   private var aetherVideoChannel: AetherVideoChannel?
   private var themeMusicChannel: AppleTvThemeMusicChannel?
@@ -368,6 +371,9 @@ class MainFlutterWindow: NSWindow {
     let messenger = flutterViewController.engine.binaryMessenger
     let aetherChannel = AetherVideoChannel(messenger: messenger)
     self.aetherVideoChannel = aetherChannel
+    self.embyViewAudioChannel = EmbyViewAudioChannel(messenger: messenger,
+      wrapperProvider: { [weak aetherChannel] in aetherChannel?.player ?? AetherPlayerWrapper() })
+    registerMediaFolderChannel(messenger: messenger)
     let aetherRegistrar = flutterViewController.registrar(forPlugin: "moonfin_aether_video")
     aetherRegistrar.register(
       MacosAetherVideoViewFactory(
@@ -387,4 +393,77 @@ class MainFlutterWindow: NSWindow {
 
     super.awakeFromNib()
   }
+  private func registerMediaFolderChannel(messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: "embyview/media_folder", binaryMessenger: messenger)
+    mediaFolderChannel = channel
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self else { result(nil); return }
+      switch call.method {
+      case "authorize":
+        guard let args = call.arguments as? [String: Any], let root = args["embyRoot"] as? String,
+          !root.isEmpty else {
+          result(FlutterError(code: "invalid_root", message: "请先填写 Emby 媒体根路径", details: nil)); return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "选择与 Emby 媒体根路径对应的本机目录"
+        panel.beginSheetModal(for: self) { [weak self] response in
+          guard let self, response == .OK, let url = panel.url else {
+            result(["authorized": false, "cancelled": true]); return
+          }
+          do {
+            let bookmark = try url.bookmarkData(options: .withSecurityScope,
+              includingResourceValuesForKeys: nil, relativeTo: nil)
+            UserDefaults.standard.set(bookmark, forKey: "EmbyViewMediaFolderBookmark")
+            UserDefaults.standard.set(root, forKey: "EmbyViewMediaFolderRoot")
+            result(self.mediaFolderStatus())
+          } catch { result(FlutterError(code: "bookmark_failed", message: error.localizedDescription, details: nil)) }
+        }
+      case "status": result(self.mediaFolderStatus())
+      case "clear":
+        self.accessedMediaURL?.stopAccessingSecurityScopedResource()
+        self.accessedMediaURL = nil
+        UserDefaults.standard.removeObject(forKey: "EmbyViewMediaFolderBookmark")
+        UserDefaults.standard.removeObject(forKey: "EmbyViewMediaFolderRoot")
+        result(["authorized": false, "stale": false])
+      default: result(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
+  private func mediaFolderStatus() -> [String: Any] {
+    guard let data = UserDefaults.standard.data(forKey: "EmbyViewMediaFolderBookmark") else {
+      return ["authorized": false, "stale": false]
+    }
+    do {
+      var stale = false
+      let url = try URL(resolvingBookmarkData: data, options: .withSecurityScope,
+        relativeTo: nil, bookmarkDataIsStale: &stale)
+      if accessedMediaURL != url {
+        accessedMediaURL?.stopAccessingSecurityScopedResource()
+        accessedMediaURL = nil
+        guard url.startAccessingSecurityScopedResource() else {
+          return ["authorized": false, "stale": stale, "reason": "目录访问授权已失效，请重新选择"]
+        }
+        accessedMediaURL = url
+      }
+      var directory: ObjCBool = false
+      guard FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue,
+        FileManager.default.isReadableFile(atPath: url.path) else {
+        return ["authorized": false, "stale": stale, "reason": "授权目录当前不可访问"]
+      }
+      if stale {
+        let fresh = try url.bookmarkData(options: .withSecurityScope,
+          includingResourceValuesForKeys: nil, relativeTo: nil)
+        UserDefaults.standard.set(fresh, forKey: "EmbyViewMediaFolderBookmark")
+      }
+      return ["authorized": true, "path": url.path,
+        "embyRoot": UserDefaults.standard.string(forKey: "EmbyViewMediaFolderRoot") ?? "", "stale": false]
+    } catch {
+      return ["authorized": false, "stale": true, "reason": error.localizedDescription]
+    }
+  }
+
 }

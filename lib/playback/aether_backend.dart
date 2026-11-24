@@ -28,7 +28,8 @@ import 'subtitle_fonts.dart';
 /// music, audiobooks and offline playback. Unlike the tvOS sibling there is
 /// no native player UI: Flutter owns the OSD and the video arrives through
 /// the `moonfin/aether_video` platform view.
-class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
+class AetherBackend
+    with SubtitleDelayState, AppleSecondarySubtitleControls
     implements PlayerBackend, SubtitleLoadingBackend, SecondarySubtitleBackend {
   AetherBackend(this._prefs) {
     _eventSub = _events.receiveBroadcastStream().listen(
@@ -69,6 +70,49 @@ class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
   Completer<void>? _tracksReadyCompleter;
   List<EmbeddedCaptionTrack> _embeddedCaptionTracks = const [];
   final _tracksChangedController = StreamController<void>.broadcast();
+
+  final _nativeEventStream = StreamController<Map<String, dynamic>>.broadcast();
+  Map<String, dynamic> _nextSourceOptions = const {};
+  int _nativeSourceGeneration = 0;
+  Stream<Map<String, dynamic>> get nativeEvents => _nativeEventStream.stream;
+
+  /// Internal Mac adapter operations keep platform failures visible to their caller.
+  Future<T?> invokeNativeControl<T>(String method, [dynamic arguments]) =>
+      _control.invokeMethod<T>(method, arguments);
+
+  Future<void> loadExternalSubtitle(
+    String url, {
+    String? title,
+    String? language,
+    String? codec,
+    int? sourceGeneration,
+  }) async {
+    final expected = sourceGeneration ?? _nativeSourceGeneration;
+    _pendingEmbeddedSubtitle = null;
+    await invokeNativeControl<void>('loadExternalSubtitle', {
+      'url': url,
+      'title': title,
+      'language': language,
+      'codec': codec,
+      'sourceGeneration': expected,
+    });
+    if (expected != _nativeSourceGeneration) {
+      throw PlatformException(code: 'stale_source', message: '播放源已变更');
+    }
+    _activeSubtitleTrackIndex = 0;
+  }
+
+  void configureNextNativeSource({
+    required int sourceGeneration,
+    int? sessionCacheByteBudget,
+    bool anime4k = false,
+  }) {
+    _nextSourceOptions = {
+      'sourceGeneration': sourceGeneration,
+      'sessionCacheByteBudget': sessionCacheByteBudget,
+      'anime4k': anime4k,
+    };
+  }
 
   bool _disposed = false;
   EngineTrust? _trust;
@@ -134,8 +178,7 @@ class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
   Future<T?> invokeAppleSecondaryControl<T>(
     String method, [
     dynamic arguments,
-  ]) =>
-      _invoke<T>(method, arguments);
+  ]) => _invoke<T>(method, arguments);
 
   @override
   bool get isSubtitleLoading => _isSubtitleLoading;
@@ -153,6 +196,7 @@ class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
     if (_disposed || event is! Map) return;
     final map = event.map((k, v) => MapEntry(k.toString(), v));
     final eventType = map['event']?.toString();
+    _nativeEventStream.add(map.cast<String, dynamic>());
 
     switch (eventType) {
       case 'state':
@@ -290,6 +334,9 @@ class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
         ? mediaItem
         : payload['url']?.toString() ?? '';
     if (_disposed || url.isEmpty) return;
+    final nativeOptions = _nextSourceOptions;
+    _nativeSourceGeneration = (nativeOptions['sourceGeneration'] as int?) ?? 0;
+    _nextSourceOptions = const {};
     updateSubtitleDelaySession(payload['subtitleDelaySessionId'] as int?);
 
     final headers = payload['headers'] is Map
@@ -318,6 +365,7 @@ class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
 
     _liveSeekWindow = null;
     await _invoke<void>('setSource', {
+      ...nativeOptions,
       'url': url,
       'headers': headers,
       'autoPlay': autoPlay,
@@ -330,8 +378,8 @@ class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
       ),
       'isLive': payload['isLive'] == true,
       'mediaType': payload['mediaType']?.toString() ?? 'video',
-      'normalizationGainDb':
-          (payload['normalizationGainDb'] as num?)?.toDouble(),
+      'normalizationGainDb': (payload['normalizationGainDb'] as num?)
+          ?.toDouble(),
       'speed': _playbackSpeed,
       'forceSubtitlesDisabledOnStart':
           payload['mediaType']?.toString() != 'audio' &&
@@ -688,9 +736,11 @@ class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
     _audioDelayDebounce = Timer(const Duration(milliseconds: 350), () {
       _audioDelayDebounce = null;
       if (_disposed) return;
-      unawaited(_invoke<void>('setAudioDelay', {
-        'delayMs': (_audioDelaySeconds * 1000).round(),
-      }));
+      unawaited(
+        _invoke<void>('setAudioDelay', {
+          'delayMs': (_audioDelaySeconds * 1000).round(),
+        }),
+      );
     });
   }
 
@@ -831,5 +881,6 @@ class AetherBackend with SubtitleDelayState, AppleSecondarySubtitleControls
     _systemVolumeStream.close();
     _tracksChangedController.close();
     _subtitleLoadingStream.close();
+    _nativeEventStream.close();
   }
 }

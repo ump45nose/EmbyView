@@ -21,6 +21,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		E5B1A0D10000000000000001 /* EmbyViewAudioChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1A0D10000000000000002 /* EmbyViewAudioChannel.swift */; };
 		73CC3B0EE504471A95C6C9E1 /* embedded-ass.mkv in Resources */ = {isa = PBXBuildFile; fileRef = 10F56E72F11141E59C1B2A30 /* embedded-ass.mkv */; };
 		008D0743212489872160F548 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 852AC4308EB5F442743449DD /* Pods_Runner.framework */; };
 		147CC97F1B187B39F508DCA8 /* AetherVideoChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C04BD1A91A9A76BD9478F8 /* AetherVideoChannel.swift */; };
@@ -80,6 +81,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E5B1A0D10000000000000002 /* EmbyViewAudioChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbyViewAudioChannel.swift; sourceTree = "<group>"; };
 		10F56E72F11141E59C1B2A30 /* embedded-ass.mkv */ = {isa = PBXFileReference; lastKnownFileType = file; name = "embedded-ass.mkv"; path = "Fixtures/embedded-ass.mkv"; sourceTree = "<group>"; };
 		10C04BD1A91A9A76BD9478F8 /* AetherVideoChannel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AetherVideoChannel.swift; path = ../../../tvos/Runner/Playback/Aether/AetherVideoChannel.swift; sourceTree = "<group>"; };
 		159DE08E3FAD670AB77FA219 /* PlayerTypes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PlayerTypes.swift; path = ../../../tvos/Runner/Playback/Aether/PlayerTypes.swift; sourceTree = "<group>"; };
@@ -242,6 +244,7 @@
 			isa = PBXGroup;
 			children = (
 				66D508874A22AB77D25AF7E0 /* MacosAetherVideoPlatformView.swift */,
+				E5B1A0D10000000000000002 /* EmbyViewAudioChannel.swift */,
 				3C7FAD2039BD3D141A17F53F /* AetherPlayerWrapper.swift */,
 				10C04BD1A91A9A76BD9478F8 /* AetherVideoChannel.swift */,
 				8404C97008E1B1C962BE2A8D /* AssRenderer.swift */,
@@ -513,6 +516,7 @@
 				33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */,
 				335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */,
 				671644C63A7634853A2706E9 /* MacosAetherVideoPlatformView.swift in Sources */,
+				E5B1A0D10000000000000001 /* EmbyViewAudioChannel.swift in Sources */,
 				6C864DCF0EB7873D0D9E562A /* AetherPlayerWrapper.swift in Sources */,
 				147CC97F1B187B39F508DCA8 /* AetherVideoChannel.swift in Sources */,
 				7F2F20CDD44C0FF6F6D56C2B /* AssRenderer.swift in Sources */,
@@ -905,7 +909,7 @@
 			repositoryURL = "https://github.com/ump45nose/AetherEngine";
 			requirement = {
 				kind = revision;
-				revision = b551cb7289c9440a2215c0c44e2a17d073a54cf0;
+				revision = 1a62546af3f5cc7451d783e23de6d4990c189d6e;
 			};
 		};
 		755057A94BFFB3D132856F38 /* XCRemoteSwiftPackageReference "libass-build" */ = {

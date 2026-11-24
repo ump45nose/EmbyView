@@ -32,6 +32,9 @@ final class AetherVideoChannel: NSObject, FlutterStreamHandler {
         created.onNowPlayingCommand = { [weak self] payload in
             self?.send(payload)
         }
+        #if os(macOS)
+        created.onNativePlaybackEvent = { [weak self] payload in self?.send(payload) }
+        #endif
         self.playerCreated = true
         return created
     }()
@@ -66,6 +69,32 @@ final class AetherVideoChannel: NSObject, FlutterStreamHandler {
                 #endif
                 return
             }
+            #if os(macOS)
+            if ["setAnime4k", "setAnime4kComparison", "setPictureInPicture", "loadExternalSubtitle"].contains(call.method) {
+                Task { @MainActor in
+                    guard let self else { result(nil); return }
+                    let args = call.arguments as? [String: Any] ?? [:]
+                    do {
+                        switch call.method {
+                        case "setAnime4k": try await self.player.setAnime4k(args["enabled"] as? Bool == true)
+                        case "setAnime4kComparison": self.player.setAnime4kComparison((args["split"] as? NSNumber)?.doubleValue)
+                        case "loadExternalSubtitle":
+                            guard let string = args["url"] as? String, let url = self.urlFrom(string),
+                                  (args["sourceGeneration"] as? NSNumber)?.intValue == self.player.sourceGeneration,
+                                  AetherPlayerWrapper.sharedEngine()?.isSessionReady == true else {
+                                throw NSError(domain: "EmbyView", code: 5,
+                                    userInfo: [NSLocalizedDescriptionKey: "播放源已变更或尚未就绪"])
+                            }
+                            try self.player.loadExternalSubtitle(url: url, title: args["title"] as? String,
+                                language: args["language"] as? String, codec: args["codec"] as? String)
+                        default: try self.player.setPictureInPicture(args["enabled"] as? Bool == true)
+                        }
+                        result(nil)
+                    } catch { result(FlutterError(code: "native_playback", message: error.localizedDescription, details: nil)) }
+                }
+                return
+            }
+            #endif
             result(nil)
             Task { @MainActor in self?.handle(call) }
         }
@@ -229,6 +258,27 @@ final class AetherVideoChannel: NSObject, FlutterStreamHandler {
         if let raw = args["headers"] as? [String: Any] {
             for (key, value) in raw { headers[key] = "\(value)" }
         }
+        #if os(macOS)
+        player.configureSource(
+            AetherPlayerWrapper.SourceConfiguration(
+                headers: headers,
+                sourceGeneration: (args["sourceGeneration"] as? NSNumber)?.intValue ?? 0,
+                sessionCacheByteBudget: (args["sessionCacheByteBudget"] as? NSNumber)?.intValue,
+                anime4k: (args["anime4k"] as? Bool) == true,
+                isLive: (args["isLive"] as? Bool) ?? false,
+                autoPlay: (args["autoPlay"] as? Bool) ?? true,
+                audioStreamIndex: (args["audioStreamIndex"] as? NSNumber).flatMap {
+                    $0.intValue >= 0 ? Int32($0.intValue) : nil
+                },
+                audioBridgeLossless: (args["audioBridgeLossless"] as? Bool) ?? false,
+                dolbyVisionBaseLayerOnly: (args["dolbyVisionBaseLayerOnly"] as? Bool) ?? false,
+                externalSubtitles: AetherPlayerWrapper.externalSubtitleTracks(
+                    from: args["externalSubtitles"]),
+                subtitleDelay: ((args["subtitleDelayMs"] as? NSNumber)?.doubleValue ?? 0) / 1000,
+                secondarySubtitle: AetherPlayerWrapper.secondarySubtitleConfiguration(from: args),
+                cadenceSlowdown: (args["cadenceSlowdown"] as? Bool) ?? false,
+                cadenceTip: AetherPlayerWrapper.cadenceTip(from: args)))
+        #else
         player.configureSource(
             AetherPlayerWrapper.SourceConfiguration(
                 headers: headers,
@@ -245,6 +295,7 @@ final class AetherVideoChannel: NSObject, FlutterStreamHandler {
                 secondarySubtitle: AetherPlayerWrapper.secondarySubtitleConfiguration(from: args),
                 cadenceSlowdown: (args["cadenceSlowdown"] as? Bool) ?? false,
                 cadenceTip: AetherPlayerWrapper.cadenceTip(from: args)))
+        #endif
         player.setForceSubtitlesDisabledOnStart(
             (args["forceSubtitlesDisabledOnStart"] as? Bool) ?? false)
         player.setReplayGainDb((args["normalizationGainDb"] as? NSNumber)?.doubleValue)
@@ -301,6 +352,9 @@ final class AetherVideoChannel: NSObject, FlutterStreamHandler {
             state["liveEdgeMs"] = Int((range.upperBound * 1000).rounded())
         }
         send(state)
+        #if os(macOS)
+        send(p.nativePlaybackPayload())
+        #endif
 
         // Captions can turn up part way through a live stream, so a change in
         // either list re-emits tracksChanged.

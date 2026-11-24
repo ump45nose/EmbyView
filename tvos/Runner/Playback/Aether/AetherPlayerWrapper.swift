@@ -64,6 +64,143 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     /// "message": ...}`, and `{"event": "credentialsRefused", "status": ...}`
     /// when the server refuses the session's credentials mid-play.
     var onPlayerError: (([String: Any]) -> Void)?
+    #if os(macOS)
+
+    var onNativePlaybackEvent: (([String: Any]) -> Void)?
+    var onAudioInputBoundary: ((String, Bool) -> Void)?
+    private(set) var sourceGeneration = 0
+    private var firstFrameReported = false
+    private var nativeLoadStarted = false
+    private var anime4kFailure: String?
+    private var anime4kReloading = false
+    #if os(macOS)
+        lazy var pictureInPictureController = MacosAetherPictureInPictureController(wrapper: self)
+    #endif
+
+    func nativePlaybackPayload(event: String = "nativePlayback") -> [String: Any] {
+        let engine = Self.sharedEngine()
+        let status = engine?.activeUpscale
+        let requested = sourceConfiguration.anime4k
+        var supported = false
+        if #available(macOS 26, iOS 26, tvOS 26, visionOS 26, *) { supported = !isAudioOnlySession }
+        var actual = supported ? "off" : "unsupported"
+        var reason = anime4kFailure
+        if requested {
+            if anime4kReloading || engine?.isSessionReady != true { actual = "pending" }
+            else if let status {
+                actual = status.disabledReason != nil || status.scaler != .lineArt ? "degraded" : (status.degraded ? "degraded" : "active")
+                reason = status.disabledReason ?? (status.scaler != .lineArt ? "设备已降级至自动放大" : (status.degraded ? "设备已降低增强处理以保持播放流畅" : nil))
+            } else if engine?.upscaleRoutePlanned == true {
+                actual = "pending"
+            } else {
+                actual = "unsupported"
+                reason = reason ?? engine?.upscaleUnavailableReason ?? "当前视频、显示尺寸或输出路径不支持 Anime4K"
+            }
+        }
+        if anime4kReloading { actual = "pending" }
+        else if anime4kFailure != nil && engine?.isSessionReady != true { actual = "failed" }
+        var payload: [String: Any] = [
+            "event": event, "sourceGeneration": sourceGeneration,
+            "firstFrame": firstFrameReported, "anime4kSupported": supported,
+            "anime4kRequested": requested, "anime4kState": actual,
+            "comparisonState": "unavailable", "pictureInPictureSupported": false,
+            "pictureInPicture": false,
+        ]
+        if let reason { payload["anime4kReason"] = reason }
+        if let status {
+            payload["originalWidth"] = Int(status.sourceSize.width)
+            payload["originalHeight"] = Int(status.sourceSize.height)
+            payload["enhancedWidth"] = Int(status.targetSize.width)
+            payload["enhancedHeight"] = Int(status.targetSize.height)
+        }
+        if let split = engine?.upscaleComparison.split {
+            payload["comparisonSplit"] = split
+            if requested && status?.disabledReason == nil && status?.scaler == .lineArt {
+                if let failure = engine?.upscaleComparison.unavailableReason {
+                    payload["comparisonState"] = "unavailable"
+                    payload["anime4kReason"] = failure
+                } else { payload["comparisonState"] = engine?.upscaleComparison.frame == nil ? "preparing" : "available" }
+            }
+        }
+        #if os(macOS)
+            payload["pictureInPictureSupported"] = !isAudioOnlySession && videoView?.window != nil
+                && firstFrameReported && engine?.hasFirstFrameReadyForDisplay == true && engine?.isSessionReady == true
+            payload["pictureInPicture"] = pictureInPictureController.isActive
+        #endif
+        return payload
+    }
+
+    func setAnime4k(_ enabled: Bool) async throws {
+        guard enabled != sourceConfiguration.anime4k || anime4kFailure != nil else { return }
+        guard !anime4kReloading else { throw NSError(domain: "EmbyView", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "画面增强正在切换，请稍后重试"]) }
+        guard let engine = Self.sharedEngine(), engine.isSessionReady else {
+            throw NSError(domain: "EmbyView", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "媒体仍在打开，请稍后切换画面增强"])
+        }
+        let generation = loadGeneration
+        let previous = sourceConfiguration.anime4k
+        sourceConfiguration.anime4k = enabled
+        anime4kFailure = nil
+        anime4kReloading = true
+        if !enabled { engine.upscaleComparison.split = nil }
+        onAudioInputBoundary?("enhancement", false)
+        secondaryReloadSelection.beginReload(previouslyActive: lastReadySecondaryActive)
+        primaryReloadSelection.beginReload(previouslyActive: lastReadyPrimaryActive)
+        defer {
+            if generation == loadGeneration {
+                anime4kReloading = false
+                if engine.isSessionReady {
+                    currentTime = engine.clock.currentTime
+                    duration = isLiveSession ? 0 : engine.duration
+                    position = duration > 0 ? Float(currentTime / duration) : 0
+                }
+                onAudioInputBoundary?("enhancement", true)
+                onNativePlaybackEvent?(nativePlaybackPayload())
+            }
+        }
+        do {
+            try await engine.reloadAtCurrentPosition(applying: {
+                $0.upscalesLowResolutionVideo = enabled
+                $0.upscaleScaler = .lineArt
+            })
+            guard generation == loadGeneration else { return }
+            reapplySecondaryAfterReload(force: true)
+            if engine.isSessionReady { reapplyPrimaryAfterReload(force: true) }
+        } catch {
+            guard generation == loadGeneration else { return }
+            sourceConfiguration.anime4k = previous
+            anime4kFailure = error.localizedDescription
+            throw error
+        }
+    }
+
+    func setAnime4kComparison(_ split: Double?) {
+        Self.sharedEngine()?.upscaleComparison.split = sourceConfiguration.anime4k ? split : nil
+        onNativePlaybackEvent?(nativePlaybackPayload())
+    }
+
+    func setPictureInPicture(_ enabled: Bool) throws {
+        guard !enabled || (firstFrameReported && Self.sharedEngine()?.hasFirstFrameReadyForDisplay == true) else {
+            throw NSError(domain: "EmbyView", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "画面尚未就绪"])
+        }
+        #if os(macOS)
+            try pictureInPictureController.setEnabled(enabled)
+            onNativePlaybackEvent?(nativePlaybackPayload())
+        #else
+            throw NSError(domain: "EmbyView", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "此原生播放面未提供画中画控制"])
+        #endif
+    }
+
+    private func reportNativeFirstFrameIfVisible() {
+        guard nativeLoadStarted, !firstFrameReported, !isAudioOnlySession,
+              videoView?.window != nil, Self.sharedEngine()?.hasFirstFrameReadyForDisplay == true else { return }
+        firstFrameReported = true
+        onNativePlaybackEvent?(nativePlaybackPayload(event: "firstFrame"))
+    }
+    #endif
 
     // MARK: - Engine
 
@@ -293,6 +430,16 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     private func subscribeToEngine() {
         guard let engine = Self.sharedEngine() else { return }
 
+        #if os(macOS)
+        engine.$hasFirstFrameReadyForDisplay
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak engine] ready in
+                guard let self, let engine, self.ownsEngine else { return }
+                guard self.nativeLoadStarted else { return }
+                if ready, engine.hasFirstFrameReadyForDisplay { self.reportNativeFirstFrameIfVisible() }
+            }.store(in: &cancellables)
+
+        #endif
         engine.$playbackPhase
             .receive(on: DispatchQueue.main)
             .sink { [weak self] phase in self?.applyPhase(phase) }
@@ -354,7 +501,11 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
         engine.$duration
             .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
+                #if os(macOS)
+                guard let self, !self.anime4kReloading else { return }
+                #else
                 guard let self else { return }
+                #endif
                 self.duration = self.isLiveSession ? 0 : value
             }
             .store(in: &cancellables)
@@ -362,7 +513,11 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
         engine.clock.$currentTime
             .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
+                #if os(macOS)
+                guard let self, !self.anime4kReloading else { return }
+                #else
                 guard let self else { return }
+                #endif
                 if value != self.currentTime {
                     self.lastClockAdvanceAt = CACurrentMediaTime()
                 }
@@ -847,6 +1002,9 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     }
 
     func notifySurfaceReady() {
+        #if os(macOS)
+        reportNativeFirstFrameIfVisible()
+        #endif
         resumeSurfaceWaiters()
         updateNativePrimaryBridge()
     }
@@ -905,6 +1063,11 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
 
     struct SourceConfiguration {
         var headers: [String: String] = [:]
+        #if os(macOS)
+        var sourceGeneration = 0
+        var sessionCacheByteBudget: Int?
+        var anime4k = false
+        #endif
         var isLive = false
         var autoPlay = true
         var audioStreamIndex: Int32?
@@ -1015,6 +1178,14 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
 
     func configureSource(_ configuration: SourceConfiguration) {
         sourceConfiguration = configuration
+        #if os(macOS)
+        sourceGeneration = configuration.sourceGeneration
+        firstFrameReported = false
+        nativeLoadStarted = false
+        anime4kFailure = nil
+        Self.sharedEngine()?.upscaleComparison.split = nil
+        onAudioInputBoundary?("source", false)
+        #endif
     }
 
     /// Gives the open stream new request headers, renewed credentials, from
@@ -1146,6 +1317,30 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
         #else
             let preserveASS = false
         #endif
+        #if os(macOS)
+        let options = LoadOptions(
+            httpHeaders: sourceConfiguration.headers,
+            dolbyVisionHandling: sourceConfiguration.dolbyVisionBaseLayerOnly
+                ? .baseLayerOnly : .automatic,
+            upscalesLowResolutionVideo: sourceConfiguration.anime4k,
+            upscaleScaler: .lineArt,
+            matchContentEnabled: displayCriteriaMatchingEnabled(),
+            panelIsInHDRMode: panelIsInHDRMode(),
+            audioBridgeMode: sourceConfiguration.audioBridgeLossless ? .lossless : .surroundCompat,
+            isLive: isLiveSession,
+            audioOnly: audioOnly,
+            dvrWindowSeconds: isLiveSession && !isRemotePlaylist ? 1800 : nil,
+            liveJoinProfile: .fastZap,
+            nativeRemoteHLS: isLiveSession && isRemotePlaylist,
+            preserveASSMarkup: preserveASS,
+            probesize: isLiveSession ? Self.liveProbeBytes : nil,
+            maxAnalyzeDuration: isLiveSession ? Self.liveProbeMicroseconds : nil,
+            externalSubtitles: sourceConfiguration.externalSubtitles,
+            sessionCacheByteBudget: sourceConfiguration.sessionCacheByteBudget,
+            autoplay: sourceConfiguration.autoPlay
+        )
+
+        #else
         let options = LoadOptions(
             httpHeaders: sourceConfiguration.headers,
             dolbyVisionHandling: sourceConfiguration.dolbyVisionBaseLayerOnly
@@ -1165,6 +1360,7 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             autoplay: sourceConfiguration.autoPlay
         )
 
+        #endif
         // Nothing else bounds the open. A load wedged on the network keeps
         // the wrapper at opening, which the state poll reports as buffering
         // forever, and the host shows a spinner with no way out.
@@ -1183,6 +1379,10 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
         defer { watchdog.cancel() }
 
         do {
+            #if os(macOS)
+            // Engine load clears the old display latch before its first suspension.
+            nativeLoadStarted = true
+            #endif
             _ = try await engine.load(
                 url: url,
                 startPosition: startPosition > 0 ? startPosition : nil,
@@ -1212,6 +1412,9 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             secondarySubtitlesReady = true
             applyPendingSecondarySubtitle()
             updateNativePrimaryBridge()
+            #if os(macOS)
+            onAudioInputBoundary?("source", true)
+            #endif
         } catch {
             guard loadGeneration == generation, !didEmitLoadError else { return }
             declaredSubtitleURLs.removeAll()
@@ -1309,6 +1512,13 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     /// Dart-initiated stops go through here so back to back DV episodes don't bounce
     /// through SDR.
     func stop() {
+        #if os(macOS)
+        nativeLoadStarted = false
+        onAudioInputBoundary?("stop", false)
+        #if os(macOS)
+            try? pictureInPictureController.setEnabled(false)
+        #endif
+        #endif
         loadGeneration &+= 1
         resetSecondarySubtitle()
         #if os(iOS)
@@ -1329,6 +1539,13 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     /// Full teardown on dismiss: resets display criteria, releases the view
     /// binding and the audio session. The engine itself stays alive.
     func shutdown() {
+        #if os(macOS)
+        nativeLoadStarted = false
+        onAudioInputBoundary?("stop", false)
+        #if os(macOS)
+            try? pictureInPictureController.setEnabled(false)
+        #endif
+        #endif
         loadGeneration &+= 1
         resetSecondarySubtitle()
         stopObservingForegroundReturn()
@@ -1370,7 +1587,17 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     }
 
     func seek(to seconds: TimeInterval) {
+        #if os(macOS)
+        onAudioInputBoundary?("seek", false)
+        let generation = loadGeneration
+        Task {
+            await Self.sharedEngine()?.seek(to: seconds)
+            guard generation == loadGeneration else { return }
+            onAudioInputBoundary?("seek", true)
+        }
+        #else
         Task { await Self.sharedEngine()?.seek(to: seconds) }
+        #endif
     }
 
     func seekToLiveEdge() {
@@ -1616,6 +1843,11 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             audioSwitchSecondarySnapshotActive = engine.isSecondarySubtitleActive
             audioSwitchPrimarySnapshotActive = engine.isSubtitleActive
         }
+        #if os(macOS)
+        if engine.activeAudioTrackIndex != audioTable[index].id, engine.videoRoute != .remoteBypass {
+            onAudioInputBoundary?("audioTrack", false)
+        }
+        #endif
         engine.selectAudioTrack(index: audioTable[index].id)
     }
 
@@ -1738,10 +1970,43 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
         }
     }
 
+    #if os(macOS)
+    func loadExternalSubtitle(url: URL, title: String?, language: String?, codec: String?) throws {
+        guard let engine = Self.sharedEngine(), engine.isSessionReady else {
+            throw NSError(domain: "EmbyView", code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "播放源尚未就绪"])
+        }
+        if externalSubIDsByURL[url.absoluteString] == nil {
+            seatDeclaredSubtitles(engine)
+            if externalSubIDsByURL[url.absoluteString] == nil {
+                addSubtitle(url: url, title: title, language: language, codec: codec)
+            }
+        }
+        guard externalSubIDsByURL[url.absoluteString] != nil else {
+            throw NSError(domain: "EmbyView", code: 6,
+                userInfo: [NSLocalizedDescriptionKey: "外挂字幕未能登记"])
+        }
+        selectSubtitleTrack(1, externalUrl: url.absoluteString)
+    }
+
+    #endif
     func addSubtitle(url: URL) {
         addSubtitle(url: url, title: nil, language: nil)
     }
 
+    #if os(macOS)
+    func addSubtitle(url: URL, title: String?, language: String?, codec: String? = nil) {
+        guard let engine = Self.sharedEngine() else { return }
+        guard !declaredSubtitleURLs.contains(url.absoluteString) else { return }
+        let track = engine.addExternalSubtitleTrack(
+            ExternalSubtitleTrack(url: url, name: title, language: language, formatHint: codec))
+        externalSubIDsByURL[url.absoluteString] = track.id
+        hostLog(
+            "addExternalSubtitleTrack id=\(track.id) file=\(url.lastPathComponent) "
+                + "tableCount=\(subtitleTable.count)")
+    }
+
+    #else
     func addSubtitle(url: URL, title: String?, language: String?) {
         guard let engine = Self.sharedEngine() else { return }
         guard !declaredSubtitleURLs.contains(url.absoluteString) else { return }
@@ -1753,6 +2018,7 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
                 + "tableCount=\(subtitleTable.count)")
     }
 
+    #endif
     // MARK: - Native HLS primary while dual subtitles are on screen
 
     private func effectivePrimaryTrackID(_ engine: AetherEngine) -> Int? {

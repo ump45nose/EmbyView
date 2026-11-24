@@ -75,6 +75,10 @@ final class MacosAetherVideoContainerView: NSView {
         fatalError("This view is only created in code")
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { wrapper?.notifySurfaceReady() }
+    }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     private func handle(_ call: FlutterMethodCall) {
@@ -107,5 +111,76 @@ final class MacosAetherVideoContainerView: NSView {
         MainActor.assumeIsolated {
             wrapper?.detachVideoView(from: self)
         }
+    }
+}
+
+/// Public AppKit picture-in-picture for both AVPlayer and sample-buffer output.
+/// Reparents the engine's existing render surface, so enhancement, subtitles and
+/// the audio clock follow the same session without opening a second player.
+@MainActor
+final class MacosAetherPictureInPictureController: NSObject, NSWindowDelegate {
+    private weak var wrapper: AetherPlayerWrapper?
+    private weak var originalHost: NSView?
+    private var panel: NSPanel?
+    private var restoring = false
+    var isActive: Bool { panel != nil }
+    init(wrapper: AetherPlayerWrapper) { self.wrapper = wrapper }
+
+    func setEnabled(_ enabled: Bool) throws {
+        guard enabled != isActive else { return }
+        guard enabled else { restore(); return }
+        guard let wrapper, let host = wrapper.videoView, host.window != nil else {
+            throw NSError(domain: "EmbyView", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "画面尚未就绪"])
+        }
+        originalHost = host
+        let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 300),
+            styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        window.title = "画中画"
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 260, height: 180)
+        window.delegate = self
+        let root = NSView(frame: window.contentView!.bounds)
+        root.wantsLayer = true
+        root.layer?.backgroundColor = NSColor.black.cgColor
+        let video = NSView(frame: NSRect(x: 0, y: 36, width: root.bounds.width, height: root.bounds.height - 36))
+        video.autoresizingMask = [.width, .height]
+        root.addSubview(video)
+        let toggle = NSButton(title: "播放 / 暂停", target: self, action: #selector(togglePlayback))
+        toggle.frame = NSRect(x: 8, y: 4, width: 120, height: 28)
+        let back = NSButton(title: "返回播放器", target: self, action: #selector(returnToPlayer))
+        back.frame = NSRect(x: 140, y: 4, width: 120, height: 28)
+        root.addSubview(toggle)
+        root.addSubview(back)
+        window.contentView = root
+        panel = window
+        wrapper.attachVideoView(video)
+        AetherPlayerWrapper.sharedEngine()?.pictureInPictureActive = true
+        if let screen = host.window?.screen {
+            window.setFrameOrigin(NSPoint(x: screen.visibleFrame.maxX - 500, y: screen.visibleFrame.minY + 24))
+        }
+        window.orderFrontRegardless()
+    }
+    @objc private func togglePlayback() {
+        guard let wrapper else { return }
+        wrapper.onNowPlayingCommand?(["event": wrapper.isPlaying ? "pause" : "play"])
+    }
+    @objc private func returnToPlayer() { restore() }
+    func windowWillClose(_ notification: Notification) { restore() }
+    private func restore() {
+        guard !restoring, let window = panel else { return }
+        restoring = true
+        panel = nil
+        if let originalHost { wrapper?.attachVideoView(originalHost) }
+        else if let host = wrapper?.videoView { wrapper?.detachVideoView(from: host) }
+        AetherPlayerWrapper.sharedEngine()?.pictureInPictureActive = false
+        window.delegate = nil
+        window.close()
+        originalHost = nil
+        restoring = false
+        if let wrapper { wrapper.onNativePlaybackEvent?(wrapper.nativePlaybackPayload()) }
     }
 }
