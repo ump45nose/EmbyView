@@ -11,6 +11,7 @@ import '../../data/services/connectivity_service.dart';
 import '../../data/services/remote_search_session.dart';
 import '../../data/services/retro_artwork/retro_artwork_activity_gate.dart';
 import '../../di/injection.dart';
+import '../../embyview/entry.dart';
 import '../../playback/apple_player_ui.dart';
 import '../../playback/external_player_policy.dart';
 import '../../preference/user_preferences.dart';
@@ -203,7 +204,7 @@ final appRouter = GoRouter(
     pageRouteLifecycleObserver,
     PlayerRouteObserver.instance,
   ],
-  redirect: (context, state) {
+  redirect: (context, state) async {
     final path = state.uri.path;
     if (_authRoutes.contains(path)) return null;
     // The old Folders screen, for a bookmark or a link from an older app.
@@ -252,7 +253,31 @@ final appRouter = GoRouter(
       return Destinations.externalPlayer;
     }
 
-    return null;
+    final serverId = session.activeServerId;
+    final server = serverId == null
+        ? null
+        : GetIt.instance<ServerRepository>().getServer(serverId);
+    final verifiedEmby = PlatformDetection.isMacOS &&
+        server?.serverType == ServerType.emby &&
+        session.state == SessionState.ready && session.activeUserId != null;
+    if (verifiedEmby && (path == Destinations.home || isEmbyViewPath(path))) {
+      await ensureMoonfinEmbyViewEntry();
+      if (session.activeServerId != serverId || session.state != SessionState.ready) {
+        return Destinations.home;
+      }
+    }
+    return embyViewRouteRedirect(
+      path: path,
+      isMacOS: PlatformDetection.isMacOS,
+      isEmby: server?.serverType == ServerType.emby,
+      authenticated:
+          session.state == SessionState.ready &&
+          session.activeUserId != null &&
+          server != null,
+      legacyHome: Destinations.home,
+      signedOut: Destinations.startup,
+      homeRegistered: embyViewRegistration.stageThreeHome != null,
+    );
   },
   routes: [
     // Auth
@@ -323,6 +348,12 @@ final appRouter = GoRouter(
     ),
 
     // General
+    ...buildEmbyViewRoutes(
+      legacyHome: (context) {
+        final session = GetIt.instance<SessionRepository>();
+        return HomeScreen(key: ValueKey(session.activeUserId ?? ''));
+      },
+    ),
     GoRoute(
       path: Destinations.home,
       builder: (context, state) {
