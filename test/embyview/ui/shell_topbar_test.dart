@@ -2,11 +2,16 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart' hide ThemeMode;
+import 'package:flutter/material.dart' hide Page, ThemeMode;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:moonfin/embyview/embyview.dart';
+import 'package:moonfin/embyview/entry.dart';
+import 'package:moonfin/embyview/ui/home/ev_home_page.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
+import 'package:moonfin/embyview/ui/wall/ev_wall_page.dart';
+import 'package:moonfin/embyview/ui/zone/ev_zone_page.dart';
 
 final Uint8List _kPngBytes = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==',
@@ -95,6 +100,17 @@ class _FakeAccounts implements EmbyViewAccounts {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+class _FakeWallListing implements WallListing {
+  const _FakeWallListing();
+
+  @override
+  WallInfo get info => const WallInfo(total: 0);
+
+  @override
+  Future<Page<MediaCard>> page({required int offset, required int limit}) async =>
+      const Page<MediaCard>(items: [], total: 0);
+}
+
 class _FakeData implements EmbyViewData {
   _FakeData(this.zoneList);
 
@@ -106,6 +122,41 @@ class _FakeData implements EmbyViewData {
     zonesCalls++;
     return zoneList;
   }
+
+  @override
+  Future<HomeData> home({required ShelfSort seriesSort}) async =>
+      HomeData(zones: zoneList);
+
+  @override
+  Future<ZoneData> zone(String zoneId) async {
+    final tile = zoneList.where((z) => z.id == zoneId).firstOrNull ??
+        ZoneTile(
+          id: zoneId,
+          name: zoneId,
+          iconKey: 'nav_movie',
+          colorSlot: 1,
+          total: 0,
+          unit: '部',
+        );
+    return ZoneData(
+      zone: tile,
+      all: (
+        scope: WallScope.zone(zoneId),
+        sort: WallSort.title,
+        watched: WatchFilter.all,
+        genreId: null,
+        years: null,
+        technology: null,
+      ),
+    );
+  }
+
+  @override
+  Future<WallListing> openWall(WallQuery query) async =>
+      const _FakeWallListing();
+
+  @override
+  Future<WallFacets> wallFacets(WallQuery query) async => const WallFacets();
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -880,8 +931,15 @@ void main() {
   });
 
   group('EvPlayer.open lifecycle, duplicate guard, immersion & custom builder', () {
-    tearDown(() {
+    EvPlayerPageBuilder? savedBuilder;
+
+    setUp(() {
+      savedBuilder = EvPlayer.pageBuilder;
       EvPlayer.pageBuilder = null;
+    });
+
+    tearDown(() {
+      EvPlayer.pageBuilder = savedBuilder;
     });
 
     testWidgets(
@@ -1042,6 +1100,165 @@ void main() {
         expect(EvPlayer.isOpening, isFalse);
       },
     );
+  });
+
+  group('Stage 3 entry registration and GoRouter integration', () {
+    test('EmbyViewRegistration constructor keeps empty defaults while global registration registers stage 3', () {
+      final fresh = EmbyViewRegistration();
+      expect(fresh.stageThreeHome, isNull);
+      expect(fresh.stageThreeRoutes, isEmpty);
+
+      expect(embyViewRegistration.stageThreeHome, isNotNull);
+      expect(embyViewRegistration.stageThreeRoutes.length, 2);
+      expect(EvPlayer.pageBuilder, isNotNull);
+    });
+
+    testWidgets('EvPlayer.open automatically routes through embyViewRegistration.stageFivePlayer', (tester) async {
+      final prevStageFive = embyViewRegistration.stageFivePlayer;
+      final playback = _FakePlayback();
+      final immersion = Immersion();
+      addTearDown(() {
+        embyViewRegistration.stageFivePlayer = prevStageFive;
+        immersion.dispose();
+      });
+
+      // Touch global registration to ensure stage-3 player wiring is initialized.
+      expect(embyViewRegistration.stageThreeHome, isNotNull);
+      Rect? receivedOrigin;
+      embyViewRegistration.stageFivePlayer = (ctx, session, {origin, art}) {
+        receivedOrigin = origin;
+        return GestureDetector(
+          key: const Key('stage5_registered_player'),
+          onTap: () => Navigator.of(ctx).pop(),
+          child: session.videoSurface(),
+        );
+      };
+
+      late BuildContext ctx;
+      await tester.pumpWidget(
+        _appShell(
+          EvThemeScope(
+            themeMode: ThemeMode.cinema,
+            child: Builder(
+              builder: (context) {
+                ctx = context;
+                return const SizedBox.expand();
+              },
+            ),
+          ),
+        ),
+      );
+
+      const origin = Rect.fromLTWH(10, 20, 300, 169);
+      final openFuture = EvPlayer.open(
+        ctx,
+        const PlayTarget(itemId: 'stage5-item'),
+        origin: origin,
+        playback: playback,
+        immersion: immersion,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('stage5_registered_player')), findsOneWidget);
+      expect(receivedOrigin, origin);
+
+      await tester.tap(find.byKey(const Key('stage5_registered_player')));
+      await tester.pumpAndSettle();
+      await openFuture;
+      expect(playback.sessions.single.closed, isTrue);
+    });
+
+    testWidgets('stageThreeHome and stageThreeRoutes render EvHomePage, EvZonePage, EvWallPage and fallback safely when signed out', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final prefs = _FakePreferences();
+      final accounts = _FakeAccounts(
+        const AccountSnapshot(
+          phase: AccountPhase.signedIn,
+          current: _kProfileSfw,
+          profiles: [_kProfileSfw],
+          sessionId: 'route-sess-1',
+        ),
+      );
+      final data = _FakeData(_kDefaultZones);
+      final playback = _FakePlayback();
+      final immersionPlayback = _FakeImmersionPlayback();
+
+      final entry = await tester.runAsync(() async {
+        final created = EmbyViewEntry(
+          preferences: prefs,
+          accounts: accounts,
+          createSession: (_) => EmbyViewSessionServices(
+            data: data,
+            playback: playback,
+            immersion: immersionPlayback,
+            dispose: () async {},
+          ),
+        );
+        await created.ready;
+        return created;
+      });
+      installEmbyViewEntry(entry);
+
+      final router = GoRouter(
+        initialLocation: embyViewHomePath,
+        routes: buildEmbyViewRoutes(
+          legacyHome: (_) => const Text('LEGACY_FALLBACK'),
+        ),
+      );
+      addTearDown(() {
+        router.dispose();
+        installEmbyViewEntry(null);
+      });
+
+      try {
+        await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        // Home route -> EvShell + EvHomePage
+        expect(find.byType(EvShell), findsOneWidget);
+        expect(find.byType(EvHomePage), findsOneWidget);
+
+        // Zone route -> /embyview/zone/movie -> EvShell + EvZonePage
+        router.go('$embyViewHomePath/zone/movie');
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byType(EvZonePage), findsOneWidget);
+        expect(
+          tester.widget<EvZonePage>(find.byType(EvZonePage)).zoneId,
+          'movie',
+        );
+
+        // Wall route -> /embyview/wall?zone=movie&title=全部电影 -> EvShell + EvWallPage
+        router.go('$embyViewHomePath/wall?zone=movie&title=全部电影');
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.byType(EvWallPage), findsOneWidget);
+        final wall = tester.widget<EvWallPage>(find.byType(EvWallPage));
+        expect(wall.title, '全部电影');
+        expect(wall.initialQuery.scope, isA<ZoneWallScope>());
+        expect((wall.initialQuery.scope as ZoneWallScope).zoneId, 'movie');
+
+        // Signed out / uninstalled entry -> safe fallback without crashing
+        installEmbyViewEntry(null);
+        await tester.pump();
+        expect(find.byType(EvWallPage), findsNothing);
+      } finally {
+        installEmbyViewEntry(null);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.runAsync(() async {
+          await entry!.close();
+          entry.dispose();
+          await prefs.close();
+          await accounts.close();
+          await immersionPlayback.close();
+        });
+      }
+    });
   });
 }
 

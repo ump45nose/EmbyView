@@ -25,6 +25,10 @@ import 'playback/immersion.dart';
 import 'playback/moonfin_playback.dart';
 import 'playback/native_playback.dart';
 import 'prefs/machine_preferences.dart';
+import 'ui/home/ev_home_page.dart';
+import 'ui/kit.dart';
+import 'ui/wall/ev_wall_page.dart';
+import 'ui/zone/ev_zone_page.dart';
 
 typedef EmbyViewSessionFactory = FutureOr<EmbyViewSessionServices> Function(
   AccountSnapshot account,
@@ -87,8 +91,127 @@ class EmbyViewRegistration {
   ];
 }
 
-final embyViewRegistration = EmbyViewRegistration();
+final embyViewRegistration = _registerStageThree(EmbyViewRegistration());
 final _installedEntry = ValueNotifier<EmbyViewEntry?>(null);
+
+EmbyViewRegistration _registerStageThree(EmbyViewRegistration registration) {
+  EvPlayer.pageBuilder = (context, session, {origin, art}) =>
+      buildEmbyViewPlayer(
+        context,
+        session,
+        origin: origin,
+        art: art,
+        registration: registration,
+      );
+  registration.stageThreeHome = (context, services) =>
+      _buildStageThreeShell(services);
+  registration.stageThreeRoutes.addAll([
+    GoRoute(
+      path: 'zone/:zoneId',
+      builder: (context, state) {
+        final zoneId = state.pathParameters['zoneId'] ?? '';
+        return _EmbyViewStageThreeRoute(
+          destination: zoneId.isNotEmpty
+              ? EvZoneDestination(zoneId)
+              : const EvHomeDestination(),
+        );
+      },
+    ),
+    GoRoute(
+      path: 'wall',
+      builder: (context, state) => _EmbyViewStageThreeRoute(
+        destination: _wallDestinationFromRoute(state),
+      ),
+    ),
+  ]);
+  return registration;
+}
+
+Widget _buildStageThreeShell(
+  EmbyViewServices services, {
+  EvShellDestination? initialDestination,
+}) {
+  return EvShell(
+    services: services,
+    initialDestination: initialDestination,
+    homeBuilder: (_) => const EvHomePage(),
+    zoneBuilder: (_, zoneId) => EvZonePage(zoneId: zoneId),
+    wallBuilder: (_, query, title) =>
+        EvWallPage(initialQuery: query, title: title),
+  );
+}
+
+EvWallDestination _wallDestinationFromRoute(GoRouterState state) {
+  final extra = state.extra;
+  if (extra is EvWallDestination) return extra;
+  final qp = state.uri.queryParameters;
+  final title = qp['title'];
+  if (extra is WallQuery) return EvWallDestination(extra, title: title);
+
+  final featureName = qp['feature'];
+  final feature = featureName == null
+      ? null
+      : HomeFeature.values.where((f) => f.name == featureName).firstOrNull;
+  final scope = feature != null
+      ? WallScope.feature(feature)
+      : WallScope.zone(qp['zone'] ?? '');
+  final sort =
+      WallSort.values.where((s) => s.name == qp['sort']).firstOrNull ??
+      WallSort.title;
+  final watched =
+      WatchFilter.values.where((w) => w.name == qp['watched']).firstOrNull ??
+      WatchFilter.all;
+  final from = qp['from'] != null ? int.tryParse(qp['from']!) : null;
+  final to = qp['to'] != null ? int.tryParse(qp['to']!) : null;
+  final years = (from != null || to != null) && (from == null || to == null || from <= to)
+      ? YearRange(from: from, to: to)
+      : null;
+  final technology = qp['tech'] == null
+      ? null
+      : TechFilter.values.where((t) => t.name == qp['tech']).firstOrNull;
+
+  return EvWallDestination(
+    (
+      scope: scope,
+      sort: sort,
+      watched: watched,
+      genreId: qp['genre'],
+      years: years,
+      technology: technology,
+    ),
+    title: title,
+  );
+}
+
+class _EmbyViewStageThreeRoute extends StatelessWidget {
+  const _EmbyViewStageThreeRoute({required this.destination});
+
+  final EvShellDestination destination;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<EmbyViewEntry?>(
+      valueListenable: _installedEntry,
+      builder: (context, entry, _) {
+        if (entry == null) return const SizedBox.shrink();
+        return ListenableBuilder(
+          listenable: entry,
+          builder: (context, _) {
+            final services = entry.services;
+            if (!services.signedIn) return const SizedBox.shrink();
+            return KeyedSubtree(
+              key: ValueKey(services.sessionId),
+              child: _buildStageThreeShell(
+                services,
+                initialDestination: destination,
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
 Future<EmbyViewEntry>? _productionInitialization;
 
 EmbyViewEntry? get installedEmbyViewEntry => _installedEntry.value;
