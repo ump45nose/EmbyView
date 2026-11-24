@@ -37,6 +37,7 @@ class _EvArtworkState extends State<EvArtwork> {
 
   int _layerIndex = 0;
   bool _logoFailed = false;
+  bool _imageSettled = false;
   int? _pendingAdvanceFrom;
 
   @override
@@ -45,6 +46,7 @@ class _EvArtworkState extends State<EvArtwork> {
     if (!_samePlanLayers(oldWidget.plan, widget.plan)) {
       _layerIndex = 0;
       _logoFailed = false;
+      _imageSettled = false;
       _pendingAdvanceFrom = null;
     }
   }
@@ -71,6 +73,7 @@ class _EvArtworkState extends State<EvArtwork> {
       setState(() {
         _layerIndex = failedIndex + 1;
         _logoFailed = false;
+        _imageSettled = false;
         _pendingAdvanceFrom = null;
       });
     });
@@ -84,6 +87,7 @@ class _EvArtworkState extends State<EvArtwork> {
         if (layerIndex + 1 < widget.plan.layers.length) {
           _layerIndex = layerIndex + 1;
           _logoFailed = false;
+          _imageSettled = false;
         } else {
           _logoFailed = true;
         }
@@ -152,12 +156,15 @@ class _EvArtworkState extends State<EvArtwork> {
       alignment: alignment,
       gaplessPlayback: true,
       filterQuality: FilterQuality.medium,
-      frameBuilder: (_, child, frame, sync) => sync
+      frameBuilder: (_, child, frame, sync) => sync || _imageSettled
           ? child
           : AnimatedOpacity(
               opacity: frame == null ? 0.0 : 1.0,
               duration: EvDurations.slow,
               curve: EvCurves.soft,
+              onEnd: frame != null
+                  ? () { if (mounted && !_imageSettled) setState(() => _imageSettled = true); }
+                  : null,
               child: child,
             ),
       errorBuilder: (_, _, _) {

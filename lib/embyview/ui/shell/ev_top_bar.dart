@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/icons/ev_icons.dart';
@@ -12,7 +10,6 @@ import 'package:moonfin/embyview/ui/theme/ev_motion.dart';
 import 'package:moonfin/embyview/ui/theme/ev_primitives.dart';
 import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
 import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
-import 'package:window_manager/window_manager.dart';
 
 class _NavItem {
   const _NavItem(this.id, this.label, this.icon, {this.hint});
@@ -20,9 +17,6 @@ class _NavItem {
   final EvIconData icon;
   final String? hint;
 }
-
-bool _isActivate(KeyEvent e) => e is KeyDownEvent &&
-    (e.logicalKey == LogicalKeyboardKey.enter || e.logicalKey == LogicalKeyboardKey.numpadEnter || e.logicalKey == LogicalKeyboardKey.space);
 
 /// Top navigation bar mirroring `.chrome`, `.tabs`, `.back`, `.ptitle`,
 /// `.pacts`, and `.me` from `.spec/mockups/proto.css` and `proto.js`.
@@ -37,6 +31,7 @@ class EvTopBar extends StatefulWidget {
     this.titlePlate, this.rightActions = const [],
     this.hideTabs = false, this.hideAvatar = false, this.showSearchTab = false,
     this.currentProfile, this.avatarMenuOpen = false, this.enableWindowDrag = true,
+    this.windowDragBuilder,
     this.onSelectTab, this.onBack, this.onAvatarTap,
   });
 
@@ -49,6 +44,7 @@ class EvTopBar extends StatefulWidget {
   final EvChromeTitlePlate? titlePlate;
   final List<Widget> rightActions;
   final AccountProfile? currentProfile;
+  final WidgetBuilder? windowDragBuilder;
   final ValueChanged<String>? onSelectTab;
   final VoidCallback? onBack, onAvatarTap;
 
@@ -94,6 +90,14 @@ class _EvTopBarState extends State<EvTopBar> with SingleTickerProviderStateMixin
     final zonesChanged = old.zones.length != widget.zones.length || old.showSearchTab != widget.showSearchTab ||
         Iterable.generate(old.zones.length).any((i) => old.zones[i].id != widget.zones[i].id || old.zones[i].name != widget.zones[i].name);
 
+    if (zonesChanged) {
+      final activeIds = {for (final item in _items) item.id};
+      _tabKeys.removeWhere((id, _) => !activeIds.contains(id));
+      for (final id in _tabFocus.keys.where((id) => !activeIds.contains(id)).toList()) {
+        _tabFocus.remove(id)?.dispose();
+      }
+      if (_hoveredTabId != null && !activeIds.contains(_hoveredTabId)) _hoveredTabId = null;
+    }
     if (!widget.autoTuck) {
       _cancelTuck();
       _tucked = false;
@@ -109,6 +113,7 @@ class _EvTopBarState extends State<EvTopBar> with SingleTickerProviderStateMixin
   @override
   void dispose() {
     _cancelTuck();
+    _indCurve.dispose();
     _indCtrl.dispose();
     for (final n in _tabFocus.values) { n.dispose(); }
     super.dispose();
@@ -161,16 +166,11 @@ class _EvTopBarState extends State<EvTopBar> with SingleTickerProviderStateMixin
     _indCtrl.forward(from: 0.0);
   }
 
-  Future<void> _winAct(Future<void> Function() fn) async {
-    if (!widget.enableWindowDrag || kIsWeb || defaultTargetPlatform != TargetPlatform.macOS) return;
-    try { await fn(); } catch (_) {}
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context);
     final barOpacity = widget.topFade > 0.005 ? widget.topFade.clamp(0.0, 1.0) : (widget.scrolled ? 1.0 : 0.0);
-    final onImage = !widget.scrolled && widget.topFade < 0.75;
+    final onImage = widget.topFade < 0.75;
 
     return SizedBox(
       height: scale.rem(4.75),
@@ -205,14 +205,8 @@ class _EvTopBarState extends State<EvTopBar> with SingleTickerProviderStateMixin
               ),
             ),
           ),
-          if (widget.enableWindowDrag)
-            Positioned.fill(
-              child: GestureDetector(
-                key: const Key('ev_topbar_drag_area'), behavior: HitTestBehavior.translucent,
-                onPanStart: (_) => unawaited(_winAct(windowManager.startDragging)),
-                onDoubleTap: () => unawaited(_winAct(() async => (await windowManager.isMaximized()) ? windowManager.unmaximize() : windowManager.maximize())),
-              ),
-            ),
+          if (widget.enableWindowDrag && widget.windowDragBuilder != null)
+            Positioned.fill(child: widget.windowDragBuilder!(context)),
           if (widget.showBack)
             Positioned(left: scale.rem(5.75), top: scale.rem(0.875), child: _EvBackButton(onTap: widget.onBack))
           else if (widget.titlePlate != null)
@@ -404,7 +398,7 @@ class _EvTabButtonState extends State<_EvTabButton> {
       key: Key('ev_topbar_tab_${widget.item.id}'), button: true, selected: widget.selected, focused: _focused, label: widget.item.label,
       child: Focus(
         focusNode: widget.focusNode, onFocusChange: (v) => setState(() => _focused = v),
-        onKeyEvent: (_, e) { if (!_isActivate(e)) return KeyEventResult.ignored; widget.onTap(); return KeyEventResult.handled; },
+        onKeyEvent: (_, e) { if (!evIsActivateKey(e)) return KeyEventResult.ignored; widget.onTap(); return KeyEventResult.handled; },
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
           onEnter: (_) { setState(() => _hovered = true); widget.onHover(true); },
@@ -444,7 +438,7 @@ class _EvBackButtonState extends State<_EvBackButton> {
       key: const Key('ev_topbar_back'), button: true, label: '返回',
       child: Focus(
         onFocusChange: (v) => setState(() => _focused = v),
-        onKeyEvent: (_, e) { if (widget.onTap == null || !_isActivate(e)) return KeyEventResult.ignored; widget.onTap!(); return KeyEventResult.handled; },
+        onKeyEvent: (_, e) { if (widget.onTap == null || !evIsActivateKey(e)) return KeyEventResult.ignored; widget.onTap!(); return KeyEventResult.handled; },
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
           onEnter: (_) => setState(() => _hovered = true), onExit: (_) => setState(() { _hovered = false; _pressed = false; }),
@@ -465,7 +459,6 @@ class _EvBackButtonState extends State<_EvBackButton> {
 class _EvTitlePlate extends StatelessWidget {
   const _EvTitlePlate({required this.plate});
   final EvChromeTitlePlate plate;
-  static String _fmt(int v) => v.toString().replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (_) => ',');
 
   @override
   Widget build(BuildContext context) {
@@ -487,7 +480,7 @@ class _EvTitlePlate extends StatelessWidget {
         Text(plate.title, style: theme.displayStyle(scale.font(1.375), color: theme.ink, height: 1.1)),
         SizedBox(height: scale.rem(0.25)),
         Row(mainAxisSize: MainAxisSize.min, children: [
-          Text('${_fmt(plate.total)} ${plate.unit}', style: sub),
+          Text('${evFormatCount(plate.total)} ${plate.unit}', style: sub),
           if (plate.addedThisMonth > 0) ...[
             Container(width: 1, height: scale.rem(0.6875), margin: EdgeInsets.symmetric(horizontal: scale.rem(0.5)), color: theme.fill3),
             Text('本月新增 ${plate.addedThisMonth}', style: sub),

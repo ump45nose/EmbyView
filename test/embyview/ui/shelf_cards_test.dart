@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' hide ThemeMode;
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/shelf/ev_artwork.dart';
@@ -777,6 +778,51 @@ void main() {
 
         expect(find.byKey(const ValueKey('ev_artwork_fallback')), findsOneWidget);
         expect(find.text('终极兜底'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'idle EvCard mounts zero implicit animation controllers and EvShelf more button supports keyboard activation',
+      (tester) async {
+        var moreHits = 0;
+        await tester.pumpWidget(
+          _harness(
+            child: EvShelf(
+              title: '轻量化测试',
+              items: [_card('idle1', libraryId: 'real-emby-guid-1', kind: MediaKind.series)],
+              moreLabel: '查看全部',
+              onMoreTap: () => moreHits++,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final cardFinder = find.byType(EvCard);
+        expect(find.descendant(of: cardFinder, matching: find.byType(AnimatedContainer)), findsNothing);
+        expect(find.descendant(of: cardFinder, matching: find.byType(AnimatedOpacity)), findsNothing);
+        expect(find.descendant(of: cardFinder, matching: find.byType(TweenAnimationBuilder<double>)), findsNothing);
+        expect(find.descendant(of: cardFinder, matching: find.byType(TweenAnimationBuilder<Offset>)), findsNothing);
+
+        // Hover enables animations; leave demotes back to zero animation controllers.
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: Offset.zero);
+        addTearDown(mouse.removePointer);
+        await mouse.moveTo(tester.getCenter(cardFinder));
+        await tester.pump();
+        expect(find.descendant(of: cardFinder, matching: find.byType(AnimatedContainer)), findsWidgets);
+
+        await mouse.moveTo(const Offset(5, 5));
+        await tester.pumpAndSettle();
+        expect(find.descendant(of: cardFinder, matching: find.byType(AnimatedContainer)), findsNothing);
+
+        // EvShelf "more" button activates on Enter/Space.
+        Focus.of(tester.element(find.text('查看全部'))).requestFocus();
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
+        expect(moreHits, 2);
       },
     );
   });

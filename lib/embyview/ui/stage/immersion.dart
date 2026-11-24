@@ -135,6 +135,7 @@ class Immersion extends ChangeNotifier {
   void onCardHoverStart(
     MediaCard card, {
     bool scrolledDown = false,
+    bool allowVideo = true,
     VoidCallback? onBackdropReady,
   }) {
     if (_disposed) return;
@@ -161,7 +162,8 @@ class Immersion extends ChangeNotifier {
     });
 
     final prefs = _services?.preferences.current;
-    if (prefs?.backgroundVideo == false ||
+    if (!allowVideo ||
+        prefs?.backgroundVideo == false ||
         _services?.data == null ||
         _services?.immersion == null) {
       return;

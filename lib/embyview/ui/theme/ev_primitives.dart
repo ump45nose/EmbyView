@@ -2,10 +2,24 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart' hide ThemeMode;
+import 'package:flutter/services.dart';
 import 'package:moonfin/embyview/ui/icons/ev_icons.dart';
 import 'package:moonfin/embyview/ui/theme/ev_motion.dart';
 import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
 import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
+
+/// Returns `true` when [event] is a key-down Enter, NumpadEnter, or Space event.
+bool evIsActivateKey(KeyEvent event) =>
+    event is KeyDownEvent &&
+    (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter ||
+        event.logicalKey == LogicalKeyboardKey.space);
+
+final RegExp _kCountThousandsRe = RegExp(r'\B(?=(\d{3})+(?!\d))');
+
+/// Formats [value] with ASCII thousands separators (e.g. `1234` -> `'1,234'`).
+String evFormatCount(int value) =>
+    value.toString().replaceAllMapped(_kCountThousandsRe, (_) => ',');
 
 /// Switches its subtree to `.onimage` light ink and dark frosted glass variables
 /// so controls laid over hero/detail stills stay legible in paper theme.
@@ -213,6 +227,11 @@ class _EvButtonState extends State<EvButton> {
     Widget button = Focus(
       canRequestFocus: _enabled,
       onFocusChange: (v) => setState(() => _focused = v),
+      onKeyEvent: (_, event) {
+        if (!_enabled || !evIsActivateKey(event)) return KeyEventResult.ignored;
+        widget.onPressed!();
+        return KeyEventResult.handled;
+      },
       child: MouseRegion(
         cursor: _enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
         onEnter: (_) => setState(() => _hovered = true),

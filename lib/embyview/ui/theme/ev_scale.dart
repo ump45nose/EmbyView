@@ -49,16 +49,6 @@ class EvScale {
   /// Font size clamped to [minFontSize].
   double font(double remUnits) => math.max(minFontSize, rem(remUnits));
 
-  /// Shelf card width matching `proto.js` `fit(base)` so `N + 0.25` cards span
-  /// the visible track width (`avail = width - gutter`).
-  double shelfCardWidth(double baseRem, {double gapRem = 1.25}) {
-    final avail = math.max(0.0, size.width - gutter);
-    final gap = rem(gapRem);
-    final unit = rem(baseRem) + gap;
-    final n = unit <= 0 ? 1 : math.max(1, (avail / unit - 0.25).round());
-    return math.max(0.0, (avail - n * gap) / (n + 0.25));
-  }
-
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||

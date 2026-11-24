@@ -3,12 +3,14 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get_it/get_it.dart';
 import 'package:go_router/go_router.dart';
 import 'package:playback_core/playback_core.dart';
 import 'package:server_core/server_core.dart';
 import 'package:server_emby/server_emby.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../auth/repositories/auth_repository.dart';
 import '../auth/repositories/server_repository.dart';
@@ -132,17 +134,88 @@ EmbyViewRegistration _registerStageThree(EmbyViewRegistration registration) {
   return registration;
 }
 
-Widget _buildStageThreeShell(
-  EmbyViewServices services, {
-  EvShellDestination? initialDestination,
-}) {
-  return EvShell(
-    services: services,
-    initialDestination: initialDestination,
+Widget _buildStageThreeShell(EmbyViewServices services, {EvShellDestination? initialDestination}) =>
+    _StageThreeShellHost(services: services, initialDestination: initialDestination);
+
+Future<void> _macWin(Future<void> Function() action) async {
+  if (kIsWeb || defaultTargetPlatform != TargetPlatform.macOS) return;
+  try { await action(); } catch (_) {}
+}
+
+Widget _buildMacWindowDragArea(BuildContext _) => GestureDetector(
+  key: const Key('ev_topbar_drag_area'),
+  behavior: HitTestBehavior.translucent,
+  onPanStart: (_) => unawaited(_macWin(windowManager.startDragging)),
+  onDoubleTap: () => unawaited(_macWin(() async => (await windowManager.isMaximized()) ? windowManager.unmaximize() : windowManager.maximize())),
+);
+
+class _StageThreeRuntime {
+  _StageThreeRuntime(this.sessionId, EmbyViewServices services) : stage = EvStageController() {
+    immersion = Immersion(stage: stage, services: services);
+  }
+  static _StageThreeRuntime? _active;
+  final String? sessionId;
+  final EvStageController stage;
+  late final Immersion immersion;
+  int refs = 0;
+  bool _disposed = false;
+
+  static _StageThreeRuntime acquire(EmbyViewServices services) {
+    final cur = _active;
+    if (cur != null && !cur._disposed && cur.sessionId == services.sessionId) {
+      cur.refs++;
+      unawaited(cur.immersion.rebind(services));
+      if (cur.refs > 1) unawaited(cur.immersion.stopAll());
+      return cur;
+    }
+    if (cur != null && !cur._disposed) unawaited(cur.immersion.stopAll());
+    return _active = _StageThreeRuntime(services.sessionId, services)..refs = 1;
+  }
+
+  void release() {
+    if (--refs <= 0) {
+      if (identical(_active, this)) _active = null;
+      if (!_disposed) { _disposed = true; immersion.dispose(); stage.dispose(); }
+    } else if (!_disposed) {
+      unawaited(immersion.stopAll());
+    }
+  }
+}
+
+class _StageThreeShellHost extends StatefulWidget {
+  const _StageThreeShellHost({required this.services, this.initialDestination});
+  final EmbyViewServices services;
+  final EvShellDestination? initialDestination;
+  @override State<_StageThreeShellHost> createState() => _StageThreeShellHostState();
+}
+
+class _StageThreeShellHostState extends State<_StageThreeShellHost> {
+  late _StageThreeRuntime _runtime;
+  @override void initState() { super.initState(); _runtime = _StageThreeRuntime.acquire(widget.services); }
+  @override
+  void didUpdateWidget(_StageThreeShellHost old) {
+    super.didUpdateWidget(old);
+    if (old.services.sessionId != widget.services.sessionId) {
+      final prev = _runtime;
+      _runtime = _StageThreeRuntime.acquire(widget.services);
+      prev.release();
+    } else if (!identical(old.services, widget.services)) {
+      unawaited(_runtime.immersion.rebind(widget.services));
+    }
+  }
+  @override void dispose() { _runtime.release(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) => EvShell(
+    services: widget.services,
+    initialDestination: widget.initialDestination,
+    stage: _runtime.stage,
+    immersion: _runtime.immersion,
+    onConfigureWindow: () => _macWin(() => windowManager.setTitleBarStyle(TitleBarStyle.hidden, windowButtonVisibility: true)),
+    windowDragBuilder: _buildMacWindowDragArea,
     homeBuilder: (_) => const EvHomePage(),
     zoneBuilder: (_, zoneId) => EvZonePage(zoneId: zoneId),
-    wallBuilder: (_, query, title) =>
-        EvWallPage(initialQuery: query, title: title),
+    wallBuilder: (_, query, title) => EvWallPage(initialQuery: query, title: title),
   );
 }
 
@@ -628,14 +701,16 @@ class _EmbyViewHome extends StatelessWidget {
 }
 
 /// Stage three calls this while stage five has not registered a player yet.
-Widget buildEmbyViewPlayer(
+/// Returning `null` lets [EvPlayer.open] fall back to its built-in minimal page.
+Widget? buildEmbyViewPlayer(
   BuildContext context,
   PlaybackSession session, {
   Rect? origin,
   CardArtwork? art,
   EmbyViewRegistration? registration,
-}) {
-  final builder = (registration ?? embyViewRegistration).stageFivePlayer;
-  return builder?.call(context, session, origin: origin, art: art) ??
-      session.videoSurface();
-}
+}) => (registration ?? embyViewRegistration).stageFivePlayer?.call(
+  context,
+  session,
+  origin: origin,
+  art: art,
+);

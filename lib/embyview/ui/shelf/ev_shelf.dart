@@ -6,6 +6,7 @@ import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/shelf/ev_card.dart';
 import 'package:moonfin/embyview/ui/shelf/ev_skeleton.dart';
 import 'package:moonfin/embyview/ui/theme/ev_motion.dart';
+import 'package:moonfin/embyview/ui/theme/ev_primitives.dart';
 import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
 import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
 
@@ -447,7 +448,13 @@ class _EvShelfState extends State<EvShelf> {
           const Spacer(),
           if (hasMore)
             Focus(
+              canRequestFocus: widget.onMoreTap != null,
               onFocusChange: (v) => setState(() => _moreFocused = v),
+              onKeyEvent: (_, event) {
+                if (widget.onMoreTap == null || !evIsActivateKey(event)) return KeyEventResult.ignored;
+                widget.onMoreTap!();
+                return KeyEventResult.handled;
+              },
               child: MouseRegion(
                 cursor: widget.onMoreTap != null ? SystemMouseCursors.click : SystemMouseCursors.basic,
                 onEnter: (_) => setState(() => _moreHovered = true),

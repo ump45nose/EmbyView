@@ -125,13 +125,23 @@ abstract final class EvIcons {
     illClock, illTv, illEmpty, illSofa, faceSfw, faceFamily, faceGuest,
   ];
 
-  static final Map<String, EvIconData> _byKey = {for (final i in all) i.key: i};
+  static final Map<String, EvIconData> _byKey = {
+    for (final i in all) i.key: i,
+    'series': navTv,
+    'tvshows': navTv,
+    'tv': navTv,
+    'movies': navMovie,
+    'movie': navMovie,
+    'anime': navAnime,
+    'boxsets': navBox,
+    'collections': navBox,
+    'box': navBox,
+    'documentaries': navDoc,
+    'doc': navDoc,
+  };
 
-  /// Looks up an icon by its prototype key, falling back to [film].
+  /// Looks up an icon by its prototype or contract key, falling back to [film].
   static EvIconData byKey(String key) => _byKey[key] ?? film;
-
-  /// Looks up an icon by key, returning `null` if unknown.
-  static EvIconData? tryByKey(String key) => _byKey[key];
 
   /// Picks a deterministic smiley avatar face for a profile id.
   static EvIconData faceFor(String id) {
@@ -260,6 +270,7 @@ class EvIconPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       )..layout();
       tp.paint(canvas, Offset(x - tp.width / 2, y - tp.height * 0.85));
+      tp.dispose();
     }
     canvas.restore();
   }

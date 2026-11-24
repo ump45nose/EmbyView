@@ -343,5 +343,35 @@ void main() {
         expect(tester.takeException(), isNull);
       }
     });
+
+    testWidgets('EvIcons contract aliases, evFormatCount, and EvButton keyboard activation work', (tester) async {
+      expect(EvIcons.byKey('series').key, EvIcons.navTv.key);
+      expect(EvIcons.byKey('tvshows').key, EvIcons.navTv.key);
+      expect(EvIcons.byKey('movies').key, EvIcons.navMovie.key);
+      expect(EvIcons.byKey('boxsets').key, EvIcons.navBox.key);
+      expect(EvIcons.byKey('collections').key, EvIcons.navBox.key);
+      expect(EvIcons.byKey('documentaries').key, EvIcons.navDoc.key);
+      expect(evFormatCount(0), '0');
+      expect(evFormatCount(1234567), '1,234,567');
+
+      var hits = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: EvThemeScope(
+            themeMode: ThemeMode.cinema,
+            child: Center(
+              child: EvButton.primary(label: '播放', onPressed: () => hits++),
+            ),
+          ),
+        ),
+      );
+      Focus.of(tester.element(find.text('播放'))).requestFocus();
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
+      expect(hits, 2);
+    });
   });
 }

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
@@ -14,7 +13,6 @@ import 'package:moonfin/embyview/ui/stage/immersion.dart';
 import 'package:moonfin/embyview/ui/theme/ev_motion.dart';
 import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
 import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
-import 'package:window_manager/window_manager.dart';
 
 /// Frameless macOS window shell hosting the single app-wide [EvStage] and
 /// [Immersion], [EvThemeScope], [EvScope], animated view transitions,
@@ -22,27 +20,36 @@ import 'package:window_manager/window_manager.dart';
 class EvShell extends StatefulWidget {
   const EvShell({
     super.key, required this.services, this.initialDestination, this.controller,
+    this.stage, this.immersion,
     this.homeBuilder, this.zoneBuilder, this.wallBuilder,
-    this.configureWindow = true, this.enableStageMotion = true,
+    this.configureWindow = true, this.onConfigureWindow, this.windowDragBuilder,
+    this.enableStageMotion = true,
   });
 
   final EmbyViewServices services;
   final EvShellDestination? initialDestination;
   final EvShellController? controller;
+  final EvStageController? stage;
+  final Immersion? immersion;
   final WidgetBuilder? homeBuilder;
   final Widget Function(BuildContext context, String zoneId)? zoneBuilder;
   final Widget Function(BuildContext context, WallQuery query, String? title)? wallBuilder;
   final bool configureWindow, enableStageMotion;
+  final FutureOr<void> Function()? onConfigureWindow;
+  final WidgetBuilder? windowDragBuilder;
 
   @override
   State<EvShell> createState() => _EvShellState();
 }
 
 class _EvShellState extends State<EvShell> {
-  late final EvStageController _stage;
-  late final Immersion _immersion;
+  late EvStageController _stage;
+  late Immersion _immersion;
+  late bool _ownsStage, _ownsImmersion;
   late EvShellController _shell;
   late bool _ownsShell;
+  late EvShellDestination _lastDestination;
+  late List<ZoneTile> _lastZones;
 
   StreamSubscription<LocalPreferences>? _prefsSub;
   StreamSubscription<AccountSnapshot>? _accountsSub;
@@ -54,26 +61,43 @@ class _EvShellState extends State<EvShell> {
   final _shellScope = FocusScopeNode(debugLabel: 'ev_shell_scope');
   final _menuScope = FocusScopeNode(debugLabel: 'ev_avatar_menu_scope');
 
+  void _bindStage() {
+    _ownsImmersion = widget.immersion == null;
+    _ownsStage = widget.stage == null && widget.immersion == null;
+    _stage = widget.stage ?? widget.immersion?.stage ?? EvStageController();
+    _immersion = widget.immersion ?? Immersion(stage: _stage, services: widget.services);
+  }
+
   @override
   void initState() {
     super.initState();
-    _stage = EvStageController();
-    _immersion = Immersion(stage: _stage, services: widget.services);
+    _bindStage();
     _ownsShell = widget.controller == null;
     _shell = widget.controller ?? EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
+    _lastDestination = _shell.current;
+    _lastZones = _shell.zones;
     _shell.addListener(_onShellChanged);
     _attachServices(widget.services, initial: true);
-    if (widget.configureWindow) unawaited(_configureMacWindow());
+    if (widget.configureWindow && widget.onConfigureWindow != null) {
+      unawaited(() async { try { await widget.onConfigureWindow!(); } catch (_) {} }());
+    }
   }
 
   @override
   void didUpdateWidget(EvShell old) {
     super.didUpdateWidget(old);
+    if (old.stage != widget.stage || old.immersion != widget.immersion) {
+      if (_ownsImmersion) _immersion.dispose();
+      if (_ownsStage) _stage.dispose();
+      _bindStage();
+    }
     if (old.controller != widget.controller) {
       _shell.removeListener(_onShellChanged);
       if (_ownsShell) _shell.dispose();
       _ownsShell = widget.controller == null;
       _shell = widget.controller ?? EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
+      _lastDestination = _shell.current;
+      _lastZones = _shell.zones;
       _shell.addListener(_onShellChanged);
     }
     if (!identical(old.services, widget.services) || old.services.sessionId != widget.services.sessionId) {
@@ -103,33 +127,33 @@ class _EvShellState extends State<EvShell> {
   }
 
   Future<void> _loadZones(EmbyViewServices services, {required bool force}) async {
+    final data = services.data;
+    if (data == null) return;
     final token = ++_zonesToken;
-    if (services.data != null) {
-      try {
-        final loaded = await services.data!.zones();
-        if (!mounted || token != _zonesToken) return;
-        if (loaded.isNotEmpty || force) { _shell.setZones(loaded); return; }
-      } catch (_) {}
+    try {
+      final loaded = await data.zones();
+      if (!mounted || token != _zonesToken) return;
+      if (loaded.isNotEmpty || force) _shell.setZones(loaded);
+    } catch (error) {
+      if (!mounted || token != _zonesToken) return;
+      debugPrint('EvShell: failed to load zones: $error');
+      if (force) _shell.setZones(const []);
     }
-    if (!mounted || token != _zonesToken) return;
-    if (_shell.zones.isEmpty && _prefs.zones.isNotEmpty) {
-      _shell.setZones([
-        for (final p in _prefs.zones)
-          ZoneTile(id: p.id, name: p.name, iconKey: p.iconKey, colorSlot: p.colorSlot, total: 0, unit: '部'),
-      ]);
-    }
-  }
-
-  Future<void> _configureMacWindow() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.macOS) return;
-    if (WidgetsBinding.instance.runtimeType.toString().contains('Test')) return;
-    try { await windowManager.setTitleBarStyle(TitleBarStyle.hidden, windowButtonVisibility: true); } catch (_) {}
   }
 
   void _onShellChanged() {
     if (!mounted) return;
-    if (_avatarMenuOpen) _avatarMenuOpen = false;
+    final destChanged = _shell.current != _lastDestination;
+    final zonesChanged = !identical(_shell.zones, _lastZones);
+    if (!destChanged && !zonesChanged) return;
+    _lastDestination = _shell.current;
+    _lastZones = _shell.zones;
+    if (destChanged && _avatarMenuOpen) _avatarMenuOpen = false;
     setState(() {});
+  }
+
+  void _handleBack(BuildContext context) {
+    if (!_shell.pop()) unawaited(Navigator.maybePop(context));
   }
 
   void _toggleMenu() {
@@ -154,8 +178,8 @@ class _EvShellState extends State<EvShell> {
     if (_ownsShell) _shell.dispose();
     _shellScope.dispose();
     _menuScope.dispose();
-    _immersion.dispose();
-    _stage.dispose();
+    if (_ownsImmersion) _immersion.dispose();
+    if (_ownsStage) _stage.dispose();
     super.dispose();
   }
 
@@ -184,7 +208,7 @@ class _EvShellState extends State<EvShell> {
                 actions: <Type, Action<Intent>>{
                   DirectionalFocusIntent: _EvSpatialAction(_shellScope),
                   _EvCmd: CallbackAction<_EvCmd>(onInvoke: (i) {
-                    if (i.kind == 'esc') { _avatarMenuOpen ? _closeMenu() : _shell.pop(); }
+                    if (i.kind == 'esc') { _avatarMenuOpen ? _closeMenu() : _handleBack(context); }
                     else if (i.kind == 'search') { _shell.onOpenSearch?.call(); }
                     else if (i.kind == 'settings') { _shell.onOpenSettings?.call(); }
                     return null;
@@ -236,16 +260,23 @@ class _EvShellState extends State<EvShell> {
                           ),
                           Positioned(
                             left: 0, right: 0, top: 0,
-                            child: EvTopBar(
-                              zones: _shell.zones, activeTabId: dest.activeTabId,
-                              navigationStyle: _prefs.navigation, autoTuck: dest is EvZoneDestination,
-                              scrolled: _shell.scrolled, topFade: _shell.topFade,
-                              showBack: _shell.showBack, titlePlate: _shell.titlePlate,
-                              rightActions: _shell.rightActions, hideTabs: _shell.hideTabs,
-                              hideAvatar: _shell.hideAvatar, showSearchTab: _shell.onOpenSearch != null,
-                              currentProfile: _account.current, avatarMenuOpen: _avatarMenuOpen,
-                              enableWindowDrag: widget.configureWindow,
-                              onSelectTab: _selectTab, onBack: _shell.pop, onAvatarTap: _toggleMenu,
+                            child: ListenableBuilder(
+                              listenable: _shell,
+                              builder: (context, _) {
+                                final current = _shell.current;
+                                return EvTopBar(
+                                  zones: _shell.zones, activeTabId: current.activeTabId,
+                                  navigationStyle: _prefs.navigation, autoTuck: current is EvZoneDestination,
+                                  scrolled: _shell.scrolled, topFade: _shell.topFade,
+                                  showBack: _shell.showBack, titlePlate: _shell.titlePlate,
+                                  rightActions: _shell.rightActions, hideTabs: _shell.hideTabs,
+                                  hideAvatar: _shell.hideAvatar, showSearchTab: _shell.onOpenSearch != null,
+                                  currentProfile: _account.current, avatarMenuOpen: _avatarMenuOpen,
+                                  enableWindowDrag: widget.configureWindow,
+                                  windowDragBuilder: widget.configureWindow ? widget.windowDragBuilder : null,
+                                  onSelectTab: _selectTab, onBack: () => _handleBack(context), onAvatarTap: _toggleMenu,
+                                );
+                              },
                             ),
                           ),
                           if (_avatarMenuOpen) ...[
@@ -255,7 +286,7 @@ class _EvShellState extends State<EvShell> {
                               child: FocusScope(
                                 node: _menuScope,
                                 child: EvAvatarMenu(
-                                  accounts: widget.services.accounts, preferences: _prefs,
+                                  accounts: widget.services.accounts,
                                   onSwitchUsers: _shell.onOpenUsers, onManageZones: _shell.onManageZones,
                                   onOpenSettings: _shell.onOpenSettings, onDismiss: _closeMenu,
                                 ),

@@ -82,6 +82,7 @@ class _EvStageState extends State<EvStage>
   EvStageMode _lastMode = EvStageMode.hero;
   bool _veilAnimating = false;
   bool _disableAnimations = false;
+  WidgetBuilder? _videoSurfaceBuilder;
   late final AnimationController _kbController;
 
   @override
@@ -89,6 +90,7 @@ class _EvStageState extends State<EvStage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _kbController = AnimationController(vsync: this, duration: EvDurations.kenBurns);
+    _videoSurfaceBuilder = widget.immersion?.videoSurfaceBuilder;
     widget.controller.addListener(_onControllerChanged);
     widget.immersion?.addListener(_onImmersionChanged);
     _syncFromController(initial: true);
@@ -105,6 +107,7 @@ class _EvStageState extends State<EvStage>
     if (oldWidget.immersion != widget.immersion) {
       oldWidget.immersion?.removeListener(_onImmersionChanged);
       widget.immersion?.addListener(_onImmersionChanged);
+      _videoSurfaceBuilder = widget.immersion?.videoSurfaceBuilder;
     }
     _syncKenBurns();
   }
@@ -117,6 +120,9 @@ class _EvStageState extends State<EvStage>
   }
 
   void _onImmersionChanged() {
+    final next = widget.immersion?.videoSurfaceBuilder;
+    if (identical(next, _videoSurfaceBuilder)) return;
+    _videoSurfaceBuilder = next;
     if (mounted) setState(() {});
   }
 
@@ -236,23 +242,26 @@ class _EvStageState extends State<EvStage>
           ),
           Positioned.fill(
             child: IgnorePointer(
-              child: AnimatedOpacity(
-                key: const Key('ev_stage_frame'),
-                opacity: frameOpacity,
-                duration: EvDurations.stage,
-                curve: EvCurves.soft,
-                child: AnimatedScale(
-                  scale: isAmbient ? 1.15 : 1.0,
-                  duration: EvDurations.ambient,
-                  curve: EvCurves.out,
-                  child: TweenAnimationBuilder<double>(
-                    tween: Tween<double>(end: frameBlur),
-                    duration: EvDurations.stage,
-                    curve: EvCurves.soft,
-                    builder: (_, sigma, child) => sigma > 0.1
-                        ? ImageFiltered(imageFilter: ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma), child: child)
-                        : child!,
-                    child: frame,
+              child: RepaintBoundary(
+                key: const Key('ev_stage_frame_boundary'),
+                child: AnimatedOpacity(
+                  key: const Key('ev_stage_frame'),
+                  opacity: frameOpacity,
+                  duration: EvDurations.stage,
+                  curve: EvCurves.soft,
+                  child: AnimatedScale(
+                    scale: isAmbient ? 1.15 : 1.0,
+                    duration: EvDurations.ambient,
+                    curve: EvCurves.out,
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween<double>(end: frameBlur),
+                      duration: EvDurations.stage,
+                      curve: EvCurves.soft,
+                      builder: (_, sigma, child) => sigma > 0.1
+                          ? ImageFiltered(imageFilter: ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma), child: child)
+                          : child!,
+                      child: frame,
+                    ),
                   ),
                 ),
               ),

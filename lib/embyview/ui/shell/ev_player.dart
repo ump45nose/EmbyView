@@ -10,7 +10,8 @@ import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
 import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
 
 /// External player page builder registered by stage five on [EvPlayer.pageBuilder].
-typedef EvPlayerPageBuilder = Widget Function(
+/// Returning `null` falls back to the built-in minimal player page with Back/Esc exit.
+typedef EvPlayerPageBuilder = Widget? Function(
   BuildContext context, PlaybackSession session, {Rect? origin, CardArtwork? art}
 );
 
@@ -42,11 +43,13 @@ abstract final class EvPlayer {
       entered = resolvedImmersion != null;
       session = resolvedPlayback.open(target);
       final active = session;
-      final buildPage = builder ?? pageBuilder ?? _defaultPage;
+      final customBuilder = builder ?? pageBuilder;
       await navigator.push<void>(PageRouteBuilder<void>(
         opaque: true, barrierColor: const Color(0xFF000000),
         transitionDuration: EvDurations.normal, reverseTransitionDuration: EvDurations.normal,
-        pageBuilder: (ctx, _, _) => buildPage(ctx, active, origin: origin, art: art),
+        pageBuilder: (ctx, _, _) =>
+            customBuilder?.call(ctx, active, origin: origin, art: art) ??
+            _defaultPage(ctx, active, origin: origin, art: art),
         transitionsBuilder: (_, anim, _, child) => FadeTransition(
           opacity: CurvedAnimation(parent: anim, curve: EvCurves.soft), child: child,
         ),

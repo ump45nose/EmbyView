@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/icons/ev_icons.dart';
@@ -24,9 +23,6 @@ int _slotFor(AccountProfile? p, int? explicit) {
   for (final c in id.codeUnits) { h = (h * 31 + c) & 0x7fffffff; }
   return h % 3;
 }
-
-bool _isActivate(KeyEvent e) => e is KeyDownEvent &&
-    (e.logicalKey == LogicalKeyboardKey.enter || e.logicalKey == LogicalKeyboardKey.numpadEnter || e.logicalKey == LogicalKeyboardKey.space);
 
 /// Circular avatar button (`.avatar`): paper theme uses `EvIcons.faceFor`;
 /// cinema theme uses user photo or gradient initial circle.
@@ -81,7 +77,7 @@ class _EvAvatarButtonState extends State<EvAvatarButton> {
       button: true, focused: _focused, label: '用户',
       child: Focus(
         focusNode: widget.focusNode, onFocusChange: (v) => setState(() => _focused = v),
-        onKeyEvent: (_, e) { if (!_isActivate(e)) return KeyEventResult.ignored; widget.onTap!(); return KeyEventResult.handled; },
+        onKeyEvent: (_, e) { if (!evIsActivateKey(e)) return KeyEventResult.ignored; widget.onTap!(); return KeyEventResult.handled; },
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
           onEnter: (_) => setState(() => _hovered = true), onExit: (_) => setState(() => _hovered = false),
@@ -99,11 +95,10 @@ class _EvAvatarButtonState extends State<EvAvatarButton> {
 /// Frosted glass account popover menu mirroring `#usermenu.menu.glass`.
 class EvAvatarMenu extends StatelessWidget {
   const EvAvatarMenu({
-    super.key, required this.accounts, this.preferences,
+    super.key, required this.accounts,
     this.onSelectProfile, this.onSwitchUsers, this.onManageZones, this.onOpenSettings, this.onDismiss,
   });
   final EmbyViewAccounts accounts;
-  final LocalPreferences? preferences;
   final ValueChanged<AccountProfile>? onSelectProfile;
   final VoidCallback? onSwitchUsers, onManageZones, onOpenSettings, onDismiss;
 
@@ -192,7 +187,7 @@ class _EvMenuItemState extends State<_EvMenuItem> {
       button: true, label: widget.label,
       child: Focus(
         onFocusChange: (v) => setState(() => _focused = v),
-        onKeyEvent: (_, e) { if (!_isActivate(e)) return KeyEventResult.ignored; widget.onTap(); return KeyEventResult.handled; },
+        onKeyEvent: (_, e) { if (!evIsActivateKey(e)) return KeyEventResult.ignored; widget.onTap(); return KeyEventResult.handled; },
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
           onEnter: (_) => setState(() => _hovered = true), onExit: (_) => setState(() => _hovered = false),

@@ -768,8 +768,50 @@ void main() {
           tester.widget<AnimatedOpacity>(find.byKey(const Key('ev_stage_frame'))).opacity,
           closeTo(0.14, 1e-6),
         );
+        expect(find.byKey(const Key('ev_stage_frame_boundary')), findsOneWidget);
 
         stage.dispose();
+      },
+    );
+
+    testWidgets(
+      'allowVideo: false skips video timer and EvStage avoids double rebuilds on scroll',
+      (tester) async {
+        final prefs = _FakePreferences();
+        const clip = _FakePreviewRef('clip-skip');
+        final data = _FakeData(onThemeMedia: (_) async => const ThemeMedia(backgroundVideo: clip));
+        final playback = _FakeImmersionPlayback();
+        final stage = EvStageController();
+        final immersion = Immersion(
+          stage: stage,
+          services: _services(prefs: prefs, data: data, playback: playback),
+        );
+
+        await tester.pumpWidget(_stageHarness(controller: stage, immersion: immersion, enableMotion: false));
+        immersion.onCardHoverStart(_card('paper-scroll'), scrolledDown: true, allowVideo: false);
+        await tester.pump(const Duration(milliseconds: 2000));
+        expect(stage.activeBackdropKey, stageArtworkKey(_card('paper-scroll').art.stage));
+        expect(data.themeMediaCalls, isEmpty);
+        expect(playback.videoCalls, isEmpty);
+
+        // Track State rebuild count via Inherited/element dirtying when scrolling.
+        final stageEl = tester.element(find.byType(EvStage));
+        var stageNotifications = 0;
+        stage.addListener(() => stageNotifications++);
+        var immersionNotifications = 0;
+        immersion.addListener(() => immersionNotifications++);
+        stage.setScrollProgress(0.5);
+        expect(stageNotifications, 1);
+        expect(immersionNotifications, 1);
+        expect(stageEl.dirty, isTrue);
+        await tester.pump();
+        expect(stageEl.dirty, isFalse);
+
+        immersion.onCardHoverEnd();
+        immersion.dispose();
+        stage.dispose();
+        await playback.close();
+        await prefs.close();
       },
     );
   });

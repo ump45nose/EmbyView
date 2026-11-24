@@ -1222,8 +1222,9 @@ void main() {
         // Home route -> EvShell + EvHomePage
         expect(find.byType(EvShell), findsOneWidget);
         expect(find.byType(EvHomePage), findsOneWidget);
+        final homeScope = EvScope.of(tester.element(find.byType(EvHomePage)));
 
-        // Zone route -> /embyview/zone/movie -> EvShell + EvZonePage
+        // Zone route -> /embyview/zone/movie -> shares single stage & immersion
         router.go('$embyViewHomePath/zone/movie');
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 100));
@@ -1232,8 +1233,11 @@ void main() {
           tester.widget<EvZonePage>(find.byType(EvZonePage)).zoneId,
           'movie',
         );
+        final zoneScope = EvScope.of(tester.element(find.byType(EvZonePage)));
+        expect(zoneScope.stage, same(homeScope.stage));
+        expect(zoneScope.immersion, same(homeScope.immersion));
 
-        // Wall route -> /embyview/wall?zone=movie&title=全部电影 -> EvShell + EvWallPage
+        // Wall route -> /embyview/wall?zone=movie&title=全部电影 -> shares stage & back pops via Navigator
         router.go('$embyViewHomePath/wall?zone=movie&title=全部电影');
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 100));
@@ -1242,8 +1246,18 @@ void main() {
         expect(wall.title, '全部电影');
         expect(wall.initialQuery.scope, isA<ZoneWallScope>());
         expect((wall.initialQuery.scope as ZoneWallScope).zoneId, 'movie');
+        final wallScope = EvScope.of(tester.element(find.byType(EvWallPage)));
+        expect(wallScope.stage, same(homeScope.stage));
 
-        // Signed out / uninstalled entry -> safe fallback without crashing
+        // Tapping top-bar back on GoRouter subroute falls back to Navigator.maybePop.
+        await tester.tap(find.byKey(const Key('ev_topbar_back')));
+        await tester.pumpAndSettle();
+        expect(find.byType(EvHomePage), findsOneWidget);
+
+        // Navigate back to wall and verify signed out / uninstalled entry falls back safely.
+        router.go('$embyViewHomePath/wall?zone=movie&title=全部电影');
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
         installEmbyViewEntry(null);
         await tester.pump();
         expect(find.byType(EvWallPage), findsNothing);
@@ -1259,7 +1273,124 @@ void main() {
         });
       }
     });
+
+    testWidgets(
+      'default stage-3 EvPlayer falls back to exitable minimal player, scroll isolates body rebuilds, onImage uses 0.75 threshold, and zone errors do not fabricate zones',
+      (tester) async {
+        final prevStageFive = embyViewRegistration.stageFivePlayer;
+        embyViewRegistration.stageFivePlayer = null;
+        addTearDown(() => embyViewRegistration.stageFivePlayer = prevStageFive);
+
+        final prefs = _FakePreferences(
+          const LocalPreferences(
+            theme: ThemeMode.paper,
+            zones: [
+              ZonePreference(
+                id: 'pref_only',
+                name: '不应伪造',
+                iconKey: 'nav_movie',
+                colorSlot: 0,
+                rule: ZoneRule.library('pref_only'),
+              ),
+            ],
+          ),
+        );
+        final accounts = _FakeAccounts(
+          const AccountSnapshot(
+            phase: AccountPhase.signedIn,
+            current: _kProfileSfw,
+            profiles: [_kProfileSfw],
+            sessionId: 's-iso',
+          ),
+        );
+        final playback = _FakePlayback();
+        final scrollCtrl = ScrollController();
+        final shellCtrl = EvShellController();
+        var bodyBuilds = 0;
+        var windowConfigured = 0;
+        late BuildContext innerCtx;
+        addTearDown(() async {
+          scrollCtrl.dispose();
+          shellCtrl.dispose();
+          await prefs.close();
+          await accounts.close();
+        });
+
+        await tester.pumpWidget(
+          _appShell(
+            EvShell(
+              services: EmbyViewServices(
+                preferences: prefs,
+                accounts: accounts,
+                sessionId: 's-iso',
+                data: _FailingZonesData(),
+                playback: playback,
+              ),
+              controller: shellCtrl,
+              enableStageMotion: false,
+              onConfigureWindow: () => windowConfigured++,
+              windowDragBuilder: (_) => const SizedBox(key: Key('custom_drag_area')),
+              homeBuilder: (ctx) {
+                innerCtx = ctx;
+                bodyBuilds++;
+                return SingleChildScrollView(
+                  controller: scrollCtrl,
+                  child: const SizedBox(height: 2000, width: 1440),
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(windowConfigured, 1);
+        expect(find.byKey(const Key('custom_drag_area')), findsOneWidget);
+        expect(shellCtrl.zones, isEmpty);
+        expect(find.byKey(const Key('ev_topbar_tab_pref_only')), findsNothing);
+
+        // Scroll updates EvTopBar without rebuilding home body; paper onImage stays true below 0.75.
+        shellCtrl.titlePlate = const EvChromeTitlePlate(
+          iconKey: 'nav_movie', title: '电影', colorSlot: 1, total: 10, unit: '部',
+        );
+        await tester.pump();
+        final buildsBeforeScroll = bodyBuilds;
+
+        scrollCtrl.jumpTo(40); // topFade = 0.25 < 0.75
+        await tester.pump();
+        expect(bodyBuilds, buildsBeforeScroll);
+        expect(
+          EvTheme.of(tester.element(find.byKey(const Key('ev_topbar_title_plate')))).onImage,
+          isTrue,
+        );
+
+        scrollCtrl.jumpTo(140); // topFade = 0.875 >= 0.75
+        await tester.pump();
+        expect(bodyBuilds, buildsBeforeScroll);
+        expect(
+          EvTheme.of(tester.element(find.byKey(const Key('ev_topbar_title_plate')))).onImage,
+          isFalse,
+        );
+
+        // Production EvPlayer.pageBuilder with stageFivePlayer == null falls back to exitable _defaultPage.
+        final openFuture = EvPlayer.open(innerCtx, const PlayTarget(itemId: 'fallback-1'));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_minimal_player_page')), findsOneWidget);
+        expect(find.byKey(const Key('ev_player_close')), findsOneWidget);
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        await openFuture;
+        expect(playback.sessions.single.closed, isTrue);
+      },
+    );
   });
+}
+
+class _FailingZonesData implements EmbyViewData {
+  @override
+  Future<List<ZoneTile>> zones() => Future<List<ZoneTile>>.error(StateError('zones unavailable'));
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _ThrowingPlayback implements EmbyViewPlayback {
