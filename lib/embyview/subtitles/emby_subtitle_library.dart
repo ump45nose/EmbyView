@@ -74,9 +74,13 @@ class EmbySubtitleLibrary implements SubtitleIndexPort {
       if (stream['IsExternal'] != true) {
         embedded.add(language);
       } else if (isChineseSubtitle(language)) {
-        final match =
-            scan.matchExternal(language: language, filename: stream['Path'] as String?) ??
-            scan.matchExternal(language: language, document: await document(item, stream));
+        final match = scan.nasTracks.isEmpty
+            ? null
+            : scan.matchExternal(
+                language: language,
+                filename: stream['Path'] as String?,
+                document: await document(item, stream),
+              );
         if (match == null || match.isComplete) external.add(language);
       }
     }

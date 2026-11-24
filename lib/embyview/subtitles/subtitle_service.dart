@@ -109,15 +109,14 @@ class SubtitleRuntime {
 
   Future<SubtitleEpisodeContext> _resolve(String account, SubtitleEpisodeRequest request) async {
     final (url, user, token) = _credentials(account);
-    final library = EmbySubtitleLibrary(
-      EmbyMediaServerClient(baseUrl: url, deviceInfo: device)
-        ..accessToken = token
-        ..userId = user,
-    );
+    EmbyMediaServerClient client() => EmbyMediaServerClient(baseUrl: url, deviceInfo: device)
+      ..accessToken = token
+      ..userId = user;
+    final library = EmbySubtitleLibrary(client());
     try {
       final item = await library.item(request.episodeId, request.mediaSourceId);
       final media = SubtitleMedia.fromPlayback(item.source, duration: item.duration);
-      Future<(MediaFolderStatus, String)> authorization() async {
+      Future<(MediaFolderStatus, String)> authorization(String? expectedId) async {
         if (_credentials(account) != (url, user, token)) throw _authorization;
         final folder = await preferences.mediaFolderStatus();
         final mapped = await mapMedia(media, folder);
@@ -136,19 +135,53 @@ class SubtitleRuntime {
               ),
             )
             .toString();
-        if (request.authorizationId != null && identity != request.authorizationId) {
-          throw _authorization;
-        }
+        if (expectedId != null && identity != expectedId) throw _authorization;
         return (folder, identity);
       }
 
-      final (_, identity) = await authorization();
-      final store = SubtitleStore(folderStatus: () async => (await authorization()).$1, localDirectory: () => _cache);
+      final (_, identity) = await authorization(request.authorizationId);
+      final store = SubtitleStore(
+        folderStatus: () async => (await authorization(identity)).$1,
+        localDirectory: () => _cache,
+      );
       return SubtitleEpisodeContext(
         source: item.source,
         store: store,
         duration: item.duration ?? Duration.zero,
         authorizationId: identity,
+        checkAuthorization: () async {
+          if (_credentials(account) != (url, user, token)) throw _authorization;
+          // A fresh connection uses the current mTLS configuration. Item metadata
+          // confirms visibility without negotiating or opening another 115 stream.
+          final verification = client();
+          try {
+            final current = await verification.itemsApi.getItem(
+              request.episodeId,
+              mediaSourceId: media.mediaSourceId,
+              fields: 'Path,MediaSources',
+            );
+            final source = (current['MediaSources'] as List? ?? [])
+                .whereType<Map>()
+                .where((row) => row['Id'] == media.mediaSourceId)
+                .firstOrNull;
+            final fresh = SubtitleMedia(
+              itemId: request.episodeId,
+              mediaSourceId: media.mediaSourceId,
+              itemFilePath: playbackItemPath(current),
+              mediaSourceFilePath: source?['Path'] as String?,
+            );
+            if (current['Id'] != request.episodeId ||
+                (source == null && media.mediaSourceFilePath != null) ||
+                fresh.embyFilePath != media.embyFilePath) {
+              throw _authorization;
+            }
+          } catch (_) {
+            throw _authorization;
+          } finally {
+            verification.dispose();
+          }
+          await authorization(identity);
+        },
         availability: await library.availability(item, store),
         streamIndex: item.audioIndex,
         language:

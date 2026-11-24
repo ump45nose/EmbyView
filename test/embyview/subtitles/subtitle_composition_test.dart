@@ -12,6 +12,7 @@ import 'package:moonfin/embyview/playback/playback_subtitle_input.dart';
 import 'package:moonfin/embyview/subtitles/ai/subtitle_ai.dart';
 import 'package:moonfin/embyview/subtitles/audio/subtitle_audio.dart';
 import 'package:moonfin/embyview/subtitles/emby_subtitle_library.dart';
+import 'package:moonfin/embyview/subtitles/model/subtitle_document.dart';
 import 'package:moonfin/embyview/subtitles/sources/subtitle_sources.dart';
 import 'package:moonfin/embyview/subtitles/store/subtitle_store.dart';
 import 'package:moonfin/embyview/subtitles/subtitle_panel.dart';
@@ -69,6 +70,57 @@ void main() {
     expect(fixture.panel.snapshot.tracks, isEmpty);
   });
 
+  test('a NAS pair restores AI attribution and dialogue onto an indexed track with auto-select off', () async {
+    final fixture = await _Fixture.open();
+    addTearDown(fixture.close);
+    fixture.mount();
+    fixture.autoSelect = false;
+    final media = SubtitleMedia.fromPlayback(fixture.playback.subtitleSource, duration: const Duration(seconds: 10));
+    final chinese = SubtitleDocument.parse(utf8.encode(_srt), format: 'srt');
+    final original = SubtitleDocument.parse(utf8.encode(_srt.replaceFirst('中文字幕', '日本語')), format: 'srt');
+    for (final (language, document) in [('zh', chinese), ('ja', original)]) {
+      final track = await fixture.store.retain(
+        media,
+        document,
+        language: language,
+        origin: SubtitleOrigin.ai,
+        pairId: 'pair',
+        coverage: const [TimeRange(start: Duration.zero, end: Duration(seconds: 10))],
+      );
+      expect((await fixture.store.save(track)).state, SubtitleSaveState.saved);
+    }
+    fixture.streams = [
+      {'Type': 'Subtitle', 'Index': 3, 'Path': '/mnt/media/movie.zh.srt'},
+    ];
+    fixture.documents[3] = chinese;
+    final matched = fixture.panel.changes.firstWhere(
+      (snapshot) => snapshot.tracks.any((track) => track.origin == SubtitleOrigin.ai),
+    );
+    fixture.playback.open(
+      _movie,
+      2,
+      subtitles: [
+        const PlaybackTrack(
+          id: '2:3',
+          name: 'Chinese',
+          language: 'zh',
+          source: PlaybackTrackSource.embyExternal,
+          format: 'srt',
+        ),
+      ],
+    );
+    final state = await matched;
+    expect(state.tracks.single.trackId, '2:3');
+    expect(state.tracks.single.index, SubtitleIndexState.recognized);
+    expect(state.selectedTrackId, isNull);
+    expect(fixture.playback.rendered, isNull);
+
+    await fixture.playback.selectSubtitle('2:3');
+    final cue = fixture.panel.snapshot.cues!.single;
+    expect(cue.text, '日本語');
+    expect(cue.translation, '中文字幕');
+  });
+
   test('normal playback end flushes a short final segment in the following mode', () async {
     final fixture = await _Fixture.open();
     addTearDown(fixture.close);
@@ -102,6 +154,74 @@ void main() {
     await run;
     expect(fixture.requestedAiKey, isTrue);
   });
+
+  test('AI audio and its language follow the switched stream before the playback snapshot catches up', () async {
+    final fixture = await _Fixture.open();
+    addTearDown(fixture.close);
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const channel = MethodChannel('embyview/audio_control');
+    final pcm = Uint8List(48000 * 4 * 12);
+    int? streamIndex;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'readIndependent');
+      streamIndex = (call.arguments as Map)['streamIndex'] as int?;
+      return [
+        {'startUs': 0, 'sourceUs': 0, 'pcm': pcm},
+      ];
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final requests = StreamController<(int?, String?)>();
+    final heard = StreamIterator(requests.stream);
+    final reply = Completer<http.Response>();
+    fixture.aiRequest = (request) {
+      final language = RegExp(r'name="language"\r\n\r\n([a-z]+)')
+          .firstMatch(latin1.decode(request.bodyBytes))
+          ?.group(1);
+      requests.add((streamIndex, language));
+      return reply.future;
+    };
+    addTearDown(() async {
+      if (!reply.isCompleted) reply.complete(http.Response('', 503));
+      await heard.cancel();
+      await requests.close();
+    });
+    fixture.playback.open(
+      _movie,
+      2,
+      duration: const Duration(seconds: 20),
+      audio: const [
+        PlaybackTrack(id: '2:1', name: 'Japanese', language: 'ja', source: PlaybackTrackSource.embedded),
+        PlaybackTrack(id: '2:8', name: 'English', language: 'en', source: PlaybackTrackSource.embedded),
+      ],
+      selectedAudioId: '2:1',
+    );
+    final started = fixture.panel.startAi();
+    expect(await heard.moveNext(), isTrue);
+    expect(heard.current, (1, 'ja'));
+
+    void switchedTo(int index) {
+      for (final ready in [false, true]) {
+        fixture.audioBoundaries.add((
+          sourceGeneration: 2,
+          kind: SubtitleAudioBoundaryKind.audioTrack,
+          ready: ready,
+          position: Duration.zero,
+          streamIndex: ready ? index : null,
+        ));
+      }
+    }
+
+    switchedTo(8);
+    expect(await heard.moveNext(), isTrue);
+    expect(heard.current, (8, 'en'));
+    switchedTo(99);
+    expect(await heard.moveNext(), isTrue);
+    expect(heard.current, (99, null));
+    await fixture.panel.cancelAi();
+    reply.complete(http.Response('', 503));
+    await started;
+  });
 }
 
 class _Fixture {
@@ -110,6 +230,12 @@ class _Fixture {
   final playback = _Playback()..open(_movie, 1);
   late final SubtitleSources sources;
   late final BoundSubtitlePanel panel;
+  late final SubtitleStore store;
+  List<Map<String, dynamic>> streams = [];
+  final documents = <int, SubtitleDocument>{};
+  final audioBoundaries = StreamController<SubtitleAudioBoundary>.broadcast(sync: true);
+  Future<http.Response> Function(http.Request)? aiRequest;
+  bool autoSelect = true;
   Completer<SubtitleItem>? lookup;
   Completer<http.Response>? download;
   final downloading = Completer<void>();
@@ -121,35 +247,40 @@ class _Fixture {
     await File('${root.path}/movie.strm').writeAsString('https://example.test/media');
     final fixture = _Fixture(root);
     fixture.sources = SubtitleSources(readSecret: (_) async => null, client: MockClient(fixture.request));
+    fixture.store = SubtitleStore(
+      folderStatus: () async => fixture.status,
+      localDirectory: () async => Directory('${root.path}/cache'),
+    );
     fixture.panel = BoundSubtitlePanel(
       session: fixture.playback,
       input: fixture.playback,
-      store: SubtitleStore(
-        folderStatus: () async => fixture.status,
-        localDirectory: () async => Directory('${root.path}/cache'),
-      ),
+      store: fixture.store,
       loadItem: (id, _) async =>
           fixture.lookup?.future ??
           (
             item: {'Name': id},
             source: fixture.playback.subtitleSource,
-            streams: <Map<String, dynamic>>[],
+            streams: fixture.streams,
             duration: fixture.playback.snapshot.duration,
             audioIndex: null,
           ),
-      loadDocument: (_, _) async => null,
+      loadDocument: (_, stream) async => fixture.documents[stream['Index']],
       sources: fixture.sources,
       processor: SubtitleAiProcessor(
         readSecret: (_) async {
           fixture.requestedAiKey = true;
-          return null;
+          return fixture.aiRequest == null ? null : 'mock-key';
         },
         translationProvider: () => TranslationProvider.openAi,
         meter: <T>(_, invoke) async => (await invoke()).value,
+        clientFactory: () => MockClient(fixture.aiRequest ?? (_) async => http.Response('', 503)),
       ),
-      preferences: () => const LocalPreferences(subtitleSources: {SubtitleSource.xunlei}),
+      preferences: () => LocalPreferences(
+        subtitleSources: const {SubtitleSource.xunlei},
+        autoSelectChineseSubtitle: fixture.autoSelect,
+      ),
       onClosed: () {},
-      boundaries: const Stream<SubtitleAudioBoundary>.empty(),
+      boundaries: fixture.audioBoundaries.stream,
     );
     return fixture;
   }
@@ -183,6 +314,7 @@ class _Fixture {
     sources.close();
     await playback.events.close();
     await playback.audioInput.pcm.close();
+    await audioBoundaries.close();
     if (await root.exists()) await root.delete(recursive: true);
   }
 }
@@ -201,7 +333,14 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
   final _Audio audioInput = _Audio();
   String? rendered;
 
-  void open(PlayTarget target, int generation) {
+  void open(
+    PlayTarget target,
+    int generation, {
+    List<PlaybackTrack> subtitles = const [],
+    List<PlaybackTrack> audio = const [],
+    String? selectedAudioId,
+    Duration duration = const Duration(seconds: 10),
+  }) {
     subtitleSource = PlaybackSubtitleSource(
       generation: generation,
       target: target,
@@ -216,7 +355,23 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
       generation: generation,
       target: target,
       phase: PlaybackPhase.playing,
-      duration: const Duration(seconds: 10),
+      duration: duration,
+      subtitleTracks: subtitles,
+      audioTracks: audio,
+      selectedAudioId: selectedAudioId,
+    );
+    events.add(snapshot);
+  }
+
+  @override
+  Future<void> selectSubtitle(String? trackId) async {
+    snapshot = PlaybackSnapshot(
+      generation: snapshot.generation,
+      target: snapshot.target,
+      phase: snapshot.phase,
+      duration: snapshot.duration,
+      subtitleTracks: snapshot.subtitleTracks,
+      selectedSubtitleId: trackId,
     );
     events.add(snapshot);
   }

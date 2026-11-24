@@ -103,9 +103,12 @@ class BoundSubtitlePanel implements SubtitlePanel {
         scope.scanning = true;
         unawaited(_loadNas(scope, play.selectedSubtitleId));
       }
-      final track = play.selectedSubtitleId;
-      if (track != null && !scope.retained.containsKey(track) && !scope.documents.containsKey(track)) {
-        unawaited(_document(scope, track).then<void>((_) => _emit(), onError: (Object _) {}));
+      for (final track in play.subtitleTracks) {
+        if ((track.id == play.selectedSubtitleId || scope.hasNas && track.source == PlaybackTrackSource.embyExternal) &&
+            !scope.retained.containsKey(track.id) &&
+            !scope.documents.containsKey(track.id)) {
+          unawaited(_document(scope, track.id));
+        }
       }
       _ai.updatePosition(play.position, timelineGeneration: _timeline);
     }
@@ -187,21 +190,34 @@ class BoundSubtitlePanel implements SubtitlePanel {
     }
   }
 
+  Future<SubtitleScan> _scan(_PanelScope scope) => scope.scan ??= _media(scope).then(store.scan);
+
   Future<void> _loadNas(_PanelScope scope, String? initiallySelected) async {
     try {
+      final scan = await _scan(scope);
+      _check(scope);
+      if (scan.nasTracks.isEmpty) return;
+      scope.hasNas = true;
+      await Future.wait([
+        for (final track in session.snapshot.subtitleTracks)
+          if (track.source == PlaybackTrackSource.embyExternal) _document(scope, track.id),
+      ]);
+      _check(scope);
       final play = session.snapshot;
       if (!preferences().autoSelectChineseSubtitle ||
-          play.subtitleTracks.any((track) => track.id == initiallySelected && isChineseSubtitle(track.language))) {
-        return;
-      }
-      final scan = await store.scan(await _media(scope));
-      _check(scope);
-      if (session.snapshot.selectedSubtitleId != initiallySelected || scope.userApplied) {
+          play.subtitleTracks.any((track) => track.id == initiallySelected && isChineseSubtitle(track.language)) ||
+          play.selectedSubtitleId != initiallySelected ||
+          scope.userApplied) {
         return;
       }
       final available = scan.nasTracks.where((track) => isChineseSubtitle(track.language) && !track.isForced);
       final preferred = available.where((track) => track.isComplete).firstOrNull ?? available.firstOrNull;
       if (preferred == null) return;
+      final indexed = play.subtitleTracks.where((track) => scope.retained[track.id]?.id == preferred.id).firstOrNull;
+      if (indexed != null) {
+        await session.selectSubtitle(indexed.id);
+        return;
+      }
       final id = await _apply(scope, preferred, cues: scan.dialogue(preferred));
       scope.saves[id] = const SubtitleSaveResult(state: SubtitleSaveState.saved);
       _emit();
@@ -223,9 +239,25 @@ class BoundSubtitlePanel implements SubtitlePanel {
         final row = item.streams.where((row) => row['Type'] == 'Subtitle' && row['Index'] == index).firstOrNull;
         if (row == null) return null;
         final document = await scope.guard(loadDocument(item, row));
+        final scan = track.source == PlaybackTrackSource.embyExternal ? await _scan(scope) : null;
         _check(scope);
-        scope.dialogue[id] = document?.cues;
-        return document;
+        final matched = scan?.matchExternal(
+          language: track.language,
+          filename: row['Path'] as String?,
+          document: document,
+        );
+        if (matched != null) {
+          scope.retained[id] = matched;
+          scope.saves[id] = const SubtitleSaveResult(
+            state: SubtitleSaveState.saved,
+            index: SubtitleIndexState.recognized,
+          );
+          scope.dialogue[id] = scan!.dialogue(matched);
+        } else {
+          scope.dialogue[id] = document?.cues;
+        }
+        _emit();
+        return matched?.document ?? document;
       } catch (_) {
         return null;
       }
@@ -424,7 +456,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final play = session.snapshot, timeline = _timeline;
     final start = position ?? play.position;
     final index = streamIndex ?? int.tryParse(play.selectedAudioId?.split(':').last ?? '');
-    final language = play.audioTracks.where((track) => track.id == play.selectedAudioId).firstOrNull?.language;
+    final language = play.audioTracks.where((track) => track.id == '${play.generation}:$index').firstOrNull?.language;
     _run?.cancel();
     _ai.invalidate();
     final cancellation = _run = SubtitleAiCancellation();
@@ -589,7 +621,8 @@ class _PanelScope {
   final documents = <String, Future<SubtitleDocument?>>{};
   final edits = <SubtitleAiCancellation>{};
   Future<SubtitleItem>? item;
-  var scanning = false, userApplied = false;
+  Future<SubtitleScan>? scan;
+  var scanning = false, userApplied = false, hasNas = false;
 
   Future<T> guard<T>(Future<T> work) => Future.any([work, _closed.future.then<T>((_) => throw _expired)]);
   void close() {
