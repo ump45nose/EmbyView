@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
@@ -18,6 +19,7 @@ class EvHero extends StatefulWidget {
     this.onPlay,
     this.onActiveChanged,
     this.enableAutoRotate = true,
+    this.pauseAutoRotate,
   });
 
   final List<HomeRecommendation> recommendations;
@@ -27,6 +29,7 @@ class EvHero extends StatefulWidget {
   final void Function(HomeRecommendation recommendation, Rect? origin)? onPlay;
   final ValueChanged<HomeRecommendation>? onActiveChanged;
   final bool enableAutoRotate;
+  final ValueListenable<bool>? pauseAutoRotate;
 
   @override
   State<EvHero> createState() => _EvHeroState();
@@ -43,6 +46,7 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
     super.initState();
     _cycleController = AnimationController(vsync: this, duration: EvDurations.heroCycle)
       ..addStatusListener(_onCycleStatus);
+    widget.pauseAutoRotate?.addListener(_onPauseChanged);
     _syncRotation();
   }
 
@@ -56,6 +60,10 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
   @override
   void didUpdateWidget(EvHero oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.pauseAutoRotate != widget.pauseAutoRotate) {
+      oldWidget.pauseAutoRotate?.removeListener(_onPauseChanged);
+      widget.pauseAutoRotate?.addListener(_onPauseChanged);
+    }
     final oldRecs = oldWidget.recommendations, newRecs = widget.recommendations;
     if (newRecs.isEmpty || _activeIndex >= newRecs.length) _activeIndex = 0;
     final listChanged = oldRecs.length != newRecs.length ||
@@ -74,7 +82,16 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
   }
 
   bool get _shouldRotate =>
-      widget.enableAutoRotate && !_disableAnimations && widget.recommendations.length > 1 && widget.previewCard == null;
+      widget.enableAutoRotate &&
+      !(widget.pauseAutoRotate?.value ?? false) &&
+      !_disableAnimations &&
+      widget.recommendations.length > 1 &&
+      widget.previewCard == null;
+
+  void _onPauseChanged() {
+    if (!mounted) return;
+    _syncRotation(restart: !(widget.pauseAutoRotate?.value ?? false));
+  }
 
   void _syncRotation({bool restart = false}) {
     if (_shouldRotate) {
@@ -128,6 +145,7 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
 
   @override
   void dispose() {
+    widget.pauseAutoRotate?.removeListener(_onPauseChanged);
     _cycleController.dispose();
     super.dispose();
   }
@@ -178,7 +196,7 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildReasonCapsule(theme, scale, rec, reasonText),
+        _buildReasonCapsule(context, theme, scale, rec, reasonText),
         SizedBox(height: scale.rem(1.25)),
         _buildTitleArtwork(theme, scale, card),
         SizedBox(height: scale.rem(1.25)),
@@ -200,7 +218,7 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
     );
   }
 
-  Widget _buildReasonCapsule(EvTheme theme, EvScale scale, HomeRecommendation rec, String reasonText) {
+  Widget _buildReasonCapsule(BuildContext context, EvTheme theme, EvScale scale, HomeRecommendation rec, String reasonText) {
     final isContinue = rec.resume != null || rec.reason == RecommendationReason.continueWatching;
     final badgeSize = scale.rem(1.625);
     late final Widget leading;
@@ -236,7 +254,7 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
       primaryLabel = '继续观看';
       secondaryLabel = EvCard.resumeSubtitle(rec.resume);
     } else {
-      final (libName, libIcon, libColor) = _libraryMeta(rec.card, theme);
+      final (libName, libIcon, libColor) = _libraryMeta(context, rec.card, theme);
       leading = Container(
         width: badgeSize, height: badgeSize, alignment: Alignment.center,
         decoration: BoxDecoration(shape: BoxShape.circle, color: theme.isPaper ? theme.brand : libColor),
@@ -430,7 +448,9 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
                             clipBehavior: Clip.antiAlias,
                             child: i == active
                                 ? AnimatedBuilder(
-                                    animation: _cycleController,
+                                    animation: widget.pauseAutoRotate == null
+                                        ? _cycleController
+                                        : Listenable.merge([_cycleController, widget.pauseAutoRotate!]),
                                     builder: (_, _) => Align(
                                       alignment: Alignment.centerLeft,
                                       child: FractionallySizedBox(
@@ -459,19 +479,21 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
     return h == 0 ? '$m 分钟' : (m == 0 ? '$h 小时' : '$h 小时 $m 分');
   }
 
-  static (String?, EvIconData, Color) _libraryMeta(MediaCard card, EvTheme theme) =>
-      switch (card.libraryId?.toLowerCase()) {
-        'anime' || 'nav_anime' => ('番剧', EvIcons.navAnime, theme.anime),
-        'movie' || 'movies' || 'nav_movie' => ('电影', EvIcons.navMovie, theme.movie),
-        'tv' || 'series' || 'nav_tv' => ('剧集', EvIcons.navTv, theme.tv),
-        'doc' || 'documentary' || 'nav_doc' => ('纪录片', EvIcons.navDoc, theme.doc),
-        'box' || 'boxset' || 'collections' || 'nav_box' => ('合集', EvIcons.navBox, theme.box),
-        _ => switch (card.kind) {
-          MediaKind.movie => (null, EvIcons.navMovie, theme.movie),
-          MediaKind.series || MediaKind.episode => (null, EvIcons.navTv, theme.tv),
-          MediaKind.collection => (null, EvIcons.navBox, theme.box),
-        },
-      };
+  static (String?, EvIconData, Color) _libraryMeta(BuildContext context, MediaCard card, EvTheme theme) {
+    final libId = card.libraryId;
+    if (libId != null && libId.isNotEmpty) {
+      for (final z in EvScope.maybeOf(context)?.shell.zones ?? const <ZoneTile>[]) {
+        if (z.id == libId) {
+          return (z.name, EvIcons.byKey(z.iconKey), theme.zoneColor(z.colorSlot));
+        }
+      }
+    }
+    return switch (card.kind) {
+      MediaKind.movie => (null, EvIcons.navMovie, theme.movie),
+      MediaKind.series || MediaKind.episode => (null, EvIcons.navTv, theme.tv),
+      MediaKind.collection => (null, EvIcons.navBox, theme.box),
+    };
+  }
 }
 
 class _HeroRingPainter extends CustomPainter {

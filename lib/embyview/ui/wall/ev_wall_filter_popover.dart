@@ -45,64 +45,76 @@ class EvWallChip extends StatefulWidget {
 }
 
 class _EvWallChipState extends State<EvWallChip> {
-  bool _hovered = false, _pressed = false;
+  bool _hovered = false, _focused = false, _pressed = false;
+  bool get _hi => _hovered || _focused;
 
   @override
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context);
     final bg = widget.selected
         ? theme.indBg
-        : _hovered
+        : _hi
         ? theme.fill2
         : (theme.isPaper ? const Color(0xFFFFFFFF) : theme.fill);
-    final fg = widget.selected ? theme.indFg : (_hovered ? theme.ink : theme.ink2);
+    final fg = widget.selected ? theme.indFg : (_hi ? theme.ink : theme.ink2);
 
     return Semantics(
-      button: true, selected: widget.selected, label: widget.label,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hovered = true),
-        onExit: (_) => setState(() { _hovered = false; _pressed = false; }),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (_) => setState(() => _pressed = true),
-          onTapUp: (_) => setState(() => _pressed = false),
-          onTapCancel: () => setState(() => _pressed = false),
-          onTap: widget.onTap,
-          child: AnimatedScale(
-            scale: _pressed ? 0.95 : 1.0,
-            duration: const Duration(milliseconds: 300), curve: EvCurves.spring,
-            child: Opacity(
-              opacity: widget.dimmed && !widget.selected ? 0.40 : 1.0,
-              child: AnimatedContainer(
-                duration: EvDurations.fast, curve: EvCurves.soft,
-                height: scale.rem(widget.compact ? 2.0 : 2.375),
-                padding: EdgeInsets.symmetric(horizontal: scale.rem(widget.compact ? 0.75 : 1.0625)),
-                decoration: BoxDecoration(
-                  color: bg, borderRadius: BorderRadius.circular(999),
-                  border: widget.selected ? null : Border.all(color: theme.line, width: 1),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      widget.label, maxLines: 1,
-                      style: theme.bodyStyle(scale.font(widget.compact ? 0.875 : 0.9375), fontWeight: FontWeight.w500, color: fg),
-                    ),
-                    if (widget.count != null) ...[
-                      SizedBox(width: scale.rem(0.375)),
+      button: true, selected: widget.selected, focused: _focused, label: widget.label,
+      child: Focus(
+        canRequestFocus: widget.onTap != null,
+        onFocusChange: (v) => setState(() => _focused = v),
+        onKeyEvent: (_, e) {
+          if (widget.onTap == null || !evIsActivateKey(e)) return KeyEventResult.ignored;
+          widget.onTap!();
+          return KeyEventResult.handled;
+        },
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() { _hovered = false; _pressed = false; }),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (_) => setState(() => _pressed = true),
+            onTapUp: (_) => setState(() => _pressed = false),
+            onTapCancel: () => setState(() => _pressed = false),
+            onTap: widget.onTap,
+            child: AnimatedScale(
+              scale: _pressed ? 0.95 : 1.0,
+              duration: const Duration(milliseconds: 300), curve: EvCurves.spring,
+              child: Opacity(
+                opacity: widget.dimmed && !widget.selected ? 0.40 : 1.0,
+                child: AnimatedContainer(
+                  duration: EvDurations.fast, curve: EvCurves.soft,
+                  height: scale.rem(widget.compact ? 2.0 : 2.375),
+                  padding: EdgeInsets.symmetric(horizontal: scale.rem(widget.compact ? 0.75 : 1.0625)),
+                  decoration: BoxDecoration(
+                    color: bg, borderRadius: BorderRadius.circular(999),
+                    border: _focused
+                        ? Border.all(color: theme.focusColor, width: 1.5)
+                        : (widget.selected ? null : Border.all(color: theme.line, width: 1)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                       Text(
-                        '${widget.count}',
-                        style: theme
-                            .bodyStyle(scale.font(0.8125), fontWeight: FontWeight.w500, color: fg.withValues(alpha: fg.a * 0.55))
-                            .copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
+                        widget.label, maxLines: 1,
+                        style: theme.bodyStyle(scale.font(widget.compact ? 0.875 : 0.9375), fontWeight: FontWeight.w500, color: fg),
                       ),
+                      if (widget.count != null) ...[
+                        SizedBox(width: scale.rem(0.375)),
+                        Text(
+                          '${widget.count}',
+                          style: theme
+                              .bodyStyle(scale.font(0.8125), fontWeight: FontWeight.w500, color: fg.withValues(alpha: fg.a * 0.55))
+                              .copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
+                        ),
+                      ],
+                      if (widget.removable) ...[
+                        SizedBox(width: scale.rem(0.375)),
+                        EvIcon(EvIcons.x, size: scale.rem(0.75), color: fg.withValues(alpha: fg.a * 0.65)),
+                      ],
                     ],
-                    if (widget.removable) ...[
-                      SizedBox(width: scale.rem(0.375)),
-                      EvIcon(EvIcons.x, size: scale.rem(0.75), color: fg.withValues(alpha: fg.a * 0.65)),
-                    ],
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -236,7 +248,7 @@ class EvWallFilterPopover extends StatelessWidget {
                   EvButton.ghost(key: const Key('ev_wall_popover_reset'), small: true, glass: false, label: '清除', onPressed: onReset),
                   EvButton.primary(
                     key: const Key('ev_wall_popover_close'), small: true,
-                    label: totalCount != null ? '显示 $totalCount $unit' : '完成',
+                    label: totalCount != null ? '显示 ${evFormatCount(totalCount!)} $unit' : '完成',
                     onPressed: onClose,
                   ),
                 ],

@@ -20,6 +20,9 @@ class EvHomePage extends StatefulWidget {
 
 class _EvHomePageState extends State<EvHomePage> {
   final ScrollController _scrollController = ScrollController();
+  final ValueNotifier<MediaCard?> _previewCard = ValueNotifier<MediaCard?>(null);
+  final ValueNotifier<bool> _hoverPaused = ValueNotifier<bool>(false);
+
   EvScope? _scope;
   EmbyViewData? _attachedData;
   String? _attachedSessionId;
@@ -29,7 +32,6 @@ class _EvHomePageState extends State<EvHomePage> {
 
   HomeData? _home;
   HomeRecommendation? _activeHero;
-  MediaCard? _previewCard;
   String? _hoveredCardId;
   bool _loading = true;
   Object? _error;
@@ -48,8 +50,19 @@ class _EvHomePageState extends State<EvHomePage> {
     final changed = _scope == null || !identical(_attachedData, scope.services.data) || _attachedSessionId != scope.services.sessionId;
     _scope = scope;
     if (!changed) return;
+
+    if (_hoveredCardId != null) {
+      scope.immersion.onCardHoverEnd(cardId: _hoveredCardId);
+      _hoveredCardId = null;
+    }
+    _hoverPaused.value = false;
+    _previewCard.value = null;
     _attachedData = scope.services.data;
     _attachedSessionId = scope.services.sessionId;
+    _home = null;
+    _activeHero = null;
+    _error = null;
+    _loading = scope.services.data != null;
     _attachPreferences(scope.services.preferences);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -84,16 +97,20 @@ class _EvHomePageState extends State<EvHomePage> {
 
   Future<void> _loadHome() async {
     final scope = _scope, data = scope?.services.data;
+    final token = ++_loadToken;
     if (scope == null || data == null) {
-      if (mounted) setState(() { _loading = false; _home = null; });
+      if (mounted) {
+        _previewCard.value = null;
+        setState(() { _loading = false; _home = null; _activeHero = null; _error = null; });
+      }
       return;
     }
-    final token = ++_loadToken;
     if (_home == null && mounted) setState(() { _loading = true; _error = null; });
     try {
       final result = await data.home(seriesSort: _seriesSort);
       if (!mounted || token != _loadToken) return;
       final initialHero = result.recommendations.firstOrNull;
+      _previewCard.value = null;
       setState(() { _home = result; _activeHero = initialHero; _loading = false; _error = null; });
       if (initialHero != null) scope.stage.setBaseBackdrop(initialHero.card.art.stage);
     } catch (e) {
@@ -116,7 +133,7 @@ class _EvHomePageState extends State<EvHomePage> {
     final vh = pos.hasViewportDimension && pos.viewportDimension > 0 ? pos.viewportDimension : 900.0;
     scope.shell.setScrollOffset(pos.pixels);
     scope.stage.setScrollProgress((pos.pixels / (vh * 0.5)).clamp(0.0, 1.0));
-    if (!_isHeroVisible && _previewCard != null) setState(() => _previewCard = null);
+    if (!_isHeroVisible && _previewCard.value != null) _previewCard.value = null;
   }
 
   void _onCardInteraction(MediaCard card, bool active) {
@@ -124,17 +141,21 @@ class _EvHomePageState extends State<EvHomePage> {
     if (scope == null) return;
     if (active) {
       _hoveredCardId = card.id;
+      _hoverPaused.value = true;
+      final scrolledDown = !_isHeroVisible;
       scope.immersion.onCardHoverStart(
-        card, scrolledDown: !_isHeroVisible,
+        card,
+        scrolledDown: scrolledDown,
+        allowVideo: !(scrolledDown && EvTheme.of(context).isPaper),
         onBackdropReady: () {
-          if (mounted && _hoveredCardId == card.id && _isHeroVisible) setState(() => _previewCard = card);
+          if (mounted && _hoveredCardId == card.id && _isHeroVisible) _previewCard.value = card;
         },
       );
-      if (mounted) setState(() {});
     } else if (_hoveredCardId == card.id) {
       _hoveredCardId = null;
+      _hoverPaused.value = false;
       scope.immersion.onCardHoverEnd(cardId: card.id);
-      if (mounted) setState(() => _previewCard = null);
+      if (_previewCard.value != null) _previewCard.value = null;
     }
   }
 
@@ -148,72 +169,138 @@ class _EvHomePageState extends State<EvHomePage> {
     unawaited(_prefsSub?.cancel());
     if (_hoveredCardId != null) _scope?.immersion.onCardHoverEnd(cardId: _hoveredCardId);
     _scrollController..removeListener(_onScroll)..dispose();
+    _previewCard.dispose();
+    _hoverPaused.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context), home = _home;
-    return ScrollConfiguration(
-      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-      child: SingleChildScrollView(
-        key: const Key('ev_home_scroller'),
-        controller: _scrollController,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (_loading && home == null)
-              SizedBox(height: math.max(0.0, scale.vh(100) - scale.peek))
-            else
-              EvHero(
-                recommendations: home?.recommendations ?? const [],
-                previewCard: _previewCard,
-                defaultReasonLabel: '今日推荐',
-                enableAutoRotate: widget.enableAnimations && _hoveredCardId == null,
-                onActiveChanged: (rec) {
-                  _activeHero = rec;
-                  _scope?.stage.setBaseBackdrop(rec.card.art.stage);
-                },
-                onDetail: () {
-                  final card = _previewCard ?? _activeHero?.card;
-                  if (card != null) _openDetail(card);
-                },
-                onPlay: (rec, origin) => _play(rec.resume?.target ?? PlayTarget(itemId: rec.card.id), rec.card.art, origin: origin),
-              ),
-            Padding(
-              padding: EdgeInsets.only(bottom: scale.rem(6.0)),
-              child: _loading && home == null
-                  ? const Column(
-                      key: Key('ev_home_skeletons'),
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        EvShelfSkeleton(style: EvCardStyle.landscape, count: 5),
-                        EvShelfSkeleton(style: EvCardStyle.poster, count: 9),
-                        EvShelfSkeleton(style: EvCardStyle.poster, count: 9),
-                      ],
-                    )
-                  : _error != null && home == null
-                  ? Padding(
-                      key: const Key('ev_home_error'),
-                      padding: EdgeInsets.symmetric(horizontal: scale.gutter, vertical: scale.rem(4.0)),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('无法加载首页内容', style: theme.shelfStyle(scale.font(1.5))),
-                          SizedBox(height: scale.rem(0.75)),
-                          Text(_error.toString(), style: theme.bodyStyle(scale.font(0.9375), color: theme.ink3), textAlign: TextAlign.center),
-                          SizedBox(height: scale.rem(1.5)),
-                          EvButton.ghost(label: '重试', small: true, onPressed: () => unawaited(_loadHome())),
-                        ],
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ScrollConfiguration(
+          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+          child: SingleChildScrollView(
+            key: const Key('ev_home_scroller'),
+            controller: _scrollController,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_error != null && home == null)
+                  SizedBox(height: math.max(0.0, scale.vh(100)), child: Center(child: _buildError(theme, scale)))
+                else if (!_loading && home == null)
+                  SizedBox(height: math.max(0.0, scale.vh(100)), child: Center(child: _buildEmpty(theme, scale)))
+                else ...[
+                  if (_loading && home == null)
+                    SizedBox(height: math.max(0.0, scale.vh(100) - scale.peek))
+                  else
+                    ValueListenableBuilder<MediaCard?>(
+                      valueListenable: _previewCard,
+                      builder: (_, preview, _) => EvHero(
+                        recommendations: home?.recommendations ?? const [],
+                        previewCard: preview,
+                        defaultReasonLabel: '今日推荐',
+                        enableAutoRotate: widget.enableAnimations,
+                        pauseAutoRotate: _hoverPaused,
+                        onActiveChanged: (rec) {
+                          _activeHero = rec;
+                          _scope?.stage.setBaseBackdrop(rec.card.art.stage);
+                        },
+                        onDetail: () {
+                          final card = _previewCard.value ?? _activeHero?.card;
+                          if (card != null) _openDetail(card);
+                        },
+                        onPlay: (rec, origin) => _play(rec.resume?.target ?? PlayTarget(itemId: rec.card.id), rec.card.art, origin: origin),
                       ),
-                    )
-                  : _buildSections(theme, home!),
+                    ),
+                  Padding(
+                    padding: EdgeInsets.only(bottom: scale.rem(6.0)),
+                    child: _loading && home == null
+                        ? const Column(
+                            key: Key('ev_home_skeletons'),
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              EvShelfSkeleton(style: EvCardStyle.landscape, count: 5),
+                              EvShelfSkeleton(style: EvCardStyle.poster, count: 9),
+                              EvShelfSkeleton(style: EvCardStyle.poster, count: 9),
+                            ],
+                          )
+                        : home != null
+                        ? _buildSections(theme, home)
+                        : const SizedBox.shrink(),
+                  ),
+                ],
+              ],
             ),
-          ],
+          ),
         ),
-      ),
+        if (_error != null && home != null)
+          Positioned(
+            left: scale.gutter,
+            right: scale.gutter,
+            top: scale.rem(5.25),
+            child: _buildErrorBanner(theme, scale),
+          ),
+      ],
     );
   }
+
+  Widget _buildError(EvTheme theme, EvScale scale) => Padding(
+    key: const Key('ev_home_error'),
+    padding: EdgeInsets.symmetric(horizontal: scale.gutter, vertical: scale.rem(4.0)),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('无法加载首页内容', style: theme.shelfStyle(scale.font(1.5))),
+        SizedBox(height: scale.rem(0.75)),
+        Text(_error.toString(), style: theme.bodyStyle(scale.font(0.9375), color: theme.ink3), textAlign: TextAlign.center),
+        SizedBox(height: scale.rem(1.5)),
+        EvButton.ghost(key: const Key('ev_home_retry_btn'), label: '重试', small: true, onPressed: () => unawaited(_loadHome())),
+      ],
+    ),
+  );
+
+  Widget _buildEmpty(EvTheme theme, EvScale scale) => Padding(
+    key: const Key('ev_home_empty'),
+    padding: EdgeInsets.symmetric(horizontal: scale.gutter, vertical: scale.rem(4.0)),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('暂未连接到媒体库', style: theme.shelfStyle(scale.font(1.5))),
+        SizedBox(height: scale.rem(0.75)),
+        Text('登录并选择服务器后将展示首页推荐与片库', style: theme.bodyStyle(scale.font(0.9375), color: theme.ink3), textAlign: TextAlign.center),
+      ],
+    ),
+  );
+
+  Widget _buildErrorBanner(EvTheme theme, EvScale scale) => EvGlass(
+    key: const Key('ev_home_error_banner'),
+    solid: true,
+    borderRadius: BorderRadius.circular(scale.rem(0.875)),
+    padding: EdgeInsets.symmetric(horizontal: scale.rem(1.0), vertical: scale.rem(0.625)),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(
+            '刷新首页失败：$_error',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.bodyStyle(scale.font(0.9375), color: theme.ink),
+          ),
+        ),
+        SizedBox(width: scale.rem(0.75)),
+        EvButton.ghost(
+          key: const Key('ev_home_error_banner_retry'),
+          label: '重试',
+          small: true,
+          glass: false,
+          onPressed: () => unawaited(_loadHome()),
+        ),
+      ],
+    ),
+  );
 
   Widget _buildSections(EvTheme theme, HomeData home) {
     final sortLabel = switch (_seriesSort) {

@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
@@ -155,16 +154,13 @@ class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderSta
       padding: EdgeInsets.fromLTRB(scale.gutter, scale.rem(1.0), scale.gutter, scale.rem(2.75)),
       child: Semantics(
         button: true,
-        label: '${widget.title.replaceAll('\n', '')}，看看这 ${widget.spread.total} 部',
+        label: '${widget.title.replaceAll('\n', '')}，看看这 ${evFormatCount(widget.spread.total)} 部',
         child: Focus(
           onFocusChange: (v) => setState(() => _focused = v),
           onKeyEvent: (_, e) {
-            if (e is KeyDownEvent &&
-                (e.logicalKey == LogicalKeyboardKey.enter || e.logicalKey == LogicalKeyboardKey.numpadEnter || e.logicalKey == LogicalKeyboardKey.space)) {
-              widget.onTap?.call();
-              return KeyEventResult.handled;
-            }
-            return KeyEventResult.ignored;
+            if (!evIsActivateKey(e)) return KeyEventResult.ignored;
+            widget.onTap?.call();
+            return KeyEventResult.handled;
           },
           child: MouseRegion(
             cursor: widget.onTap != null ? SystemMouseCursors.click : SystemMouseCursors.basic,
@@ -221,7 +217,7 @@ class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderSta
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('看看这 ${widget.spread.total} 部', style: theme.bodyStyle(scale.font(0.9375), fontWeight: FontWeight.w600, color: theme.ink)),
+              Text('看看这 ${evFormatCount(widget.spread.total)} 部', style: theme.bodyStyle(scale.font(0.9375), fontWeight: FontWeight.w600, color: theme.ink)),
               SizedBox(width: scale.rem(0.375)),
               TweenAnimationBuilder<double>(
                 tween: Tween<double>(end: _highlighted ? scale.rem(0.25) : 0.0),

@@ -129,6 +129,7 @@ class _FakeHomeData implements EmbyViewData {
 
   final Future<HomeData> Function(ShelfSort sort) builder;
   final List<ShelfSort> homeCalls = [];
+  final List<String> themeMediaCalls = [];
 
   @override
   Future<HomeData> home({required ShelfSort seriesSort}) {
@@ -140,10 +141,32 @@ class _FakeHomeData implements EmbyViewData {
   Future<List<ZoneTile>> zones() async => (await builder(ShelfSort.added)).zones;
 
   @override
-  Future<ThemeMedia> themeMedia(String itemId) async => const ThemeMedia();
+  Future<ThemeMedia> themeMedia(String itemId) async {
+    themeMediaCalls.add(itemId);
+    return const ThemeMedia();
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeImmersionPlayback implements ImmersionPlayback {
+  final _changes = StreamController<ImmersionSnapshot>.broadcast();
+  @override
+  ImmersionSnapshot get snapshot => const ImmersionSnapshot();
+  @override
+  Stream<ImmersionSnapshot> get changes => _changes.stream;
+  @override
+  Widget videoSurface({Key? key}) => ColoredBox(key: key, color: const Color(0xFF000000));
+  @override
+  Future<void> showMutedVideo(PreviewRef? video) async {}
+  @override
+  Future<void> playTheme(PreviewRef? song) async {}
+  @override
+  Future<void> setThemeMuted(bool muted) async {}
+  @override
+  Future<void> stop() async {}
+  Future<void> close() => _changes.close();
 }
 
 MediaCard _makeCard({
@@ -931,6 +954,191 @@ void main() {
         expect(find.byKey(const Key('ev_home_section_series')), findsNothing);
         expect(find.byKey(const Key('ev_home_section_collections')), findsNothing);
         expect(find.byKey(const Key('ev_home_section_docs')), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'handles null data safely, resolves GUID zone metadata, avoids full-page hover rebuild, exposes refresh error banner, clears on session switch, and suppresses paper scrolled video',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final prefs = _FakePreferences(const LocalPreferences(theme: ThemeMode.paper, backgroundVideo: true));
+        final accounts = _FakeAccounts();
+        final playback = _FakePlayback();
+        final immersionBackend = _FakeImmersionPlayback();
+        final stage = EvStageController();
+        final shell = EvShellController(
+          zones: const [
+            ZoneTile(id: 'lib-guid-anime-01', name: '新番馆', iconKey: 'nav_anime', colorSlot: 0, total: 20, unit: '部'),
+          ],
+        );
+
+        // 1. services.data == null -> renders safe empty state without crashing on home!.
+        final nullServices = EmbyViewServices(
+          preferences: prefs,
+          accounts: accounts,
+          sessionId: 'sess-empty',
+          data: null,
+          playback: playback,
+          immersion: immersionBackend,
+        );
+        final immersion = Immersion(stage: stage, services: nullServices);
+        addTearDown(() async {
+          immersion.dispose();
+          stage.dispose();
+          shell.dispose();
+          await immersionBackend.close();
+          await prefs.close();
+          await accounts.close();
+        });
+
+        Widget buildWith(EmbyViewServices services) => MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(size: Size(1440, 900)),
+            child: EvThemeScope(
+              preferences: prefs,
+              child: EvScope(
+                services: services,
+                stage: stage,
+                immersion: immersion,
+                shell: shell,
+                child: Scaffold(
+                  body: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      EvStage(controller: stage, immersion: immersion, enableMotion: false),
+                      const EvHomePage(enableAnimations: false),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(buildWith(nullServices));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_home_empty')), findsOneWidget);
+        expect(tester.takeException(), isNull);
+
+        // 2. Bind session 1 with real GUID libraryId in hero recommendation.
+        var failNext = false;
+        final data1 = _FakeHomeData(
+          builder: (sort) async {
+            if (failNext) throw Exception('refresh failed');
+            return HomeData(
+              recommendations: [
+                HomeRecommendation(
+                  card: _makeCard(
+                    id: 'guid_hero',
+                    title: 'GUID 番剧推荐',
+                    kind: MediaKind.series,
+                    libraryId: 'lib-guid-anime-01',
+                  ),
+                  reason: RecommendationReason.daily,
+                ),
+              ],
+              recentMovies: HomeShelf(
+                id: 'recent',
+                title: '最近添加',
+                items: [_makeCard(id: 'm1', title: '电影甲'), _makeCard(id: 'm2', title: '电影乙')],
+              ),
+              series: HomeShelf(
+                id: 'series',
+                title: '剧集',
+                items: [_makeCard(id: 's1', title: '剧集甲', kind: MediaKind.series)],
+              ),
+            );
+          },
+        );
+        final services1 = EmbyViewServices(
+          preferences: prefs,
+          accounts: accounts,
+          sessionId: 'sess-1',
+          data: data1,
+          playback: playback,
+          immersion: immersionBackend,
+        );
+        unawaited(immersion.rebind(services1));
+        await tester.pumpWidget(buildWith(services1));
+        await tester.pumpAndSettle();
+
+        // Hero resolves library label from shell.zones by GUID.
+        expect(find.descendant(of: find.byKey(const Key('ev_hero_reason')), matching: find.text('新番馆')), findsOneWidget);
+
+        // 3. Hovering a card does not trigger full-page EvHomePage rebuild.
+        var homeRebuilds = 0;
+        final prevHook = debugOnRebuildDirtyWidget;
+        debugOnRebuildDirtyWidget = (Element e, bool builtOnce) {
+          prevHook?.call(e, builtOnce);
+          if (e.widget is EvHomePage) homeRebuilds++;
+        };
+        addTearDown(() => debugOnRebuildDirtyWidget = prevHook);
+
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: Offset.zero);
+        addTearDown(mouse.removePointer);
+
+        final recentCard = find.descendant(of: find.byKey(const Key('ev_home_section_recent')), matching: find.byType(EvCard)).first;
+        await mouse.moveTo(tester.getCenter(recentCard));
+        await tester.pump(const Duration(milliseconds: 450));
+        await mouse.moveTo(const Offset(10, 10));
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(homeRebuilds, 0);
+
+        // 4. Paper theme scrolled down hover does not request background video (allowVideo: false).
+        await tester.drag(find.byKey(const Key('ev_home_scroller')), const Offset(0, -500));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(recentCard);
+        await tester.pumpAndSettle();
+        await mouse.moveTo(tester.getCenter(recentCard));
+        await tester.pump(const Duration(seconds: 2));
+        expect(data1.themeMediaCalls, isEmpty);
+        await mouse.moveTo(const Offset(10, 10));
+        await tester.pump(const Duration(milliseconds: 50));
+
+        // 5. Refresh failure keeps existing sections and shows retryable error banner.
+        failNext = true;
+        await prefs.update(const LocalPreferences(theme: ThemeMode.paper, seriesSort: ShelfSort.score));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_home_sections')), findsOneWidget);
+        expect(find.byKey(const Key('ev_home_error_banner')), findsOneWidget);
+
+        failNext = false;
+        await tester.tap(find.byKey(const Key('ev_home_error_banner_retry')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_home_error_banner')), findsNothing);
+
+        // 6. Switching sessionId clears previous _home and enters loading skeletons immediately.
+        final sess2Completer = Completer<HomeData>();
+        final data2 = _FakeHomeData(builder: (_) => sess2Completer.future);
+        final services2 = EmbyViewServices(
+          preferences: prefs,
+          accounts: accounts,
+          sessionId: 'sess-2',
+          data: data2,
+          playback: playback,
+          immersion: immersionBackend,
+        );
+        unawaited(immersion.rebind(services2));
+        await tester.pumpWidget(buildWith(services2));
+        await tester.pump();
+        expect(find.byKey(const Key('ev_home_skeletons')), findsOneWidget);
+        expect(find.byKey(const Key('ev_home_sections')), findsNothing);
+
+        sess2Completer.complete(
+          HomeData(
+            recommendations: [
+              HomeRecommendation(card: _makeCard(id: 's2_h', title: '新会话推荐'), reason: RecommendationReason.daily),
+            ],
+            recentMovies: HomeShelf(id: 'r2', title: '电影', items: [_makeCard(id: 's2_m', title: '新会话电影')]),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('新会话电影'), findsOneWidget);
       },
     );
   });

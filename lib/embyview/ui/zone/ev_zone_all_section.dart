@@ -1,19 +1,9 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
-
-bool _isActivateKey(KeyEvent e) =>
-    e is KeyDownEvent &&
-    (e.logicalKey == LogicalKeyboardKey.enter ||
-        e.logicalKey == LogicalKeyboardKey.numpadEnter ||
-        e.logicalKey == LogicalKeyboardKey.space);
-
-String _formatCount(int value) =>
-    value.toString().replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (_) => ',');
 
 /// Bottom "全部<分区名>" section mirroring `.genres`, `.chip`, and `.wallcta`
 /// from `.spec/mockups/proto.css` and `proto.js`.
@@ -103,7 +93,7 @@ class _EvGenreChipState extends State<_EvGenreChip> {
       child: Focus(
         onFocusChange: (v) => setState(() => _focused = v),
         onKeyEvent: (_, e) {
-          if (!_isActivateKey(e)) return KeyEventResult.ignored;
+          if (!evIsActivateKey(e)) return KeyEventResult.ignored;
           widget.onTap();
           return KeyEventResult.handled;
         },
@@ -181,11 +171,11 @@ class _EvWallCtaCardState extends State<_EvWallCtaCard> {
     return Semantics(
       button: true,
       focused: _focused,
-      label: '浏览全部 ${_formatCount(widget.zone.total)} ${widget.zone.unit}',
+      label: '浏览全部 ${evFormatCount(widget.zone.total)} ${widget.zone.unit}',
       child: Focus(
         onFocusChange: (v) => setState(() => _focused = v),
         onKeyEvent: (_, e) {
-          if (!_isActivateKey(e)) return KeyEventResult.ignored;
+          if (!evIsActivateKey(e)) return KeyEventResult.ignored;
           widget.onTap();
           return KeyEventResult.handled;
         },
@@ -236,7 +226,7 @@ class _EvWallCtaCardState extends State<_EvWallCtaCard> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            '浏览全部 ${_formatCount(widget.zone.total)} ${widget.zone.unit}',
+                            '浏览全部 ${evFormatCount(widget.zone.total)} ${widget.zone.unit}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.bodyStyle(scale.font(1.25), fontWeight: FontWeight.w700, color: theme.ink),

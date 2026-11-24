@@ -20,6 +20,8 @@ class EvZonePage extends StatefulWidget {
 
 class _EvZonePageState extends State<EvZonePage> {
   final ScrollController _scrollController = ScrollController();
+  final ValueNotifier<MediaCard?> _previewCard = ValueNotifier<MediaCard?>(null);
+  final ValueNotifier<bool> _hoverPaused = ValueNotifier<bool>(false);
 
   EvScope? _scope;
   EmbyViewData? _attachedData;
@@ -29,10 +31,10 @@ class _EvZonePageState extends State<EvZonePage> {
 
   ZoneData? _zoneData;
   HomeRecommendation? _activeHero;
-  MediaCard? _previewCard;
   String? _hoveredCardId;
   bool _loading = true, _openingRandom = false;
   Object? _error;
+  Object? _randomError;
   int _loadToken = 0;
 
   EvChromeTitlePlate? _appliedTitlePlate;
@@ -54,9 +56,16 @@ class _EvZonePageState extends State<EvZonePage> {
     _scope = scope;
 
     if (changed) {
+      if (_hoveredCardId != null) {
+        scope.immersion.onCardHoverEnd(cardId: _hoveredCardId);
+        _hoveredCardId = null;
+      }
+      _hoverPaused.value = false;
+      _previewCard.value = null;
       _attachedData = scope.services.data;
       _attachedSessionId = scope.services.sessionId;
-      _zoneData = _activeHero = _previewCard = _hoveredCardId = null;
+      _zoneData = _activeHero = _error = _randomError = null;
+      _loading = scope.services.data != null;
       _attachPreferences(scope.services.preferences);
       _resetStageAndScroll(scope);
       unawaited(_loadZone());
@@ -83,8 +92,10 @@ class _EvZonePageState extends State<EvZonePage> {
       _scope?.immersion.onCardHoverEnd(cardId: _hoveredCardId);
       _hoveredCardId = null;
     }
-    _zoneData = _activeHero = _previewCard = _error = null;
-    _loading = true;
+    _hoverPaused.value = false;
+    _previewCard.value = null;
+    _zoneData = _activeHero = _error = _randomError = null;
+    _loading = _attachedData != null;
     if (_scope != null) {
       _zonePrefSig = _prefSignature(_scope!.services.preferences.current.zones, widget.zoneId);
       _resetStageAndScroll(_scope!);
@@ -126,13 +137,25 @@ class _EvZonePageState extends State<EvZonePage> {
     return '';
   }
 
+  void _clearOwnedChrome(EvScope scope) {
+    final plate = _appliedTitlePlate;
+    _appliedTitlePlate = null;
+    if (plate != null && scope.shell.titlePlate == plate) {
+      scope.shell.updateChrome(clearTitlePlate: true, rightActions: const []);
+    }
+  }
+
   Future<void> _loadZone() async {
     final scope = _scope, dataService = scope?.services.data, expectedZoneId = widget.zoneId;
+    final token = ++_loadToken;
     if (scope == null || dataService == null) {
-      if (mounted) setState(() { _loading = false; _zoneData = null; });
+      if (scope != null) _clearOwnedChrome(scope);
+      if (mounted) {
+        _previewCard.value = null;
+        setState(() { _loading = false; _zoneData = null; _activeHero = null; _error = null; _randomError = null; });
+      }
       return;
     }
-    final token = ++_loadToken;
     if (_zoneData == null && mounted) setState(() { _loading = true; _error = null; });
 
     try {
@@ -147,17 +170,14 @@ class _EvZonePageState extends State<EvZonePage> {
       );
       _appliedTitlePlate = plate;
       _appliedAmbientColor = ambient;
+      _previewCard.value = null;
 
-      setState(() { _zoneData = result; _activeHero = initialHero; _previewCard = null; _loading = false; _error = null; });
+      setState(() { _zoneData = result; _activeHero = initialHero; _loading = false; _error = null; _randomError = null; });
       scope.stage..setMode(EvStageMode.hero)..setAmbientColor(ambient)..setBaseBackdrop(initialHero?.card.art.stage);
       scope.shell.updateChrome(titlePlate: plate, rightActions: _buildRightActions(result));
     } catch (e) {
       if (!mounted || token != _loadToken || widget.zoneId != expectedZoneId) return;
-      final plate = _appliedTitlePlate;
-      _appliedTitlePlate = null;
-      if (plate != null && scope.shell.titlePlate == plate) {
-        scope.shell.updateChrome(clearTitlePlate: true, rightActions: const []);
-      }
+      if (_zoneData == null) _clearOwnedChrome(scope);
       setState(() { _error = e; _loading = false; });
     }
   }
@@ -172,18 +192,34 @@ class _EvZonePageState extends State<EvZonePage> {
 
   Future<void> _openRandom() async {
     if (_openingRandom) return;
-    final scope = _scope, dataService = scope?.services.data, expectedZoneId = widget.zoneId;
+    final scope = _scope, dataService = scope?.services.data;
+    final expectedZoneId = widget.zoneId, expectedSessionId = _attachedSessionId;
     if (scope == null || dataService == null) return;
     _openingRandom = true;
+    if (_randomError != null && mounted) setState(() => _randomError = null);
     try {
       final card = await dataService.randomInZone(expectedZoneId);
-      if (!mounted || card == null || widget.zoneId != expectedZoneId) return;
+      if (!mounted ||
+          widget.zoneId != expectedZoneId ||
+          !identical(_attachedData, dataService) ||
+          _attachedSessionId != expectedSessionId ||
+          card == null) {
+        return;
+      }
       if (scope.shell.onOpenDetail != null) {
         scope.shell.onOpenDetail!(card.id);
       } else {
         unawaited(EvPlayer.open(context, PlayTarget(itemId: card.id), art: card.art));
       }
-    } catch (_) {} finally {
+    } catch (e) {
+      if (!mounted ||
+          widget.zoneId != expectedZoneId ||
+          !identical(_attachedData, dataService) ||
+          _attachedSessionId != expectedSessionId) {
+        return;
+      }
+      setState(() => _randomError = e);
+    } finally {
       _openingRandom = false;
     }
   }
@@ -202,7 +238,7 @@ class _EvZonePageState extends State<EvZonePage> {
     final vh = pos.hasViewportDimension && pos.viewportDimension > 0 ? pos.viewportDimension : 900.0;
     scope.shell.setScrollOffset(pos.pixels);
     scope.stage.setScrollProgress((pos.pixels / (vh * 0.5)).clamp(0.0, 1.0));
-    if (!_isHeroVisible && _previewCard != null) setState(() => _previewCard = null);
+    if (!_isHeroVisible && _previewCard.value != null) _previewCard.value = null;
   }
 
   void _onCardInteraction(MediaCard card, bool active) {
@@ -210,15 +246,21 @@ class _EvZonePageState extends State<EvZonePage> {
     if (scope == null) return;
     if (active) {
       _hoveredCardId = card.id;
+      _hoverPaused.value = true;
+      final scrolledDown = !_isHeroVisible;
       scope.immersion.onCardHoverStart(
-        card, scrolledDown: !_isHeroVisible,
-        onBackdropReady: () { if (mounted && _hoveredCardId == card.id && _isHeroVisible) setState(() => _previewCard = card); },
+        card,
+        scrolledDown: scrolledDown,
+        allowVideo: !(scrolledDown && EvTheme.of(context).isPaper),
+        onBackdropReady: () {
+          if (mounted && _hoveredCardId == card.id && _isHeroVisible) _previewCard.value = card;
+        },
       );
-      if (mounted) setState(() {});
     } else if (_hoveredCardId == card.id) {
       _hoveredCardId = null;
+      _hoverPaused.value = false;
       scope.immersion.onCardHoverEnd(cardId: card.id);
-      if (mounted) setState(() => _previewCard = null);
+      if (_previewCard.value != null) _previewCard.value = null;
     }
   }
 
@@ -230,6 +272,8 @@ class _EvZonePageState extends State<EvZonePage> {
     unawaited(_prefsSub?.cancel());
     if (_hoveredCardId != null) _scope?.immersion.onCardHoverEnd(cardId: _hoveredCardId);
     _scrollController..removeListener(_onScroll)..dispose();
+    _previewCard.dispose();
+    _hoverPaused.dispose();
     final scope = _scope, plate = _appliedTitlePlate, ambient = _appliedAmbientColor;
     if (scope != null && (plate != null || ambient != null)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -250,67 +294,109 @@ class _EvZonePageState extends State<EvZonePage> {
     return fallback != null ? [HomeRecommendation(card: fallback, reason: RecommendationReason.daily)] : const [];
   }
 
-  static bool _isAnime(ZoneTile z) => z.id.toLowerCase() == 'anime' || z.iconKey == 'nav_anime';
-  static bool _isDoc(ZoneTile z) => z.id.toLowerCase() == 'doc' || z.id.toLowerCase() == 'documentary' || z.iconKey == 'nav_doc';
-  static bool _isBox(ZoneTile z) => z.id.toLowerCase() == 'box' || z.id.toLowerCase() == 'boxset' || z.id.toLowerCase() == 'collections' || z.iconKey == 'nav_box';
+  static bool _isAnimeIcon(String iconKey) => switch (iconKey.toLowerCase()) {
+    'nav_anime' || 'anime' => true,
+    _ => false,
+  };
+
+  static bool _isDocIcon(String iconKey) => switch (iconKey.toLowerCase()) {
+    'nav_doc' || 'doc' || 'documentary' || 'documentaries' => true,
+    _ => false,
+  };
+
+  static bool _isBoxIcon(String iconKey) => switch (iconKey.toLowerCase()) {
+    'nav_box' || 'box' || 'boxset' || 'boxsets' || 'collections' => true,
+    _ => false,
+  };
 
   static EvCardStyle _cardStyleFor(ZoneTile zone, HomeShelf shelf) {
-    if (_isBox(zone) || (shelf.items.isNotEmpty && shelf.items.every((c) => c.kind == MediaKind.collection))) return EvCardStyle.collection;
-    return _isDoc(zone) ? EvCardStyle.landscape : EvCardStyle.poster;
+    if (_isBoxIcon(zone.iconKey) ||
+        (shelf.items.isNotEmpty && shelf.items.every((c) => c.kind == MediaKind.collection))) {
+      return EvCardStyle.collection;
+    }
+    return _isDocIcon(zone.iconKey) ? EvCardStyle.landscape : EvCardStyle.poster;
   }
 
-  static EvCardStyle _skeletonStyleFor(String zoneId) => switch (zoneId.toLowerCase()) {
-    'doc' || 'documentary' => EvCardStyle.landscape,
-    'box' || 'boxset' || 'collections' => EvCardStyle.collection,
-    _ => EvCardStyle.poster,
-  };
+  EvCardStyle _skeletonStyle() {
+    String? iconKey;
+    for (final z in _scope?.shell.zones ?? const <ZoneTile>[]) {
+      if (z.id == widget.zoneId) { iconKey = z.iconKey; break; }
+    }
+    if (iconKey == null) {
+      for (final z in _scope?.services.preferences.current.zones ?? const <ZonePreference>[]) {
+        if (z.id == widget.zoneId) { iconKey = z.iconKey; break; }
+      }
+    }
+    if (iconKey != null) {
+      if (_isBoxIcon(iconKey)) return EvCardStyle.collection;
+      if (_isDocIcon(iconKey)) return EvCardStyle.landscape;
+    }
+    return EvCardStyle.poster;
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context), data = _zoneData;
     final recs = data != null ? _resolveRecommendations(data) : const <HomeRecommendation>[];
+    final showBanner = (_error != null && data != null) || _randomError != null;
 
-    return ScrollConfiguration(
-      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-      child: SingleChildScrollView(
-        key: const Key('ev_zone_scroller'),
-        controller: _scrollController,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (_error != null && data == null)
-              SizedBox(height: math.max(0.0, scale.vh(100)), child: Center(child: _buildError(theme, scale)))
-            else ...[
-              if (_loading && data == null)
-                SizedBox(height: math.max(0.0, scale.vh(100) - scale.peek))
-              else
-                EvHero(
-                  key: ValueKey<String>('ev_zone_hero_${data?.zone.id ?? widget.zoneId}'),
-                  recommendations: recs,
-                  previewCard: _previewCard,
-                  defaultReasonLabel: data != null ? '${data.zone.name}精选' : '分区精选',
-                  enableAutoRotate: widget.enableAnimations && _hoveredCardId == null,
-                  onActiveChanged: (rec) { _activeHero = rec; _scope?.stage.setBaseBackdrop(rec.card.art.stage); },
-                  onDetail: () { final card = _previewCard ?? _activeHero?.card; if (card != null) _openDetail(card); },
-                  onPlay: (rec, origin) => _play(rec.resume?.target ?? PlayTarget(itemId: rec.card.id), rec.card.art, origin: origin),
-                ),
-              Padding(
-                padding: EdgeInsets.only(bottom: scale.rem(6.0)),
-                child: _loading && data == null
-                    ? _buildSkeletons()
-                    : data != null
-                    ? _buildSections(theme, scale, data)
-                    : const SizedBox.shrink(),
-              ),
-            ],
-          ],
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ScrollConfiguration(
+          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+          child: SingleChildScrollView(
+            key: const Key('ev_zone_scroller'),
+            controller: _scrollController,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_error != null && data == null)
+                  SizedBox(height: math.max(0.0, scale.vh(100)), child: Center(child: _buildError(theme, scale)))
+                else ...[
+                  if (_loading && data == null)
+                    SizedBox(height: math.max(0.0, scale.vh(100) - scale.peek))
+                  else
+                    ValueListenableBuilder<MediaCard?>(
+                      valueListenable: _previewCard,
+                      builder: (_, preview, _) => EvHero(
+                        key: ValueKey<String>('ev_zone_hero_${data?.zone.id ?? widget.zoneId}'),
+                        recommendations: recs,
+                        previewCard: preview,
+                        defaultReasonLabel: data != null ? '${data.zone.name}精选' : '分区精选',
+                        enableAutoRotate: widget.enableAnimations,
+                        pauseAutoRotate: _hoverPaused,
+                        onActiveChanged: (rec) { _activeHero = rec; _scope?.stage.setBaseBackdrop(rec.card.art.stage); },
+                        onDetail: () { final card = _previewCard.value ?? _activeHero?.card; if (card != null) _openDetail(card); },
+                        onPlay: (rec, origin) => _play(rec.resume?.target ?? PlayTarget(itemId: rec.card.id), rec.card.art, origin: origin),
+                      ),
+                    ),
+                  Padding(
+                    padding: EdgeInsets.only(bottom: scale.rem(6.0)),
+                    child: _loading && data == null
+                        ? _buildSkeletons()
+                        : data != null
+                        ? _buildSections(theme, scale, data)
+                        : const SizedBox.shrink(),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
-      ),
+        if (showBanner)
+          Positioned(
+            left: scale.gutter,
+            right: scale.gutter,
+            top: scale.rem(5.25),
+            child: _buildErrorBanner(theme, scale),
+          ),
+      ],
     );
   }
 
   Widget _buildSkeletons() {
-    final style = _skeletonStyleFor(widget.zoneId);
+    final style = _skeletonStyle();
     final count = style == EvCardStyle.landscape ? 5 : 9;
     return Column(
       key: const Key('ev_zone_skeletons'),
@@ -333,6 +419,38 @@ class _EvZonePageState extends State<EvZonePage> {
       ],
     ),
   );
+
+  Widget _buildErrorBanner(EvTheme theme, EvScale scale) {
+    final isRefreshError = _error != null && _zoneData != null;
+    final message = isRefreshError ? '刷新分区失败：$_error' : '随便看看失败：$_randomError';
+    final onRetry = isRefreshError ? () => unawaited(_loadZone()) : () => unawaited(_openRandom());
+    return EvGlass(
+      key: const Key('ev_zone_error_banner'),
+      solid: true,
+      borderRadius: BorderRadius.circular(scale.rem(0.875)),
+      padding: EdgeInsets.symmetric(horizontal: scale.rem(1.0), vertical: scale.rem(0.625)),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              message,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.bodyStyle(scale.font(0.9375), color: theme.ink),
+            ),
+          ),
+          SizedBox(width: scale.rem(0.75)),
+          EvButton.ghost(
+            key: const Key('ev_zone_error_banner_retry'),
+            label: '重试',
+            small: true,
+            glass: false,
+            onPressed: onRetry,
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildSections(EvTheme theme, EvScale scale, ZoneData data) {
     final unit = data.zone.unit.isNotEmpty ? data.zone.unit : '部';
@@ -387,7 +505,7 @@ class _EvZonePageState extends State<EvZonePage> {
         if (data.continueWatching.isNotEmpty)
           EvShelf(
             key: const Key('ev_zone_section_continue'),
-            title: _isAnime(data.zone) ? '继续追番' : '继续观看',
+            title: _isAnimeIcon(data.zone.iconKey) ? '继续追番' : '继续观看',
             resumeItems: data.continueWatching,
             style: EvCardStyle.landscape,
             onCardTap: _openDetail,

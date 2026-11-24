@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
@@ -89,11 +88,9 @@ class _ManageZonesButtonState extends State<_ManageZonesButton> {
       child: Focus(
         onFocusChange: (v) => setState(() => _focused = v),
         onKeyEvent: (_, e) {
-          if (e is KeyDownEvent && (e.logicalKey == LogicalKeyboardKey.enter || e.logicalKey == LogicalKeyboardKey.space)) {
-            widget.onTap();
-            return KeyEventResult.handled;
-          }
-          return KeyEventResult.ignored;
+          if (!evIsActivateKey(e)) return KeyEventResult.ignored;
+          widget.onTap();
+          return KeyEventResult.handled;
         },
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
@@ -155,12 +152,9 @@ class _ZoneTileCardState extends State<_ZoneTileCard> {
       child: Focus(
         onFocusChange: (v) => setState(() => _focused = v),
         onKeyEvent: (_, e) {
-          if (e is KeyDownEvent &&
-              (e.logicalKey == LogicalKeyboardKey.enter || e.logicalKey == LogicalKeyboardKey.numpadEnter || e.logicalKey == LogicalKeyboardKey.space)) {
-            widget.onTap?.call();
-            return KeyEventResult.handled;
-          }
-          return KeyEventResult.ignored;
+          if (!evIsActivateKey(e)) return KeyEventResult.ignored;
+          widget.onTap?.call();
+          return KeyEventResult.handled;
         },
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
@@ -273,16 +267,5 @@ class _ZoneTileCardState extends State<_ZoneTileCard> {
   }
 
   static String _formatCount(ZoneTile z) =>
-      '${_fmtInt(z.total)} ${z.unit}${(z.episodeTotal ?? 0) > 0 ? ' · ${_fmtInt(z.episodeTotal!)} 集' : ''}';
-
-  static String _fmtInt(int n) {
-    final s = n.toString();
-    if (s.length <= 3) return s;
-    final b = StringBuffer();
-    for (var i = 0; i < s.length; i++) {
-      if (i > 0 && (s.length - i) % 3 == 0) b.write(',');
-      b.write(s[i]);
-    }
-    return b.toString();
-  }
+      '${evFormatCount(z.total)} ${z.unit}${(z.episodeTotal ?? 0) > 0 ? ' · ${evFormatCount(z.episodeTotal!)} 集' : ''}';
 }

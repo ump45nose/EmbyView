@@ -66,18 +66,6 @@ class EvWallPage extends StatefulWidget {
   /// LRU page cache ceiling (~960 items at default page size) for bounded memory.
   static const int defaultMaxCachedPages = 16;
 
-  /// Resolves the active letter in [letterOffsets] for [itemIndex].
-  static String resolveActiveLetter(Map<String, int> letterOffsets, int itemIndex) {
-    if (letterOffsets.isEmpty) return '';
-    final entries = letterOffsets.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
-    var chosen = entries.first.key;
-    for (final e in entries) {
-      if (e.value > itemIndex) break;
-      chosen = e.key;
-    }
-    return chosen;
-  }
-
   final WallQuery initialQuery;
   final String? title, unit;
   final int pageSize, maxCachedPages;
@@ -88,11 +76,19 @@ class EvWallPage extends StatefulWidget {
   State<EvWallPage> createState() => _EvWallPageState();
 }
 
-class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
+class _EvWallPageState extends State<EvWallPage> {
+  static const int _maxConcurrentPages = 3;
+
   final GlobalKey _headerKey = GlobalKey();
   late ScrollController _scrollController;
   late bool _ownsScrollController;
-  late final AnimationController _scrollIdleCtrl, _hoverDwellCtrl;
+
+  Timer? _scrollIdleTimer;
+  Timer? _hoverDwellTimer;
+
+  final ValueNotifier<String> _activeLetter = ValueNotifier<String>('');
+  final ValueNotifier<bool> _scrolling = ValueNotifier<bool>(false);
+  final ValueNotifier<String?> _bannerError = ValueNotifier<String?>(null);
 
   EvScope? _scope;
   String? _boundSessionId;
@@ -106,11 +102,14 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
 
   int _generation = 0;
   final LinkedHashMap<int, List<MediaCard>> _pages = LinkedHashMap();
-  final Set<int> _inFlightPages = {}, _failedPages = {}, _pendingPages = {};
+  final Map<int, _PageSignal> _pageNotifiers = {};
+  final Set<int> _inFlightPages = {}, _pendingPages = {}, _failedPageIndices = {};
+  final List<int> _pageQueue = [];
   bool _flushScheduled = false, _stageSeeded = false;
+  bool _facetsFailed = false;
+  String? _facetsErrorMessage, _pageErrorMessage;
 
-  bool _popoverOpen = false, _scrolling = false, _suppressScrollLetterSync = false;
-  String _activeLetter = '';
+  bool _popoverOpen = false, _suppressScrollLetterSync = false;
   double? _measuredHeaderHeight, _lastViewportWidth;
   EvWallGridMetrics? _lastMetrics;
   double _lastLeadOffset = 0.0;
@@ -124,10 +123,6 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
     _ownsScrollController = widget.scrollController == null;
     _scrollController = widget.scrollController ?? ScrollController();
     _scrollController.addListener(_handleScroll);
-    _scrollIdleCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))
-      ..addStatusListener((s) { if (s == AnimationStatus.completed && mounted && _scrolling) setState(() => _scrolling = false); });
-    _hoverDwellCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 500))
-      ..addStatusListener((s) { if (s == AnimationStatus.completed && mounted && _pendingHoverCard != null) _scope?.stage.setBaseBackdrop(_pendingHoverCard!.art.stage); });
   }
 
   @override
@@ -172,10 +167,17 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _scrollIdleTimer?.cancel();
+    _hoverDwellTimer?.cancel();
     _scrollController.removeListener(_handleScroll);
     if (_ownsScrollController) _scrollController.dispose();
-    _scrollIdleCtrl.dispose();
-    _hoverDwellCtrl.dispose();
+    _activeLetter.dispose();
+    _scrolling.dispose();
+    _bannerError.dispose();
+    for (final n in _pageNotifiers.values) {
+      n.dispose();
+    }
+    _pageNotifiers.clear();
     super.dispose();
   }
 
@@ -207,13 +209,9 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
   void _syncShellChrome() {
     final scope = _scope;
     if (scope == null || !mounted) return;
-    final zone = _matchedZone;
     scope.shell.updateChrome(
       showBack: true,
-      titlePlate: EvChromeTitlePlate(
-        iconKey: zone?.iconKey ?? 'grid', title: _resolvedTitle,
-        colorSlot: zone?.colorSlot ?? 1, total: _total, unit: _resolvedUnit,
-      ),
+      clearTitlePlate: true,
       rightActions: [
         _EvChromeFilterAction(
           key: const Key('ev_wall_chrome_filter_button'),
@@ -241,21 +239,59 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
     genreId: null, years: null, technology: null,
   ));
 
+  void _syncBannerError() {
+    _bannerError.value = _pageErrorMessage ?? _facetsErrorMessage;
+  }
+
+  _PageSignal _notifierForPage(int pageIndex) =>
+      _pageNotifiers.putIfAbsent(pageIndex, _PageSignal.new);
+
+  void _notifyPage(int pageIndex) {
+    final n = _pageNotifiers[pageIndex];
+    if (n != null) n.value++;
+  }
+
+  void _prunePageNotifiers() {
+    if (!mounted) return;
+    final stale = <int>[];
+    _pageNotifiers.forEach((p, n) {
+      if (!_pages.containsKey(p) && !n.active) stale.add(p);
+    });
+    for (final p in stale) {
+      _pageNotifiers.remove(p)?.dispose();
+    }
+  }
+
   void _reloadAll() {
     final data = _boundData;
     final gen = ++_generation;
+    _scrollIdleTimer?.cancel();
+    _scrollIdleTimer = null;
+    _hoverDwellTimer?.cancel();
+    _hoverDwellTimer = null;
+    _pendingHoverCard = null;
     _pages.clear();
     _inFlightPages.clear();
-    _failedPages.clear();
     _pendingPages.clear();
+    _pageQueue.clear();
+    _failedPageIndices.clear();
+    _facetsFailed = false;
+    _facetsErrorMessage = null;
+    _pageErrorMessage = null;
+    _bannerError.value = null;
     _stageSeeded = false;
     _listing = null;
+    _facets = const WallFacets();
     _sortedOffsets = const [];
-    _activeLetter = '';
+    _activeLetter.value = '';
+    _scrolling.value = false;
     _error = null;
     _loadingWall = data != null;
     _loadingFacets = data != null;
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {});
+      WidgetsBinding.instance.addPostFrameCallback((_) => _prunePageNotifiers());
+    }
     if (data == null) return;
     unawaited(_loadListing(data, _query, gen));
     unawaited(_loadFacets(data, _query, gen));
@@ -266,15 +302,14 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
       final listing = await data.openWall(query);
       if (!mounted || gen != _generation) return;
       final offsets = listing.info.letterOffsets.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
+      _activeLetter.value = offsets.isNotEmpty ? offsets.first.key : '';
       setState(() {
         _listing = listing;
         _sortedOffsets = offsets;
-        _activeLetter = offsets.isNotEmpty ? offsets.first.key : '';
         _loadingWall = false;
         _error = null;
       });
-      _syncShellChrome();
-      if (listing.info.total > 0) _ensurePage(0, prefetchNeighbors: true);
+      if (listing.info.total > 0) _enqueuePage(0, prefetchNeighbors: true);
     } on EmbyViewFailure catch (e) {
       if (mounted && gen == _generation) setState(() { _error = e; _loadingWall = false; });
     } catch (_) {
@@ -287,14 +322,45 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
   Future<void> _loadFacets(EmbyViewData data, WallQuery query, int gen) async {
     try {
       final facets = await data.wallFacets(query);
-      if (mounted && gen == _generation) setState(() { _facets = facets; _loadingFacets = false; });
-    } catch (_) {
-      if (mounted && gen == _generation) setState(() => _loadingFacets = false);
+      if (!mounted || gen != _generation) return;
+      _facetsFailed = false;
+      _facetsErrorMessage = null;
+      _syncBannerError();
+      setState(() { _facets = facets; _loadingFacets = false; });
+    } catch (e) {
+      if (!mounted || gen != _generation) return;
+      _facetsFailed = true;
+      _facetsErrorMessage = e is EmbyViewFailure ? e.reason : '筛选项加载失败，请重试';
+      _syncBannerError();
+      setState(() => _loadingFacets = false);
     }
   }
 
+  (int firstPage, int lastPage) _visiblePageRange({double extraViewports = 1.0}) {
+    final metrics = _lastMetrics;
+    final total = _total;
+    if (metrics == null || total <= 0) return (0, 0);
+    final maxPage = (total - 1) ~/ widget.pageSize;
+    if (!_scrollController.hasClients) return (0, math.min(maxPage, 1));
+    final pos = _scrollController.position;
+    final offset = pos.pixels;
+    final vh = pos.hasViewportDimension && pos.viewportDimension > 0 ? pos.viewportDimension : 900.0;
+    final pad = vh * extraViewports;
+    final firstIdx = metrics.firstVisibleIndex(math.max(0.0, offset - pad));
+    final lastIdx = metrics.firstVisibleIndex(offset + vh + pad) + metrics.crossAxisCount;
+    return (
+      (firstIdx ~/ widget.pageSize).clamp(0, maxPage),
+      (lastIdx ~/ widget.pageSize).clamp(0, maxPage),
+    );
+  }
+
+  bool _isNearVisible(int pageIndex) {
+    final (firstP, lastP) = _visiblePageRange(extraViewports: 1.0);
+    return pageIndex >= firstP - 1 && pageIndex <= lastP + 1;
+  }
+
   void _schedulePageRequest(int pageIndex) {
-    if (_pages.containsKey(pageIndex) || _inFlightPages.contains(pageIndex) || _failedPages.contains(pageIndex)) return;
+    if (_pages.containsKey(pageIndex) || _inFlightPages.contains(pageIndex) || _failedPageIndices.contains(pageIndex)) return;
     _pendingPages.add(pageIndex);
     if (_flushScheduled) return;
     _flushScheduled = true;
@@ -304,29 +370,70 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
       final batch = _pendingPages.toList()..sort();
       _pendingPages.clear();
       for (final p in batch) {
-        _ensurePage(p, prefetchNeighbors: batch.length <= 2);
+        _enqueuePage(p, prefetchNeighbors: batch.length <= 2);
       }
     });
   }
 
-  void _ensurePage(int pageIndex, {bool prefetchNeighbors = false}) {
+  void _enqueuePage(int pageIndex, {bool prefetchNeighbors = false}) {
     final listing = _listing;
     if (listing == null || pageIndex < 0) return;
-    final total = listing.info.total, offset = pageIndex * widget.pageSize;
-    if (offset >= total) return;
+    final total = listing.info.total;
+    if (pageIndex * widget.pageSize >= total) return;
 
-    if (_pages.containsKey(pageIndex)) {
-      _pages[pageIndex] = _pages.remove(pageIndex)!;
-    } else if (!_inFlightPages.contains(pageIndex)) {
+    void addOne(int p) {
+      if (p < 0 || p * widget.pageSize >= total) return;
+      if (_pages.containsKey(p)) {
+        _pages[p] = _pages.remove(p)!;
+        return;
+      }
+      if (_inFlightPages.contains(p)) return;
+      _pageQueue.remove(p);
+      _pageQueue.add(p);
+    }
+
+    addOne(pageIndex);
+    if (prefetchNeighbors) {
+      addOne(pageIndex + 1);
+      addOne(pageIndex - 1);
+    }
+    _drainPageQueue();
+  }
+
+  void _drainPageQueue() {
+    final listing = _listing;
+    if (listing == null || !mounted) return;
+    final total = listing.info.total;
+
+    _pageQueue.removeWhere((p) => _pages.containsKey(p) || _inFlightPages.contains(p) || !_isNearVisible(p));
+    if (_pageQueue.isEmpty || _inFlightPages.length >= _maxConcurrentPages) return;
+
+    final (firstP, lastP) = _visiblePageRange(extraViewports: 0.0);
+    final centerP = (firstP + lastP) / 2.0;
+    _pageQueue.sort((a, b) => (a - centerP).abs().compareTo((b - centerP).abs()));
+
+    while (_inFlightPages.length < _maxConcurrentPages && _pageQueue.isNotEmpty) {
+      final pageIndex = _pageQueue.removeAt(0);
+      if (_pages.containsKey(pageIndex) || _inFlightPages.contains(pageIndex) || !_isNearVisible(pageIndex)) {
+        continue;
+      }
+      final offset = pageIndex * widget.pageSize;
+      if (offset >= total) continue;
       final gen = _generation;
       _inFlightPages.add(pageIndex);
       listing.page(offset: offset, limit: math.min(widget.pageSize, total - offset)).then((page) {
         if (!mounted || gen != _generation) return;
         _inFlightPages.remove(pageIndex);
-        _failedPages.remove(pageIndex);
-        _pages.remove(pageIndex);
-        _pages[pageIndex] = page.items;
-        _evictExcessPages(keepAround: pageIndex);
+        _failedPageIndices.remove(pageIndex);
+        if (_failedPageIndices.isEmpty) _pageErrorMessage = null;
+        _syncBannerError();
+
+        if (_isNearVisible(pageIndex) || _pages.length < widget.maxCachedPages) {
+          _pages.remove(pageIndex);
+          _pages[pageIndex] = page.items;
+          _evictExcessPages();
+          _notifyPage(pageIndex);
+        }
         if (!_stageSeeded) {
           for (final item in page.items) {
             if (item.art.stage.layers.isNotEmpty) {
@@ -336,24 +443,46 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
             }
           }
         }
-        setState(() {});
-      }).catchError((Object _) {
+        _drainPageQueue();
+      }).catchError((Object e) {
         if (!mounted || gen != _generation) return;
         _inFlightPages.remove(pageIndex);
-        _failedPages.add(pageIndex);
+        if (_isNearVisible(pageIndex)) {
+          _failedPageIndices.add(pageIndex);
+          _pageErrorMessage = e is EmbyViewFailure ? e.reason : '部分内容加载失败，请重试';
+          _syncBannerError();
+        }
+        _drainPageQueue();
       });
-    }
-
-    if (prefetchNeighbors) {
-      if ((pageIndex + 1) * widget.pageSize < total) _ensurePage(pageIndex + 1);
-      if (pageIndex > 0) _ensurePage(pageIndex - 1);
     }
   }
 
-  void _evictExcessPages({required int keepAround}) {
+  void _evictExcessPages() {
+    final (firstP, lastP) = _visiblePageRange(extraViewports: 1.0);
     while (_pages.length > widget.maxCachedPages) {
-      final victim = _pages.keys.where((k) => (k - keepAround).abs() > 2).firstOrNull ?? _pages.keys.first;
+      final victim = _pages.keys.where((k) => k < firstP - 1 || k > lastP + 1).firstOrNull ?? _pages.keys.first;
       _pages.remove(victim);
+    }
+    _prunePageNotifiers();
+  }
+
+  void _retryBannerError() {
+    final data = _boundData;
+    if (_facetsFailed && data != null) {
+      _facetsFailed = false;
+      _facetsErrorMessage = null;
+      _syncBannerError();
+      setState(() => _loadingFacets = true);
+      unawaited(_loadFacets(data, _query, _generation));
+    }
+    if (_failedPageIndices.isNotEmpty) {
+      final pages = _failedPageIndices.toList()..sort();
+      _failedPageIndices.clear();
+      _pageErrorMessage = null;
+      _syncBannerError();
+      for (final p in pages) {
+        _enqueuePage(p);
+      }
     }
   }
 
@@ -368,6 +497,13 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
     if (!mounted || !_scrollController.hasClients) return;
     final offset = _scrollController.offset;
     _scope?.shell.setScrollOffset(offset);
+    if (_failedPageIndices.isNotEmpty) {
+      _failedPageIndices.removeWhere((p) => !_isNearVisible(p));
+      if (_failedPageIndices.isEmpty && _pageErrorMessage != null) {
+        _pageErrorMessage = null;
+        _syncBannerError();
+      }
+    }
     if (!_showAlphaBar) return;
     _markScrolling(const Duration(milliseconds: 900));
     if (_suppressScrollLetterSync) return;
@@ -376,7 +512,7 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
     final next = offset <= 1.0
         ? _sortedOffsets.first.key
         : _letterForIndex(metrics.firstVisibleIndex(offset, probeOffset: _lastLeadOffset + metrics.rowStride * 0.35));
-    if (next != _activeLetter) setState(() => _activeLetter = next);
+    if (next != _activeLetter.value) _activeLetter.value = next;
   }
 
   String _letterForIndex(int itemIndex) {
@@ -389,8 +525,12 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
   }
 
   void _markScrolling(Duration hold) {
-    if (!_scrolling) setState(() => _scrolling = true);
-    _scrollIdleCtrl..duration = hold..forward(from: 0.0);
+    if (!_scrolling.value) _scrolling.value = true;
+    _scrollIdleTimer?.cancel();
+    _scrollIdleTimer = Timer(hold, () {
+      _scrollIdleTimer = null;
+      if (mounted && _scrolling.value) _scrolling.value = false;
+    });
   }
 
   void _jumpToLetter(String letter) {
@@ -398,12 +538,12 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
     if (idx == null || metrics == null || !_scrollController.hasClients) return;
     final target = metrics.scrollOffsetForIndex(idx, leadOffset: _lastLeadOffset)
         .clamp(0.0, _scrollController.position.maxScrollExtent);
-    setState(() => _activeLetter = letter);
+    _activeLetter.value = letter;
     _markScrolling(const Duration(milliseconds: 1200));
-    _ensurePage(idx ~/ widget.pageSize, prefetchNeighbors: true);
     _suppressScrollLetterSync = true;
     _scrollController.jumpTo(target);
     _suppressScrollLetterSync = false;
+    _enqueuePage(idx ~/ widget.pageSize, prefetchNeighbors: true);
   }
 
   void _togglePopover() => setState(() => _popoverOpen = !_popoverOpen);
@@ -412,10 +552,17 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
   void _onCardHover(MediaCard card, bool hovering) {
     if (hovering) {
       _pendingHoverCard = card;
-      _hoverDwellCtrl.forward(from: 0.0);
+      _hoverDwellTimer?.cancel();
+      _hoverDwellTimer = Timer(const Duration(milliseconds: 500), () {
+        _hoverDwellTimer = null;
+        if (mounted && _pendingHoverCard != null) {
+          _scope?.stage.setBaseBackdrop(_pendingHoverCard!.art.stage);
+        }
+      });
     } else if (_pendingHoverCard?.id == card.id) {
       _pendingHoverCard = null;
-      _hoverDwellCtrl.stop();
+      _hoverDwellTimer?.cancel();
+      _hoverDwellTimer = null;
     }
   }
 
@@ -553,12 +700,27 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
                 Positioned(
                   right: scale.rem(1.125), top: 0, bottom: 0,
                   child: Center(
-                    child: EvAlphaIndexBar(
-                      letterOffsets: _letterOffsets, activeLetter: _activeLetter,
-                      scrolling: _scrolling, onSelectLetter: _jumpToLetter,
+                    child: ListenableBuilder(
+                      listenable: Listenable.merge([_activeLetter, _scrolling]),
+                      builder: (_, _) => EvAlphaIndexBar(
+                        letterOffsets: _letterOffsets, activeLetter: _activeLetter.value,
+                        scrolling: _scrolling.value, onSelectLetter: _jumpToLetter,
+                      ),
                     ),
                   ),
                 ),
+              ValueListenableBuilder<String?>(
+                valueListenable: _bannerError,
+                builder: (_, message, _) {
+                  if (message == null || _error != null) return const SizedBox.shrink();
+                  return Positioned(
+                    left: gutter,
+                    right: gutter,
+                    top: scale.rem(5.0),
+                    child: _buildErrorBanner(theme, scale, message),
+                  );
+                },
+              ),
               if (_popoverOpen) ...[
                 Positioned.fill(
                   child: GestureDetector(key: const Key('ev_wall_popover_scrim'), behavior: HitTestBehavior.translucent, onTap: _closePopover),
@@ -580,7 +742,7 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
   }
 
   Widget _buildHeaderRow(EvTheme theme, EvScale scale, int filterCount) {
-    final totalText = _loadingWall && _listing == null ? '加载中…' : '${_fmt(_total)} $_resolvedUnit';
+    final totalText = _loadingWall && _listing == null ? '加载中…' : '${evFormatCount(_total)} $_resolvedUnit';
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
@@ -631,22 +793,28 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
         delegate: SliverChildBuilderDelegate(
           (_, index) {
             if (isPlaceholder) return RepaintBoundary(child: _WallCardPlaceholder(width: metrics.itemWidth));
-            final card = _cardAt(index);
-            if (card == null) {
-              _schedulePageRequest(index ~/ widget.pageSize);
-              return RepaintBoundary(child: _WallCardPlaceholder(key: ValueKey('ev_wall_placeholder_$index'), width: metrics.itemWidth));
-            }
+            final pageIndex = index ~/ widget.pageSize;
             return RepaintBoundary(
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: EvCard(
-                  key: ValueKey<String>('ev_wall_card_${card.id}'), card: card,
-                  style: card.kind == MediaKind.collection ? EvCardStyle.collection : EvCardStyle.poster,
-                  width: metrics.itemWidth, alwaysShowLabel: true, subtitle: _cardSubtitle(card),
-                  onHoverChanged: (h) => _onCardHover(card, h), onFocusChanged: (f) => _onCardHover(card, f),
-                  onTap: () {}, onActivateWithOrigin: (origin) => _openCard(card, origin),
-                  onPlay: () => _playCard(card),
-                ),
+              child: ValueListenableBuilder<int>(
+                valueListenable: _notifierForPage(pageIndex),
+                builder: (_, _, _) {
+                  final card = _cardAt(index);
+                  if (card == null) {
+                    _schedulePageRequest(pageIndex);
+                    return _WallCardPlaceholder(width: metrics.itemWidth);
+                  }
+                  return Align(
+                    alignment: Alignment.topCenter,
+                    child: EvCard(
+                      key: ValueKey<String>('ev_wall_card_${card.id}'), card: card,
+                      style: card.kind == MediaKind.collection ? EvCardStyle.collection : EvCardStyle.poster,
+                      width: metrics.itemWidth, alwaysShowLabel: true, subtitle: _cardSubtitle(card),
+                      onHoverChanged: (h) => _onCardHover(card, h), onFocusChanged: (f) => _onCardHover(card, f),
+                      onTap: () {}, onActivateWithOrigin: (origin) => _openCard(card, origin),
+                      onPlay: () => _playCard(card),
+                    ),
+                  );
+                },
               ),
             );
           },
@@ -656,6 +824,33 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
       ),
     );
   }
+
+  Widget _buildErrorBanner(EvTheme theme, EvScale scale, String message) => EvGlass(
+    key: const Key('ev_wall_error_banner'),
+    solid: true,
+    borderRadius: BorderRadius.circular(scale.rem(0.875)),
+    padding: EdgeInsets.symmetric(horizontal: scale.rem(1.0), vertical: scale.rem(0.625)),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(
+            message,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.bodyStyle(scale.font(0.9375), color: theme.ink),
+          ),
+        ),
+        SizedBox(width: scale.rem(0.75)),
+        EvButton.ghost(
+          key: const Key('ev_wall_error_banner_retry'),
+          label: '重试',
+          small: true,
+          glass: false,
+          onPressed: _retryBannerError,
+        ),
+      ],
+    ),
+  );
 
   Widget _buildEmptyState(EvTheme theme, EvScale scale, int filterCount) => Padding(
     key: const Key('ev_wall_empty_state'),
@@ -689,13 +884,16 @@ class _EvWallPageState extends State<EvWallPage> with TickerProviderStateMixin {
       ],
     ),
   );
+}
 
-  static String _fmt(int v) => v.toString().replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (_) => ',');
+class _PageSignal extends ValueNotifier<int> {
+  _PageSignal() : super(0);
+  bool get active => hasListeners;
 }
 
 /// Static, zero-ticker placeholder tile for unpaged grid cells during fast scrolling.
 class _WallCardPlaceholder extends StatelessWidget {
-  const _WallCardPlaceholder({super.key, required this.width});
+  const _WallCardPlaceholder({required this.width});
   final double width;
 
   @override
@@ -738,7 +936,8 @@ class _EvWallToolButton extends StatefulWidget {
 }
 
 class _EvWallToolButtonState extends State<_EvWallToolButton> {
-  bool _hovered = false, _pressed = false;
+  bool _hovered = false, _focused = false, _pressed = false;
+  bool get _hi => _hovered || _focused;
 
   @override
   Widget build(BuildContext context) {
@@ -746,44 +945,54 @@ class _EvWallToolButtonState extends State<_EvWallToolButton> {
     final badgeBg = theme.isPaper ? theme.priBg : theme.accent;
     final badgeFg = theme.isPaper ? const Color(0xFFFFFFFF) : theme.bg;
     return Semantics(
-      button: true, label: widget.label,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hovered = true),
-        onExit: (_) => setState(() { _hovered = false; _pressed = false; }),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (_) => setState(() => _pressed = true),
-          onTapUp: (_) => setState(() => _pressed = false),
-          onTapCancel: () => setState(() => _pressed = false),
-          onTap: widget.onTap,
-          child: AnimatedScale(
-            scale: _pressed ? 0.95 : 1.0, duration: const Duration(milliseconds: 300), curve: EvCurves.spring,
-            child: EvGlass(
-              borderRadius: BorderRadius.circular(999), color: _hovered ? theme.fill3 : null,
-              child: SizedBox(
-                height: scale.rem(2.375),
-                child: Padding(
-                  padding: EdgeInsets.symmetric(horizontal: scale.rem(0.9375)),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      EvIcon(widget.icon, size: scale.rem(1.0625), color: theme.ink.withValues(alpha: 0.9)),
-                      SizedBox(width: scale.rem(0.5)),
-                      Text(widget.label, style: theme.bodyStyle(scale.font(0.9375), fontWeight: FontWeight.w500, color: theme.ink)),
-                      if (widget.badgeCount > 0) ...[
+      button: true, focused: _focused, label: widget.label,
+      child: Focus(
+        onFocusChange: (v) => setState(() => _focused = v),
+        onKeyEvent: (_, e) {
+          if (!evIsActivateKey(e)) return KeyEventResult.ignored;
+          widget.onTap();
+          return KeyEventResult.handled;
+        },
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() { _hovered = false; _pressed = false; }),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (_) => setState(() => _pressed = true),
+            onTapUp: (_) => setState(() => _pressed = false),
+            onTapCancel: () => setState(() => _pressed = false),
+            onTap: widget.onTap,
+            child: AnimatedScale(
+              scale: _pressed ? 0.95 : 1.0, duration: const Duration(milliseconds: 300), curve: EvCurves.spring,
+              child: EvGlass(
+                borderRadius: BorderRadius.circular(999),
+                color: _hi ? theme.fill3 : null,
+                borderColor: _focused ? theme.focusColor : null,
+                child: SizedBox(
+                  height: scale.rem(2.375),
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: scale.rem(0.9375)),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        EvIcon(widget.icon, size: scale.rem(1.0625), color: theme.ink.withValues(alpha: 0.9)),
                         SizedBox(width: scale.rem(0.5)),
-                        Container(
-                          key: const Key('ev_wall_filter_badge'),
-                          constraints: BoxConstraints(minWidth: scale.rem(1.25)), height: scale.rem(1.25),
-                          padding: EdgeInsets.symmetric(horizontal: scale.rem(0.3)),
-                          decoration: BoxDecoration(color: badgeBg, borderRadius: BorderRadius.circular(999)),
-                          alignment: Alignment.center,
-                          child: Text('${widget.badgeCount}', style: theme.bodyStyle(scale.rem(0.75), fontWeight: FontWeight.w700, color: badgeFg, height: 1.0)),
-                        ),
+                        Text(widget.label, style: theme.bodyStyle(scale.font(0.9375), fontWeight: FontWeight.w500, color: theme.ink)),
+                        if (widget.badgeCount > 0) ...[
+                          SizedBox(width: scale.rem(0.5)),
+                          Container(
+                            key: const Key('ev_wall_filter_badge'),
+                            constraints: BoxConstraints(minWidth: scale.rem(1.25)), height: scale.rem(1.25),
+                            padding: EdgeInsets.symmetric(horizontal: scale.rem(0.3)),
+                            decoration: BoxDecoration(color: badgeBg, borderRadius: BorderRadius.circular(999)),
+                            alignment: Alignment.center,
+                            child: Text('${widget.badgeCount}', style: theme.bodyStyle(scale.rem(0.75), fontWeight: FontWeight.w700, color: badgeFg, height: 1.0)),
+                          ),
+                        ],
+                        if (widget.trailing != null) ...[SizedBox(width: scale.rem(0.375)), widget.trailing!],
                       ],
-                      if (widget.trailing != null) ...[SizedBox(width: scale.rem(0.375)), widget.trailing!],
-                    ],
+                    ),
                   ),
                 ),
               ),

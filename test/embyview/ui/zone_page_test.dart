@@ -856,5 +856,139 @@ void main() {
         tester.view.resetDevicePixelRatio();
       },
     );
+
+    testWidgets(
+      'preserves chrome & shows retryable banner on refresh/randomInZone errors, guards cross-session randomInZone, and supports real Emby GUID zones',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        const guidDocId = 'f137a2dd-21bb-c1b9-9aa5-c0f6bf02a805';
+        const guidBoxId = '9d42c011-77aa-41e0-8812-33cc99aa0011';
+        const guidAnimeId = 'aa112233-4455-6677-8899-aabbccddeeff';
+
+        ZoneData makeGuidZone(String id, String name, String iconKey, MediaKind kind, {bool withResume = false}) {
+          final card = _makeCard(id: '${id}_c1', title: '$name条目', kind: kind, libraryId: id);
+          return ZoneData(
+            zone: ZoneTile(id: id, name: name, iconKey: iconKey, colorSlot: 2, total: 10, unit: '部'),
+            all: _zoneQuery(id),
+            recommendations: [HomeRecommendation(card: card, reason: RecommendationReason.daily)],
+            continueWatching: withResume
+                ? [
+                    ResumeCard(
+                      card: card,
+                      target: PlayTarget(itemId: card.id),
+                      position: const Duration(minutes: 5),
+                      duration: const Duration(minutes: 24),
+                    ),
+                  ]
+                : const [],
+            latest: HomeShelf(id: 'latest', title: '最近添加', items: [card]),
+          );
+        }
+
+        final guidMap = {
+          guidDocId: makeGuidZone(guidDocId, '人文纪录', 'documentaries', MediaKind.series),
+          guidBoxId: makeGuidZone(guidBoxId, '系列合集', 'boxsets', MediaKind.collection),
+          guidAnimeId: makeGuidZone(guidAnimeId, '日漫新番', 'anime', MediaKind.series, withResume: true),
+        };
+
+        var failZoneRefresh = false;
+        var failRandom = false;
+        Completer<MediaCard?>? pendingRandom;
+        final openedDetails = <String>[];
+
+        final h = _createHarness(
+          initialZoneId: guidDocId,
+          onOpenDetail: openedDetails.add,
+          zoneBuilder: (id) async {
+            if (failZoneRefresh) throw Exception('zone refresh timeout');
+            return guidMap[id]!;
+          },
+          randomBuilder: (id) {
+            if (pendingRandom != null) return pendingRandom.future;
+            if (failRandom) return Future<MediaCard?>.error(Exception('random failed'));
+            return Future<MediaCard?>.value(_makeCard(id: 'rand_$id', title: '随机命中'));
+          },
+        );
+        addTearDown(h.dispose);
+
+        // 1. Real Emby GUID zones infer card styles & anime continue label from iconKey/MediaKind.
+        await tester.pumpWidget(_wrapInScope(h, const EvZonePage(zoneId: guidDocId, enableAnimations: false)));
+        await tester.pumpAndSettle();
+        expect(tester.widget<EvShelf>(find.byKey(const Key('ev_zone_section_latest'))).style, EvCardStyle.landscape);
+
+        await tester.pumpWidget(_wrapInScope(h, const EvZonePage(zoneId: guidBoxId, enableAnimations: false)));
+        await tester.pumpAndSettle();
+        expect(tester.widget<EvShelf>(find.byKey(const Key('ev_zone_section_latest'))).style, EvCardStyle.collection);
+
+        await tester.pumpWidget(_wrapInScope(h, const EvZonePage(zoneId: guidAnimeId, enableAnimations: false)));
+        await tester.pumpAndSettle();
+        expect(tester.widget<EvShelf>(find.byKey(const Key('ev_zone_section_continue'))).title, '继续追番');
+        expect(h.shell.titlePlate?.title, '日漫新番');
+
+        // 2. Preference refresh failure keeps top-bar titlePlate & rightActions and shows retryable banner.
+        failZoneRefresh = true;
+        await h.prefs.update(
+          const LocalPreferences(
+            zones: [
+              ZonePreference(
+                id: guidAnimeId,
+                name: '日漫新番改名',
+                iconKey: 'anime',
+                colorSlot: 0,
+                rule: LibraryZoneRule(guidAnimeId),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(h.shell.titlePlate, isNotNull);
+        expect(h.shell.rightActions.length, 3);
+        expect(find.byKey(const Key('ev_zone_error_banner')), findsOneWidget);
+
+        failZoneRefresh = false;
+        await tester.tap(find.byKey(const Key('ev_zone_error_banner_retry')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_zone_error_banner')), findsNothing);
+
+        // 3. _openRandom error surfaces retryable error banner instead of being swallowed.
+        failRandom = true;
+        await tester.tap(find.byKey(const Key('ev_zone_action_random')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_zone_error_banner')), findsOneWidget);
+        expect(openedDetails, isEmpty);
+
+        failRandom = false;
+        await tester.tap(find.byKey(const Key('ev_zone_error_banner_retry')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_zone_error_banner')), findsNothing);
+        expect(openedDetails, ['rand_$guidAnimeId']);
+
+        // 4. Cross-session _openRandom race: stale result after session switch is ignored.
+        pendingRandom = Completer<MediaCard?>();
+        await tester.tap(find.byKey(const Key('ev_zone_action_random')));
+        await tester.pump();
+
+        final nextData = _FakeZoneDataService(zoneBuilder: (id) async => guidMap[id]!);
+        final nextServices = EmbyViewServices(
+          preferences: h.prefs,
+          accounts: h.accounts,
+          sessionId: 'zone-sess-next',
+          data: nextData,
+          playback: h.playback,
+        );
+        await tester.pumpWidget(
+          _wrapInScope(h, const EvZonePage(zoneId: guidAnimeId, enableAnimations: false), servicesOverride: nextServices),
+        );
+        await tester.pumpAndSettle();
+
+        pendingRandom.complete(_makeCard(id: 'stale_random', title: '旧会话随机'));
+        await tester.pumpAndSettle();
+        expect(openedDetails, ['rand_$guidAnimeId']);
+      },
+    );
   });
 }

@@ -561,5 +561,189 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+
+    testWidgets(
+      'retries failed pages & facets without blacklisting, supports keyboard activation, caps concurrency, and avoids full-page rebuild on scroll/paging',
+      (tester) async {
+        const viewport = Size(1440, 900);
+        tester.view.physicalSize = viewport;
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final flakyData = _FlakyWallData(total: 600);
+        final prefs = _FakePreferences();
+        final accounts = _FakeAccounts();
+        final shell = EvShellController(initial: EvWallDestination(_defaultQuery('flaky'), title: '弹性片库'));
+        final scrollController = ScrollController();
+        addTearDown(() async {
+          scrollController.dispose();
+          shell.dispose();
+          await prefs.close();
+          await accounts.close();
+        });
+
+        await tester.pumpWidget(_hostWall(
+          data: flakyData, shell: shell, prefs: prefs, accounts: accounts,
+          initialQuery: _defaultQuery('flaky'), title: '弹性片库',
+          scrollController: scrollController, size: viewport,
+        ));
+        await tester.pumpAndSettle();
+
+        // Initial page 0 and facets both fail once -> error banner shown.
+        expect(find.byKey(const Key('ev_wall_error_banner')), findsOneWidget);
+        expect(find.byKey(const ValueKey<String>('ev_wall_card_flaky_0')), findsNothing);
+
+        // Tap retry -> recovers both facets and page 0.
+        await tester.tap(find.byKey(const Key('ev_wall_error_banner_retry')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_error_banner')), findsNothing);
+        expect(find.byKey(const ValueKey<String>('ev_wall_card_flaky_0')), findsOneWidget);
+
+        // Fail page 8 once: scroll to bottom -> banner shows; scroll back to top & back to bottom -> retries without permanent blacklist!
+        flakyData.failOffsetsOnce.add(480);
+        scrollController.jumpTo(scrollController.position.maxScrollExtent);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_error_banner')), findsOneWidget);
+
+        scrollController.jumpTo(0.0);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_error_banner')), findsNothing);
+
+        scrollController.jumpTo(scrollController.position.maxScrollExtent);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_error_banner')), findsNothing);
+        expect(find.byKey(const ValueKey<String>('ev_wall_card_flaky_599')), findsOneWidget);
+
+        // Keyboard activation on tool button & facet chip (Enter / Space).
+        scrollController.jumpTo(0.0);
+        await tester.pumpAndSettle();
+        final filterBtnFocus = find.descendant(
+          of: find.byKey(const Key('ev_wall_filter_button')),
+          matching: find.byType(Focus),
+        ).first;
+        final filterBtnInner = find.descendant(of: filterBtnFocus, matching: find.byType(MouseRegion)).first;
+        Focus.of(tester.element(filterBtnInner)).requestFocus();
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_filter_popover')), findsOneWidget);
+
+        final scoreChipFocus = find.descendant(
+          of: find.byKey(const Key('ev_wall_facet_sort_score')),
+          matching: find.byType(Focus),
+        ).first;
+        final scoreChipInner = find.descendant(of: scoreChipFocus, matching: find.byType(MouseRegion)).first;
+        Focus.of(tester.element(scoreChipInner)).requestFocus();
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
+        await tester.pumpAndSettle();
+        expect(flakyData.lastQuery?.sort, WallSort.score);
+
+        // Close popover and verify scrolling + letter jumps + page arrivals do NOT rebuild EvWallPage, and concurrency stays <= 3.
+        await tester.tap(find.byKey(const Key('ev_wall_popover_close')));
+        await tester.pumpAndSettle();
+
+        final hugeData = _HugeFakeWallData(total: 10000);
+        final shell2 = EvShellController(initial: EvWallDestination(_defaultQuery('huge2'), title: '万级片库'));
+        final scroll2 = ScrollController();
+        addTearDown(() {
+          scroll2.dispose();
+          shell2.dispose();
+        });
+
+        await tester.pumpWidget(_hostWall(
+          data: hugeData, shell: shell2, prefs: prefs, accounts: accounts,
+          initialQuery: _defaultQuery('huge2'), title: '万级片库',
+          scrollController: scroll2, size: const Size(2560, 1440),
+        ));
+        await tester.pumpAndSettle();
+
+        var wallRebuilds = 0;
+        final prevHook = debugOnRebuildDirtyWidget;
+        debugOnRebuildDirtyWidget = (Element e, bool builtOnce) {
+          prevHook?.call(e, builtOnce);
+          if (e.widget is EvWallPage) wallRebuilds++;
+        };
+        addTearDown(() => debugOnRebuildDirtyWidget = prevHook);
+
+        final maxExt = scroll2.position.maxScrollExtent;
+        for (var i = 1; i <= 5; i++) {
+          scroll2.jumpTo(maxExt * (i / 5));
+          await tester.pump();
+        }
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('ev_alpha_letter_M')));
+        await tester.pumpAndSettle();
+
+        expect(wallRebuilds, 0);
+        expect(flakyData.maxInFlight, lessThanOrEqualTo(3));
+        expect(tester.takeException(), isNull);
+      },
+    );
   });
+}
+
+class _FlakyWallData implements EmbyViewData {
+  _FlakyWallData({required this.total});
+  final int total;
+  bool failFacetsOnce = true;
+  final Set<int> failOffsetsOnce = {0};
+  int _inFlight = 0;
+  int maxInFlight = 0;
+  WallQuery? lastQuery;
+
+  @override
+  Future<List<ZoneTile>> zones() async => [
+    ZoneTile(id: 'flaky', name: '弹性片库', iconKey: 'nav_movie', colorSlot: 1, total: total, unit: '部'),
+  ];
+
+  @override
+  Future<WallListing> openWall(WallQuery query) async {
+    lastQuery = query;
+    return _FlakyListing(this, total);
+  }
+
+  @override
+  Future<WallFacets> wallFacets(WallQuery query) async {
+    if (failFacetsOnce) {
+      failFacetsOnce = false;
+      throw const EmbyViewFailure('筛选项超时', retryable: true);
+    }
+    return const WallFacets(
+      sorts: [FacetOption(value: WallSort.title, label: '标题'), FacetOption(value: WallSort.score, label: '评分')],
+    );
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FlakyListing implements WallListing {
+  _FlakyListing(this._owner, int total) : info = WallInfo(total: total, letterOffsets: const {'A': 0, 'Z': 540});
+  final _FlakyWallData _owner;
+  @override
+  final WallInfo info;
+
+  @override
+  Future<Page<MediaCard>> page({required int offset, required int limit}) async {
+    _owner._inFlight++;
+    if (_owner._inFlight > _owner.maxInFlight) _owner.maxInFlight = _owner._inFlight;
+    try {
+      await Future<void>.delayed(Duration.zero);
+      if (_owner.failOffsetsOnce.remove(offset)) {
+        throw const EmbyViewFailure('分页加载失败', retryable: true);
+      }
+      final end = math.min(info.total, offset + limit);
+      return Page<MediaCard>(
+        items: [for (var i = offset; i < end; i++) _movieCard(id: 'flaky_$i', title: '弹性影片 #$i')],
+        total: info.total,
+        nextOffset: end < info.total ? end : null,
+      );
+    } finally {
+      _owner._inFlight--;
+    }
+  }
 }
