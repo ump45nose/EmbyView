@@ -171,6 +171,12 @@ class PlaybackManager implements AudioOwnable {
     PlaybackStartupFailureContext context,
   )?
   _startupRecoveryDecider;
+  /// A host may own expiring direct addresses. Null leaves ordinary recovery
+  /// intact; true retries this source once, false ends it without transcoding.
+  Future<bool?> Function(PlaybackSourceFailureContext context)?
+      sourceFailureRecovery;
+  bool _sourceFailureRecoveryInFlight = false;
+  Map<String, dynamic>? _startupSourceFailure;
   void Function(PlaybackDecisionContext context)? _playbackDecisionLogger;
   void Function(String message)? _diagnosticLogger;
   int? Function(List<Map<String, dynamic>> audioStreams, int? explicitIndex)? audioTrackSelector;
@@ -183,6 +189,7 @@ class PlaybackManager implements AudioOwnable {
   final List<StreamSubscription> _streamSubs = [];
   Timer? _progressTimer;
   _ProgressGeneration? _progressGeneration;
+  final Set<Future<void>> _pendingPlaybackReports = {};
   StreamResolutionResult? _currentResolution;
   dynamic _lastPlaybackItem;
   StreamResolutionResult? _lastPlaybackResolution;
@@ -1324,6 +1331,38 @@ class PlaybackManager implements AudioOwnable {
     _service = service;
   }
 
+  /// Temporarily binds a user-scoped facade while keeping the original
+  /// launcher's resolver configurator available when that facade is disposed.
+  void Function() bindPlaybackSource(MediaStreamResolver resolver, PlayerService service,
+      {PlayerBackend? backend}) {
+    final previousResolver = _resolver;
+    final previousService = _service;
+    final previousConfigurator = _resolverConfigurator;
+    final previousRecovery = sourceFailureRecovery;
+    final previousAutoAdvance = autoAdvanceEnabled;
+    final previousBackend = _backend;
+    final previousBackendSelector = _backendSelector;
+    final previousSuppressAutoNext = suppressAutoNext;
+    Future<void> configure(dynamic item) async { _resolver = resolver; _service = service; }
+    _resolver = resolver; _service = service; _resolverConfigurator = configure;
+    if (backend != null) {
+      setBackend(backend, disposePrevious: false);
+      _backendSelector = (_, _) => backend;
+    }
+    return () {
+      if (!identical(_resolverConfigurator, configure)) return;
+      _resolver = previousResolver; _service = previousService;
+      _resolverConfigurator = previousConfigurator;
+      sourceFailureRecovery = previousRecovery;
+      autoAdvanceEnabled = previousAutoAdvance;
+      suppressAutoNext = previousSuppressAutoNext;
+      _backendSelector = previousBackendSelector;
+      if (previousBackend != null && !identical(previousBackend, _backend)) {
+        setBackend(previousBackend, disposePrevious: false);
+      }
+    };
+  }
+
   void setResolverConfigurator(
     Future<void> Function(dynamic item) configurator,
   ) {
@@ -1711,6 +1750,7 @@ class PlaybackManager implements AudioOwnable {
     final logger = _diagnosticLogger;
     if (logger == null) return;
     final resolution = _currentResolution ?? _lastPlaybackResolution;
+
     final item = queueService.currentItem ?? _lastPlaybackItem;
     logger(
       'Track completed -> $branch: autoAdvance=$autoAdvanceEnabled '
@@ -2558,6 +2598,53 @@ class PlaybackManager implements AudioOwnable {
     final kind = event['kind']?.toString();
     final recoverable = event['recoverable'] == true;
     final resolution = _currentResolution ?? _lastPlaybackResolution;
+
+    if (sourceFailureRecovery != null && _waitingForMedia &&
+        (eventType == 'error' || eventType == 'playerError')) {
+      _startupSourceFailure = event;
+      return;
+    }
+
+    final sourceRecovery = sourceFailureRecovery;
+    if (sourceRecovery != null && resolution != null && !_waitingForMedia) {
+      if (_sourceFailureRecoveryInFlight) return;
+      _sourceFailureRecoveryInFlight = true;
+      final token = _playbackSessionToken;
+      try {
+        final retry = await sourceRecovery(PlaybackSourceFailureContext(
+          resolution: resolution, position: currentPlaybackPosition,
+          error: event, duringStartup: false,
+        ));
+        if (token != _playbackSessionToken ||
+            !identical(queueItem, queueService.currentItem)) return;
+        if (retry != null) {
+          if (retry) {
+            try {
+              await _reResolveAtCurrentPosition(
+                isErrorRecovery: true, reason: 'expiring-address',
+                allowStartupRecovery: false,
+                shouldProceed: () => token == _playbackSessionToken &&
+                    identical(queueItem, queueService.currentItem),
+                autoPlayIntent: () => !_viewerPaused,
+              );
+            } catch (_) {
+              if (identical(queueItem, queueService.currentItem)) {
+                _setBringupState(PlaybackBringupState(
+                  phase: PlaybackBringupPhase.failed, error: 'mediaAddressFailed'));
+              }
+            }
+          } else {
+            await stop(userInitiated: false);
+            _setBringupState(PlaybackBringupState(
+              phase: PlaybackBringupPhase.failed, itemId: _traceItemId(queueItem),
+              error: 'mediaAddressFailed'));
+          }
+          return;
+        }
+      } finally {
+        _sourceFailureRecoveryInFlight = false;
+      }
+    }
 
     // The server refused the stream's credentials, and the player holds the
     // stream open a moment for new ones. Renewing them now heals it in
@@ -3890,6 +3977,7 @@ class PlaybackManager implements AudioOwnable {
       // it returns, and a reset placed after would erase that first frame.
       _liveFrameSeenSinceOpen = false;
       _liveResumedInPlace = false;
+      _startupSourceFailure = null;
       await _backend!.play(
         backendMediaPayload,
         startPosition: useNativeStart
@@ -3949,7 +4037,11 @@ class PlaybackManager implements AudioOwnable {
       return;
     }
 
-    if (!mediaReady) {
+    final sourceFailure = _startupSourceFailure;
+    _startupSourceFailure = null;
+    if (sourceFailure != null) mediaReady = false;
+
+    if (!mediaReady && sourceFailure == null && startupError == null) {
       final backend = _backend!;
       if (backend.position > Duration.zero ||
           backend.buffer > Duration.zero ||
@@ -3959,17 +4051,38 @@ class PlaybackManager implements AudioOwnable {
     }
 
     if (!mediaReady) {
+      // Host address recovery precedes the generic transcode fallback. Its
+      // budget belongs to the item, so a replacement cannot start another loop.
+      final sourceRecovery = sourceFailureRecovery;
+      bool? retrySource;
+      if (sourceRecovery != null) {
+        retrySource = await sourceRecovery(PlaybackSourceFailureContext(
+          resolution: resolution, position: startPosition,
+          error: startupError ?? sourceFailure, duringStartup: true,
+        ));
+        if (sessionToken != _playbackSessionToken) return;
+      }
       _currentResolution = null;
       try {
         await _backend!.stop();
       } catch (_) {}
+
+      if (retrySource == true && allowStartupRecovery) {
+        await _playCurrentItem(
+          startPosition: startPosition, enableDirectPlay: enableDirectPlay,
+          enableDirectStream: enableDirectStream, enableTranscoding: enableTranscoding,
+          allowStartupRecovery: false, autoPlay: !_viewerPaused,
+          autoPlayIntent: () => !_viewerPaused, reopening: true,
+        );
+        return;
+      }
 
       if (_isPreroll(item)) {
         await next();
         return;
       }
 
-      if (allowStartupRecovery) {
+      if (allowStartupRecovery && retrySource == null) {
         // A transcode retry asks the server, which abandons a local file.
         final forceTranscodeFallback =
             enableTranscoding &&
@@ -4212,7 +4325,7 @@ class PlaybackManager implements AudioOwnable {
       ..reporting = true
       ..reportPending = false;
     try {
-      unawaited(
+      _trackPlaybackReport(
         service
             .onPlaybackProgress(
               generation.item,
@@ -4362,6 +4475,7 @@ class PlaybackManager implements AudioOwnable {
             releaseLiveStream: _claimLiveStreamRelease(generation.resolution),
           )
           .catchError((_) {});
+      _trackPlaybackReport(_lastStopReport);
     } catch (_) {}
   }
 
@@ -4370,6 +4484,23 @@ class PlaybackManager implements AudioOwnable {
   /// The latest stop report, for anything about to close the app to wait on
   /// so the server keeps the resume point.
   Future<void> get lastStopReport => _lastStopReport;
+
+  void _trackPlaybackReport(Future<void> report) {
+    late final Future<void> settled;
+    settled = report.catchError((_) {}).whenComplete(() => _pendingPlaybackReports.remove(settled));
+    _pendingPlaybackReports.add(settled);
+  }
+
+  /// Account teardown must retain the old authenticated client until every
+  /// retired Progress and its resulting compensation Stop have settled.
+  /// Ordinary stop deliberately stays nonblocking for existing playback paths.
+  Future<void> stopAndDrainReports() async {
+    await stop(userInitiated: false);
+    while (_pendingPlaybackReports.isNotEmpty) {
+      await Future.wait(_pendingPlaybackReports.toList());
+    }
+    await lastStopReport;
+  }
 
   /// True only the first time it is asked for [resolution], so a session
   /// makes at most one live stream release attempt however many stops it
@@ -4433,6 +4564,7 @@ class PlaybackManager implements AudioOwnable {
     Duration timeout = _defaultMediaReadyTimeout,
   }) async {
     bool isReady() {
+      if (_startupSourceFailure != null) return false;
       if (_backend!.duration > Duration.zero) return true;
 
       if (_backend!.position > Duration.zero) return true;
@@ -4451,6 +4583,7 @@ class PlaybackManager implements AudioOwnable {
         timeout.inMilliseconds ~/ _mediaReadyPollInterval.inMilliseconds;
     for (var i = 0; i < attempts; i++) {
       await Future.delayed(_mediaReadyPollInterval);
+      if (_startupSourceFailure != null) return false;
       if (isReady()) {
         return true;
       }
@@ -5422,6 +5555,7 @@ class PlaybackManager implements AudioOwnable {
         currentPos,
         releaseLiveStream: _claimLiveStreamRelease(resolution),
       );
+      if (stopReport != null) _trackPlaybackReport(stopReport);
       if (resolution.playMethod == StreamPlayMethod.directPlay) {
         // No server-side job to tear down, so don't delay the restart.
         if (stopReport != null) {
@@ -5890,6 +6024,7 @@ class PlaybackManager implements AudioOwnable {
                     )
                     .catchError((_) {}) ??
                 Future<void>.value();
+            _trackPlaybackReport(_lastStopReport);
           } catch (_) {}
         }
         if (releaseServerResources &&
@@ -6075,6 +6210,15 @@ class PlaybackStartupFailureContext {
     this.error,
     this.stackTrace,
   });
+}
+
+class PlaybackSourceFailureContext {
+  const PlaybackSourceFailureContext({required this.resolution,
+    required this.position, required this.error, required this.duringStartup});
+  final StreamResolutionResult resolution;
+  final Duration position;
+  final Object? error;
+  final bool duringStartup;
 }
 
 /// Thrown from `_playCurrentItem` when a recovery re-resolve's media never
