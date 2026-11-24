@@ -330,6 +330,12 @@ final class SubtitleSeasonQueue {
       cancellation.check();
       await _ledger.completeEpisode(key);
       await _update(row, () => row.completeId = contentId);
+    } on SubtitleBudgetBlocked catch (failure) {
+      await _update(row, () {
+        row.stage = EpisodeJobState.queued;
+        row.waiting = failure.reason;
+      });
+      return false;
     } catch (error) {
       if (!cancellation.isCancelled) {
         final failure = _failure(error);

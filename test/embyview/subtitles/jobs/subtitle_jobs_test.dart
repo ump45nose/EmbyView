@@ -37,25 +37,28 @@ void main() {
     await pay(b, 'other-request', 4);
     expect((await a.usage()).usedMicros, 7);
     await a.duringEpisode('episode', () async {
-      await pay(a, 'episode-start', 4);
-      mounted = false;
+      await a.charge(4, () async {
+        mounted = false;
+        return const SubtitleAiCharge(value: null, costMicros: 4, requestId: 'episode-crossing');
+      });
       expect((await a.episodeBudget()).$1, BudgetState.unknown);
-      await pay(a, 'episode-end', 2);
+      await expectLater(pay(a, 'blocked-offline', 1), throwsA(isA<SubtitleBudgetBlocked>()));
       await a.completeEpisode('episode');
     });
     expect((await a.usage()).state, AiUsageState.localOnly);
     mounted = true;
     final reopened = await ledger().usage();
-    expect((reopened.usedMicros, reopened.completedEpisodes, reopened.averageEpisodeMicros), (13, 1, 6));
+    expect((reopened.usedMicros, reopened.completedEpisodes, reopened.averageEpisodeMicros), (11, 1, 4));
     expect((await b.episodeBudget()).$1, BudgetState.exceeded);
     await expectLater(pay(b, 'blocked', 1), throwsA(isA<EmbyViewFailure>()));
     credentials = false;
     expect((await a.episodeBudget()).$1, BudgetState.missingCredentials);
   });
 
-  test('resumes with original authorization, retries twice, yields for strm and persists cancellation', () async {
+  test('resumes through restart and budget pauses, retries twice, yields for strm and persists cancellation', () async {
     final usage = ledger();
     var authorization = 'original-mount';
+    var segments = 0;
     final running = Completer<void>();
     var reopening = false;
     final attempts = <String>[];
@@ -100,6 +103,12 @@ void main() {
           await run.cancellation.cancelled;
           run.cancellation.check();
         }
+        while (id == '2' && segments < 2) {
+          await usage.charge(
+            11,
+            () async => SubtitleAiCharge(value: null, costMicros: 11, requestId: 'segment-${segments++}'),
+          );
+        }
         if (id == '3') throw const EmbyViewFailure('temporary', retryable: true);
         return 'reopened-$id';
       },
@@ -125,16 +134,17 @@ void main() {
     queue.setForegroundStrm(true);
     await queue.jobs.firstWhere((rows) => rows.single.episodes[1].waitingReason != null);
     expect(attempts, ['2']);
-    (authorization, limit) = ('original-mount', 0);
+    authorization = 'original-mount';
     queue.wake();
-    await queue.jobs.firstWhere((rows) => rows.single.episodes[1].waitingReason?.contains('预算') == true);
-    expect(attempts, ['2']);
-    limit = 10;
+    final paused = await queue.jobs.firstWhere((rows) => rows.single.episodes[1].waitingReason?.contains('预算') == true);
+    expect((segments, (await usage.usage()).usedMicros, paused.single.completedCount), (1, 11, 1));
+    limit = 30;
     queue.wake();
     final jobs = await queue.jobs.firstWhere((rows) => rows.single.episodes.last.waitingReason != null);
     expect(jobs.single.completedCount, 2);
     expect(jobs.single.episodes[2].state, EpisodeJobState.failed);
-    expect(attempts, ['2', '2', '3', '3', '3']);
+    expect((segments, (await usage.usage()).usedMicros), (2, 22));
+    expect(attempts, ['2', '2', '2', '3', '3', '3']);
     await queue.cancelJob(id, episodeId: '4');
     await queue.close();
     queue = await open();

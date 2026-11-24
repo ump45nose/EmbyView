@@ -8,6 +8,7 @@ import '../audio/subtitle_audio.dart';
 import '../model/subtitle_document.dart';
 import '../store/subtitle_store.dart';
 import 'subtitle_season_queue.dart';
+import 'subtitle_usage_ledger.dart';
 
 final class SubtitleSeasonGenerator {
   SubtitleSeasonGenerator({required this.processor, SubtitleAudioReader? reader})
@@ -96,6 +97,15 @@ final class SubtitleSeasonGenerator {
           start = end;
         }
       }
+    } on SubtitleBudgetBlocked {
+      if (progressed && !run.cancellation.isCancelled) {
+        try {
+          await _save(context, run, coverage, cues.values, language, partial: true);
+        } on Exception {
+          // Keep the budget wait even if the share has also stopped accepting writes.
+        }
+      }
+      rethrow;
     } finally {
       run.cancellation.removeListener(cancelAudio);
     }
@@ -110,8 +120,9 @@ final class SubtitleSeasonGenerator {
     SubtitleEpisodeRun run,
     List<TimeRange> coverage,
     Iterable<SubtitleCue> cues,
-    String? language,
-  ) async {
+    String? language, {
+    bool partial = false,
+  }) async {
     final store = context.store;
     final media = context.media;
     final output = SubtitleAiOutput(coverage: coverage, cues: cues);
@@ -136,6 +147,7 @@ final class SubtitleSeasonGenerator {
     final original = await write(output.original, sourceLanguage);
     final chinese = await write(output.chinese, 'zh');
     run.cancellation.check();
+    if (partial) return chinese.contentId;
     final scan = await store.scan(media);
     if (scan.failure case final failure?) throw failure;
     bool readable(StoredSubtitle expected) => scan.nasTracks.any(

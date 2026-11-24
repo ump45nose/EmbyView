@@ -9,6 +9,14 @@ import '../../contracts/subtitles.dart';
 import '../ai/subtitle_ai_types.dart';
 import 'subtitle_job_files.dart';
 
+final class SubtitleBudgetBlocked extends EmbyViewFailure {
+  const SubtitleBudgetBlocked(super.reason, BudgetState state)
+    : super(
+        retryable: true,
+        code: state == BudgetState.unknown ? 'subtitle_budget_unknown' : 'subtitle_budget_exceeded',
+      );
+}
+
 final class SubtitleUsageLedger {
   SubtitleUsageLedger({
     required this.localDirectory,
@@ -49,7 +57,10 @@ final class SubtitleUsageLedger {
     if (!await credentialsAvailable()) {
       return (BudgetState.missingCredentials, '请先在设置中配置听写和翻译凭据。');
     }
-    final current = await usage();
+    return _budget(await usage());
+  }
+
+  (BudgetState, String?) _budget(AiUsage current) {
     if (current.state != AiUsageState.available) {
       return (BudgetState.unknown, current.reason);
     }
@@ -59,7 +70,7 @@ final class SubtitleUsageLedger {
     return (BudgetState.available, null);
   }
 
-  /// Only the admitted season episode can finish after reaching the limit.
+  /// Associates requests with the episode for the completed-episode average.
   Future<T> duringEpisode<T>(String episode, Future<T> Function() run) =>
       runZoned(run, zoneValues: {_episodeZoneKey: episode});
 
@@ -68,16 +79,9 @@ final class SubtitleUsageLedger {
     final episode = Zone.current[_episodeZoneKey] as String?;
     return _serial.run(() async {
       final month = _month;
-      final current = await _usage(month);
-      if (episode == null) {
-        if (current.state != AiUsageState.available) {
-          throw EmbyViewFailure(current.reason!, retryable: true, code: 'subtitle_budget_unknown');
-        }
-        if (current.usedMicros! >= current.budgetMicros ||
-            current.usedMicros! + estimatedCostMicros > current.budgetMicros) {
-          throw const EmbyViewFailure('该请求将超出本月 AI 字幕预算。', code: 'subtitle_budget_exceeded');
-        }
-      }
+      final (state, reason) = _budget(await _usage(month));
+      // This machine admits one request at a time while any budget remains.
+      if (state != BudgetState.available) throw SubtitleBudgetBlocked(reason!, state);
       final own = await _readLocal(month);
       final response = await invoke();
       final requestId = response.requestId?.trim();
