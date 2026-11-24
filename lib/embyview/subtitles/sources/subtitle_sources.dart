@@ -101,7 +101,10 @@ class SubtitleSearchScope {
   _Downloads _candidates = {};
   int _searchVersion = 0;
 
-  Future<List<SubtitleSearchGroup>> search(SubtitleQuery query) async {
+  Future<List<SubtitleSearchGroup>> search(
+    SubtitleQuery query, {
+    Set<SubtitleSource> enabledSources = const {...SubtitleSource.values},
+  }) async {
     _checkOpen();
     final version = ++_searchVersion;
     _candidates.clear();
@@ -113,7 +116,18 @@ class SubtitleSearchScope {
       SubtitleSource.anime: _anime,
     };
     final results = await _whileOpen(
-      Future.wait([for (final entry in providers.entries) _searchGroup(entry.key, query, entry.value, downloads)]),
+      Future.wait([
+        for (final entry in providers.entries)
+          if (enabledSources.contains(entry.key))
+            _searchGroup(entry.key, query, entry.value, downloads)
+          else
+            Future.value(
+              SubtitleSearchGroup(
+                source: entry.key,
+                failure: const EmbyViewFailure('已在设置中停用此字幕来源。', code: 'subtitle_source_disabled'),
+              ),
+            ),
+      ]),
     );
     _checkOpen();
     if (version != _searchVersion) throw _expired;
@@ -162,7 +176,7 @@ class SubtitleSearchScope {
       int rank(_ProviderHit hit) => _rank(query, hit.match, hit.language, hit.releaseGroup);
       hits.sort((a, b) => rank(b).compareTo(rank(a)));
       final candidates = <SubtitleCandidate>[];
-      for (final hit in hits.take(60)) {
+      for (final hit in hits.where((hit) => !hit.name.toLowerCase().endsWith('.ttml')).take(60)) {
         final candidate = SubtitleCandidate(
           id: base64UrlEncode(List.generate(18, (_) => _random.nextInt(256))),
           source: source,

@@ -10,7 +10,7 @@ String? _format(String? value) {
     return lower.contains('advanced') ? 'ass' : 'ssa';
   }
   if (lower == 'webvtt') return 'vtt';
-  return const {'srt', 'ass', 'ssa', 'vtt', 'ttml'}.contains(lower) ? lower : null;
+  return const {'srt', 'ass', 'ssa', 'vtt'}.contains(lower) ? lower : null;
 }
 
 String? _fileFormat(String name) => _format(path.posix.extension(name).replaceFirst('.', ''));
@@ -102,7 +102,6 @@ String? _sniffFormat(Uint8List bytes) {
   if (prefix.startsWith('WEBVTT')) return 'vtt';
   if (prefix.startsWith('[Script Info]')) return 'ass';
   if (prefix.contains('-->')) return 'srt';
-  if (RegExp(r'<tt(?:\s|>)').hasMatch(prefix)) return 'ttml';
   return null;
 }
 
