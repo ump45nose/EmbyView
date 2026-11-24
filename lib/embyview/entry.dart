@@ -25,6 +25,7 @@ import 'playback/immersion.dart';
 import 'playback/moonfin_playback.dart';
 import 'playback/native_playback.dart';
 import 'prefs/machine_preferences.dart';
+import 'subtitles/subtitle_service.dart';
 import 'ui/home/ev_home_page.dart';
 import 'ui/kit.dart';
 import 'ui/wall/ev_wall_page.dart';
@@ -33,7 +34,7 @@ import 'ui/zone/ev_zone_page.dart';
 typedef EmbyViewSessionFactory = FutureOr<EmbyViewSessionServices> Function(
   AccountSnapshot account,
 );
-typedef EmbyViewSubtitlesFactory = EmbyViewSubtitles Function(
+typedef EmbyViewSubtitlesFactory = EmbyViewSubtitles? Function(
   EmbyViewServices services,
 );
 typedef EmbyViewHomeBuilder = Widget Function(
@@ -55,11 +56,13 @@ class EmbyViewSessionServices {
     required this.immersion,
     required this.dispose,
     this.invalidate,
+    this.subtitles,
   });
 
   final EmbyViewData data;
   final EmbyViewPlayback playback;
   final ImmersionPlayback immersion;
+  final EmbyViewSubtitles? subtitles;
 
   /// Revoke browsing and start stopping previews in the account event itself.
   final void Function()? invalidate;
@@ -70,7 +73,7 @@ class EmbyViewSessionServices {
 
 /// Each later stage owns one registration section, without modifying app_router.
 class EmbyViewRegistration {
-  // Stage two: subtitle capability. Leave null until the implementation exists.
+  // Stage two: subtitle capability.
   EmbyViewSubtitlesFactory? stageTwoSubtitles;
 
   // Stage three: shell, home, zones and walls.
@@ -91,7 +94,9 @@ class EmbyViewRegistration {
   ];
 }
 
-final embyViewRegistration = _registerStageThree(EmbyViewRegistration());
+final embyViewRegistration = _registerStageThree(
+  EmbyViewRegistration()..stageTwoSubtitles = (services) => services.subtitles,
+);
 final _installedEntry = ValueNotifier<EmbyViewEntry?>(null);
 
 EmbyViewRegistration _registerStageThree(EmbyViewRegistration registration) {
@@ -261,6 +266,13 @@ Future<EmbyViewEntry> _createMoonfinEntry() async {
     beforeSessionChange: () => entry.releaseCurrentSession(),
     chooseUserOnStartup: () => preferences.current.chooseUserOnStartup,
   );
+  final subtitleRuntime = SubtitleRuntime(
+    preferences,
+    dependencies<AuthenticationStore>(),
+    dependencies<ServerRepository>(),
+    dependencies<MediaServerClientFactory>().deviceInfo,
+    dependencies<PlaybackManager>(),
+  );
   entry = EmbyViewEntry(
     preferences: preferences,
     accounts: accounts,
@@ -308,16 +320,20 @@ Future<EmbyViewEntry> _createMoonfinEntry() async {
         ),
         isAnimeItem: data.isAnimePlaybackItem,
       );
-      Future<void>? stoppingImmersion;
+      final subtitles = subtitleRuntime.bind(profileId, data, client);
+      Future<void>? stoppingImmersion, closingSubtitles;
       return EmbyViewSessionServices(
         data: data,
         playback: playback,
         immersion: immersion,
+        subtitles: subtitles,
         invalidate: () {
+          closingSubtitles ??= subtitles.close();
           data.dispose();
           stoppingImmersion ??= immersion.stop();
           // Observe errors immediately; dispose still awaits the original result.
           unawaited(stoppingImmersion!.catchError((_) {}));
+          unawaited(closingSubtitles!.catchError((_) {}));
         },
         dispose: () async {
           try {
@@ -326,11 +342,15 @@ Future<EmbyViewEntry> _createMoonfinEntry() async {
             await manager.stopAndDrainReports();
           } finally {
             try {
-              await stoppingImmersion;
-              await immersion.close();
+              await (closingSubtitles ??= subtitles.close());
             } finally {
-              data.dispose();
-              await native.dispose();
+              try {
+                await stoppingImmersion;
+                await immersion.close();
+              } finally {
+                data.dispose();
+                await native.dispose();
+              }
             }
           }
         },
@@ -370,6 +390,7 @@ Future<EmbyViewEntry> _createMoonfinEntry() async {
     dispose: (value) async {
       await sessionChanges.cancel();
       await value.close();
+      await subtitleRuntime.close();
       await accounts.close();
       await preferences.close();
       if (identical(installedEmbyViewEntry, value)) installEmbyViewEntry(null);
@@ -479,6 +500,7 @@ class EmbyViewEntry extends ChangeNotifier {
           data: created.data,
           playback: created.playback,
           immersion: created.immersion,
+          subtitles: created.subtitles,
         );
         try {
           final subtitles = registration.stageTwoSubtitles?.call(base);
