@@ -169,6 +169,7 @@ void main() {
     });
     addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
     final reader = SubtitleAudioReader(channel: channel);
+    var checks = 0;
     Future<List<SubtitleAudioSegment>> read(String item, {bool background = false, SubtitleAudioCancellation? token}) =>
         reader.read(
           PlaybackSubtitleSource(
@@ -185,9 +186,11 @@ void main() {
           streamIndex: 3,
           background: background,
           cancellation: token,
+          beforeRead: item == 'season.strm' ? () async => checks++ : null,
         );
 
     final season = read('season.strm', background: true);
+    await Future<void>.delayed(Duration.zero);
     reader.setForegroundStrm(true);
     final player = read('playing.strm');
     await Future<void>.delayed(Duration.zero);
@@ -199,6 +202,7 @@ void main() {
     ]);
     expect((await player).single.sourceEnd, const Duration(seconds: 62));
     expect(requests, hasLength(2));
+    expect(checks, 1);
 
     final token = SubtitleAudioCancellation();
     final local = expectLater(
@@ -212,6 +216,7 @@ void main() {
     reader.setForegroundStrm(false);
     await Future<void>.delayed(Duration.zero);
     expect(requests.last['address'], requests.first['address']);
+    expect(checks, 2);
     native.remove(native.keys.single)!.complete([]);
     expect(await season, isEmpty);
   });
