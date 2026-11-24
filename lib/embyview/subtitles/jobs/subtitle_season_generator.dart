@@ -56,6 +56,7 @@ final class SubtitleSeasonGenerator {
 
     final audioCancellation = SubtitleAudioCancellation();
     final cancelAudio = audioCancellation.cancel;
+    final beforeRead = context.checkAuthorization == null ? null : context.verifyAuthorization;
     run.cancellation.addListener(cancelAudio);
     var progressed = false;
     try {
@@ -71,6 +72,7 @@ final class SubtitleSeasonGenerator {
             streamIndex: context.streamIndex,
             background: true,
             cancellation: audioCancellation,
+            beforeRead: beforeRead,
           );
           for (final segment in audio) {
             if (segment.end <= segment.start) continue;
@@ -129,6 +131,7 @@ final class SubtitleSeasonGenerator {
     final pair = const Uuid().v4();
     final sourceLanguage = isChineseSubtitle(language) ? null : language;
     Future<StoredSubtitle> write(SubtitleDocument document, String? language) async {
+      await context.verifyAuthorization();
       run.cancellation.check();
       final track = await store.retain(
         media,
@@ -138,6 +141,7 @@ final class SubtitleSeasonGenerator {
         coverage: output.coverage,
         pairId: pair,
       );
+      await context.verifyAuthorization();
       run.cancellation.check();
       final saved = await store.save(track);
       if (saved.state != SubtitleSaveState.saved) throw saved.failure ?? _reopenFailed;

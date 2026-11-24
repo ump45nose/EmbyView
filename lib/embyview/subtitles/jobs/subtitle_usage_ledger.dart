@@ -71,22 +71,27 @@ final class SubtitleUsageLedger {
   }
 
   /// Associates requests with the episode for the completed-episode average.
-  Future<T> duringEpisode<T>(String episode, Future<T> Function() run) =>
-      runZoned(run, zoneValues: {_episodeZoneKey: episode});
+  Future<T> duringEpisode<T>(String episode, Future<T> Function() run, {Future<void> Function()? checkAuthorization}) =>
+      runZoned(run, zoneValues: {_episodeZoneKey: (id: episode, checkAuthorization: checkAuthorization)});
 
   Future<T> charge<T>(int estimatedCostMicros, Future<SubtitleAiCharge<T>> Function() invoke) {
     if (estimatedCostMicros < 0) throw ArgumentError.value(estimatedCostMicros);
-    final episode = Zone.current[_episodeZoneKey] as String?;
+    final episode = Zone.current[_episodeZoneKey] as ({String id, Future<void> Function()? checkAuthorization})?;
     return _serial.run(() async {
       final month = _month;
       final (state, reason) = _budget(await _usage(month));
       // This machine admits one request at a time while any budget remains.
       if (state != BudgetState.available) throw SubtitleBudgetBlocked(reason!, state);
       final own = await _readLocal(month);
+      final checkAuthorization = episode?.checkAuthorization;
+      if (checkAuthorization != null) await checkAuthorization();
       final response = await invoke();
       final requestId = response.requestId?.trim();
       final key = requestId == null || requestId.isEmpty ? const Uuid().v4() : requestId;
-      own.calls.putIfAbsent(key, () => (response.costMicros >= 0 ? response.costMicros : estimatedCostMicros, episode));
+      own.calls.putIfAbsent(
+        key,
+        () => (response.costMicros >= 0 ? response.costMicros : estimatedCostMicros, episode?.id),
+      );
       await _writeLocal(month, own);
       await _sync();
       return response.value;

@@ -52,6 +52,7 @@ final class SubtitleEpisodeContext {
     required this.authorizationId,
     this.language,
     this.streamIndex,
+    this.checkAuthorization,
   });
 
   final PlaybackSubtitleSource source;
@@ -61,8 +62,24 @@ final class SubtitleEpisodeContext {
   final String authorizationId;
   final String? language;
   final int? streamIndex;
+  final Future<void> Function()? checkAuthorization;
 
   SubtitleMedia get media => SubtitleMedia.fromPlayback(source, duration: duration);
+
+  Future<void> verifyAuthorization() async {
+    try {
+      await checkAuthorization?.call();
+    } on Exception catch (error) {
+      throw _EpisodeAuthorizationBlocked(
+        error is EmbyViewFailure ? error : const EmbyViewFailure('暂时无法确认此集的原账号和目录授权。', retryable: true),
+      );
+    }
+  }
+}
+
+final class _EpisodeAuthorizationBlocked extends EmbyViewFailure {
+  _EpisodeAuthorizationBlocked(EmbyViewFailure failure)
+    : super(failure.reason, retryable: failure.retryable, code: failure.code ?? 'subtitle_job_authorization');
 }
 
 final class SubtitleEpisodeRun {
@@ -325,26 +342,29 @@ final class SubtitleSeasonQueue {
       _publish();
     });
     try {
-      final contentId = await _ledger.duringEpisode(key, () => _generate(context, run));
+      final contentId = await _ledger.duringEpisode(
+        key,
+        () => _generate(context, run),
+        checkAuthorization: context.checkAuthorization == null ? null : context.verifyAuthorization,
+      );
       if (contentId.isEmpty) throw StateError('Episode generator returned no durable content ID');
       cancellation.check();
       await _ledger.completeEpisode(key);
       await _update(row, () => row.completeId = contentId);
-    } on SubtitleBudgetBlocked catch (failure) {
+    } catch (error) {
+      if (cancellation.isCancelled) return true;
+      final failure = _failure(error);
+      final waiting = failure is SubtitleBudgetBlocked || failure is _EpisodeAuthorizationBlocked && failure.retryable;
       await _update(row, () {
         row.stage = EpisodeJobState.queued;
-        row.waiting = failure.reason;
-      });
-      return false;
-    } catch (error) {
-      if (!cancellation.isCancelled) {
-        final failure = _failure(error);
-        await _update(row, () {
-          row.stage = EpisodeJobState.queued;
+        if (waiting) {
+          row.waiting = failure.reason;
+        } else {
           row.failures++;
           if (row.failures >= 3 || !failure.retryable) row.failure = failure;
-        });
-      }
+        }
+      });
+      return !waiting;
     } finally {
       _active = null;
       _cancellation = null;

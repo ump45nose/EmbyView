@@ -1,16 +1,23 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:moonfin/embyview/contracts/common.dart';
 import 'package:moonfin/embyview/contracts/media.dart';
+import 'package:moonfin/embyview/contracts/preferences.dart';
 import 'package:moonfin/embyview/contracts/subtitles.dart';
 import 'package:moonfin/embyview/playback/playback_subtitle_input.dart';
+import 'package:moonfin/embyview/subtitles/ai/subtitle_ai_processor.dart';
 import 'package:moonfin/embyview/subtitles/ai/subtitle_ai_types.dart';
+import 'package:moonfin/embyview/subtitles/audio/subtitle_audio.dart';
 import 'package:moonfin/embyview/subtitles/jobs/subtitle_jobs.dart';
 import 'package:moonfin/embyview/subtitles/store/subtitle_store.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory scratch, nas;
   late bool mounted, credentials;
   late int limit;
@@ -151,4 +158,81 @@ void main() {
     expect((await queue.jobs.first).single.episodes.last.state, EpisodeJobState.cancelled);
     await queue.close();
   });
+
+  for (final buffered in [false, true]) {
+    test('revoked authorization blocks ${buffered ? 'buffered audio upload' : 'the next native window'}', () async {
+      limit = 1000;
+      final usage = ledger();
+      final mediaFile = await File('${nas.path}/Episode.mkv').create();
+      final store = SubtitleStore(
+        folderStatus: () async => MediaFolderStatus(state: MediaFolderState.authorized, localRoot: nas.path),
+        localDirectory: () async => scratch,
+      );
+      const channel = MethodChannel('test/season-authorization');
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final windows = <int>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        final start = (call.arguments as Map)['startUs'] as int;
+        windows.add(start);
+        return [
+          for (final offset in [0, if (buffered) 100000])
+            {'startUs': start + offset, 'sourceUs': start + offset, 'pcm': Uint8List(4800 * 4)},
+        ];
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      var revoked = false;
+      var paidRequests = 0;
+      final generator = SubtitleSeasonGenerator(
+        reader: SubtitleAudioReader(channel: channel),
+        processor: SubtitleAiProcessor(
+          readSecret: (_) async => 'fixture',
+          translationProvider: () => TranslationProvider.openAi,
+          meter: usage.charge,
+          clientFactory: () => MockClient((_) async {
+            paidRequests++;
+            revoked = true;
+            return http.Response('{"language":"ja","segments":[],"text":""}', 200);
+          }),
+        ),
+      );
+      final queue = await SubtitleSeasonQueue.open(
+        localDirectory: scratch,
+        ledger: usage,
+        resolve: (_, _) async => SubtitleEpisodeContext(
+          source: PlaybackSubtitleSource(
+            generation: 1,
+            target: const PlayTarget(itemId: '1'),
+            mediaSourceId: 'source-1',
+            address: mediaFile.uri,
+            headers: const {},
+            userAgent: 'test',
+            itemFilePath: '/mnt/media/Episode.mkv',
+          ),
+          store: store,
+          duration: const Duration(minutes: 1),
+          authorizationId: 'original-root',
+          availability: const SubtitleAvailability(chinese: ChineseSubtitleState.canGenerate),
+          checkAuthorization: () async {
+            if (revoked) throw const EmbyViewFailure('revoked', retryable: true);
+          },
+        ),
+        generate: generator.generate,
+      );
+      addTearDown(queue.close);
+      final request = SubtitleSeasonRequest(
+        accountId: 'account',
+        seriesId: 'series',
+        seasonId: 'season',
+        seasonName: 'Season',
+        episodes: const [SubtitleEpisodeRequest(episodeId: '1', name: 'Episode')],
+      );
+      await queue.queueSeason(request, await queue.quoteSeason(request));
+      final paused = await queue.jobs.firstWhere(
+        (jobs) => jobs.firstOrNull?.episodes.single.waitingReason == 'revoked',
+      );
+      expect(paused.single.episodes.single.state, EpisodeJobState.queued);
+      expect(windows, [0]);
+      expect((paidRequests, (await usage.usage()).usedMicros), (1, 10));
+    });
+  }
 }
