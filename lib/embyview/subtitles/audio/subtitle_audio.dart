@@ -226,6 +226,7 @@ class SubtitleAudioReader {
     _wake();
   }
 
+  /// Rechecks [beforeRead] after waiting for the slot and before each retry.
   Future<List<SubtitleAudioSegment>> read(
     PlaybackSubtitleSource source, {
     required Duration start,
@@ -233,12 +234,14 @@ class SubtitleAudioReader {
     int? streamIndex,
     bool background = false,
     SubtitleAudioCancellation? cancellation,
+    Future<void> Function()? beforeRead,
   }) async {
     if (start.isNegative || end <= start || end - start > _maxWindow || (streamIndex != null && streamIndex < 0)) {
       throw ArgumentError('Invalid independent audio window or stream index');
     }
     final strm = isSubtitleStrm(source);
     _ReadSlot? slot;
+    bool waiting() => _active != null || background && (_foregroundReads > 0 || strm && _foregroundStrm);
 
     void checkCancelled() {
       if (cancellation?.isCancelled ?? false) throw const SubtitleAudioCancelled();
@@ -256,9 +259,17 @@ class SubtitleAudioReader {
       checkCancelled();
       if (!background && strm) _preemptSeason();
       while (true) {
-        while (_active != null || background && (_foregroundReads > 0 || strm && _foregroundStrm)) {
+        while (waiting()) {
           await _slotChanged.future;
           checkCancelled();
+        }
+        if (beforeRead != null) {
+          try {
+            await beforeRead();
+          } finally {
+            checkCancelled();
+          }
+          if (waiting()) continue;
         }
         final reading = slot = _active = _ReadSlot(++_nextNativeId, background && strm);
         try {
