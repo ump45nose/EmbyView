@@ -33,6 +33,7 @@ import 'ui/detail/ev_detail_page.dart';
 import 'ui/home/ev_home_page.dart';
 import 'ui/kit.dart';
 import 'ui/palette/ev_command_palette.dart';
+import 'ui/player/ev_player_page.dart';
 import 'ui/quicklook/ev_quicklook.dart';
 import 'ui/search/ev_search_page.dart';
 import 'ui/settings/ev_settings_page.dart';
@@ -105,9 +106,11 @@ class EmbyViewRegistration {
   ];
 }
 
-final embyViewRegistration = _registerStageFour(
-  _registerStageThree(
-    EmbyViewRegistration()..stageTwoSubtitles = (services) => services.subtitles,
+final embyViewRegistration = _registerStageFive(
+  _registerStageFour(
+    _registerStageThree(
+      EmbyViewRegistration()..stageTwoSubtitles = (services) => services.subtitles,
+    ),
   ),
 );
 final _installedEntry = ValueNotifier<EmbyViewEntry?>(null);
@@ -162,6 +165,12 @@ EmbyViewRegistration _registerStageFour(EmbyViewRegistration registration) {
     }),
     GoRoute(path: 'users', builder: (_, _) => const _EmbyViewRouteHost(initialEntry: _S4Users(0))),
   ]);
+  return registration;
+}
+
+EmbyViewRegistration _registerStageFive(EmbyViewRegistration registration) {
+  registration.stageFivePlayer = (context, session, {origin, art}) =>
+      EvPlayerPage(session: session, origin: origin, art: art);
   return registration;
 }
 
