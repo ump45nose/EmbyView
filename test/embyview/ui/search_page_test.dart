@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
+// ignore: deprecated_member_use
+import 'package:flutter/material.dart' hide ThemeMode;
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
@@ -733,4 +735,92 @@ void main() {
     expect(distinctRows.length, greaterThanOrEqualTo(2));
     expect(chipRects.last.top, greaterThan(chipRects.first.top));
   });
+
+  testWidgets(
+    'search landing shelf disables system scrollbar and keeps EvShelfScrollbar hidden until hover or scroll',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      await setViewport(tester, const Size(1440, 900));
+      final hotItems = [
+        for (var i = 1; i <= 12; i++) _card('hot_$i', '热门影片 $i', libraryId: 'movie'),
+      ];
+      final data = _FakeData(
+        landing: SearchLanding(
+          recentTerms: const ['盗梦空间', '宫崎骏'],
+          shelves: [HomeShelf(id: 'hot', title: '大家都在看', items: hotItems, total: hotItems.length)],
+        ),
+        catalog: _sampleCatalog(),
+      );
+      final h = _Harness(data: data);
+      addTearDown(h.dispose);
+
+      // Mount inside MaterialApp under macOS target platform so system Scrollbar would appear if not disabled.
+      await tester.pumpWidget(
+        MaterialApp(
+          home: EvThemeScope(
+            preferences: h.prefs,
+            child: EvScope(
+              services: h.services,
+              stage: h.stage,
+              immersion: h.immersion,
+              shell: h.shell,
+              child: const Scaffold(body: EvSearchPage()),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(Scrollbar), findsNothing);
+      expect(find.byType(RawScrollbar), findsNothing);
+
+      final shelfFinder = find.byKey(const ValueKey<String>('ev_search_landing_shelf_hot'));
+      expect(shelfFinder, findsOneWidget);
+
+      final horizFinder = find.descendant(
+        of: shelfFinder,
+        matching: find.byWidgetPredicate(
+          (w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
+        ),
+      );
+      expect(horizFinder, findsOneWidget);
+
+      const sentinel = SizedBox.shrink();
+      final horizEl = tester.element(horizFinder);
+      final built = ScrollConfiguration.of(horizEl).buildScrollbar(
+        horizEl,
+        sentinel,
+        ScrollableDetails.horizontal(),
+      );
+      expect(identical(built, sentinel), isTrue);
+
+      final opacityFinder = find.descendant(
+        of: shelfFinder,
+        matching: find.byKey(const ValueKey('ev_shelf_scrollbar_opacity')),
+      );
+      expect(opacityFinder, findsOneWidget);
+      expect(tester.widget<AnimatedOpacity>(opacityFinder).opacity, 0.0);
+
+      // Horizontal scroll reveals scrollbar transiently, then fades out after 900ms idle timeout.
+      final sc = tester.widget<SingleChildScrollView>(horizFinder).controller!;
+      sc.jumpTo(120);
+      await tester.pump();
+      expect(tester.widget<AnimatedOpacity>(opacityFinder).opacity, 1.0);
+      await tester.pump(const Duration(milliseconds: 950));
+      await tester.pumpAndSettle();
+      expect(tester.widget<AnimatedOpacity>(opacityFinder).opacity, 0.0);
+
+      // Mouse hover reveals scrollbar; moving mouse off hides it again.
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(-10, -10));
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(tester.getCenter(shelfFinder));
+      await tester.pumpAndSettle();
+      expect(tester.widget<AnimatedOpacity>(opacityFinder).opacity, 1.0);
+
+      await mouse.moveTo(const Offset(-10, -10));
+      await tester.pumpAndSettle();
+      expect(tester.widget<AnimatedOpacity>(opacityFinder).opacity, 0.0);
+    },
+  );
 }

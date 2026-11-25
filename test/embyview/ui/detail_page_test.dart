@@ -1780,4 +1780,144 @@ void main() {
       },
     );
   });
+
+  group('Horizontal scroll rows: no system scrollbar & resting EvShelfScrollbar hidden', () {
+    testWidgets(
+      'detail page horizontal rows disable system scrollbars and keep EvShelfScrollbar hidden until hover or scroll',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final seriesCard = _makeCard(
+          id: 's_scroll',
+          title: '滚动条测试剧集',
+          kind: MediaKind.series,
+          childCount: 8,
+          withLogo: false,
+        );
+        final seasons = [
+          for (var i = 1; i <= 8; i++)
+            SeasonSummary(id: 'sea_$i', name: '第 $i 季', number: i, total: 10),
+        ];
+        final episodes = SeasonEpisodes(
+          season: seasons.first,
+          playedCount: 2,
+          episodes: [
+            for (var i = 1; i <= 10; i++)
+              _makeEpisode(
+                id: 'ep_$i',
+                seriesId: 's_scroll',
+                seasonId: 'sea_1',
+                number: i,
+                title: '第 $i 集标题',
+                overview: '第 $i 集简介内容。',
+                played: i <= 2,
+              ),
+          ],
+        );
+        final similar = [
+          for (var i = 1; i <= 12; i++)
+            _makeCard(id: 'sim_$i', title: '相似推荐 $i', libraryId: 'movie', year: 2020 + (i % 5)),
+        ];
+        final people = [
+          for (var i = 1; i <= 16; i++)
+            PersonCredit(id: 'p_$i', name: '演职员 $i', role: i <= 2 ? 'Director' : 'Actor', character: '角色 $i'),
+        ];
+
+        final data = _FakeDetailData(
+          details: {'s_scroll': MediaDetail(card: seriesCard, episodeCount: 80)},
+          seasonsBySeries: {'s_scroll': seasons},
+          episodesBySeason: {'s_scroll:sea_1': episodes},
+          similarByItem: {'s_scroll': similar},
+          peopleByItem: {'s_scroll': people},
+        );
+        final h = _createHarness(
+          initialPrefs: const LocalPreferences(detailTrailerDelay: null, themeMusic: false),
+          data: data,
+        );
+        addTearDown(h.dispose);
+
+        await tester.pumpWidget(_wrapDetail(h, child: const EvDetailPage(itemId: 's_scroll', enableAnimations: false)));
+        await tester.pumpAndSettle();
+
+        // 1. No system Scrollbar or RawScrollbar anywhere on the detail page (even under macOS target platform).
+        expect(find.byType(Scrollbar), findsNothing);
+        expect(find.byType(RawScrollbar), findsNothing);
+
+        // 2. All 4 horizontal SingleChildScrollViews (season tabs, episode track, similar shelf, people shelf)
+        //    inherit a ScrollConfiguration with scrollbars disabled.
+        final horizFinder = find.byWidgetPredicate(
+          (w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
+        );
+        expect(horizFinder, findsNWidgets(4));
+        const sentinel = SizedBox.shrink();
+        for (final el in tester.elementList(horizFinder)) {
+          final built = ScrollConfiguration.of(el).buildScrollbar(
+            el,
+            sentinel,
+            ScrollableDetails.horizontal(),
+          );
+          expect(identical(built, sentinel), isTrue);
+        }
+
+        // 3. All 3 overflowing horizontal tracks render EvShelfScrollbar with opacity 0.0 at rest.
+        final episodesSection = find.byKey(const Key('ev_detail_episodes_section'));
+        final similarShelf = find.byKey(const Key('ev_detail_similar_shelf'));
+        final peopleShelf = find.byKey(const Key('ev_detail_people_shelf'));
+        AnimatedOpacity opacityIn(Finder container) {
+          final f = find.descendant(
+            of: container,
+            matching: find.byKey(const ValueKey('ev_shelf_scrollbar_opacity')),
+          );
+          expect(f, findsOneWidget);
+          return tester.widget<AnimatedOpacity>(f);
+        }
+
+        expect(opacityIn(episodesSection).opacity, 0.0);
+        expect(opacityIn(similarShelf).opacity, 0.0);
+        expect(opacityIn(peopleShelf).opacity, 0.0);
+
+        // 4. Horizontal scroll on episodes track reveals scrollbar transiently, then hides after idle timeout.
+        final epTrack = tester.widget<SingleChildScrollView>(find.byKey(const Key('ev_detail_episodes_track')));
+        epTrack.controller!.jumpTo(120);
+        await tester.pump();
+        expect(opacityIn(episodesSection).opacity, 1.0);
+        await tester.pump(const Duration(milliseconds: 950));
+        await tester.pumpAndSettle();
+        expect(opacityIn(episodesSection).opacity, 0.0);
+
+        // 5. Hover reveals scrollbar for episodes, similar, and people shelves; unhover hides again.
+        final scroller = tester.widget<SingleChildScrollView>(find.byKey(const Key('ev_detail_scroller'))).controller!;
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: const Offset(-10, -10));
+        addTearDown(mouse.removePointer);
+
+        Future<void> verifyHoverToggle(Finder sectionFinder) async {
+          await tester.ensureVisible(sectionFinder);
+          await tester.pumpAndSettle();
+          expect(opacityIn(sectionFinder).opacity, 0.0);
+
+          await mouse.moveTo(tester.getCenter(sectionFinder));
+          await tester.pumpAndSettle();
+          expect(opacityIn(sectionFinder).opacity, 1.0);
+
+          await mouse.moveTo(const Offset(-10, -10));
+          await tester.pumpAndSettle();
+          // Wait out episode hover delay timer if triggered on episodes section.
+          await tester.pump(const Duration(milliseconds: 950));
+          await tester.pumpAndSettle();
+          expect(opacityIn(sectionFinder).opacity, 0.0);
+        }
+
+        await verifyHoverToggle(episodesSection);
+        await verifyHoverToggle(similarShelf);
+        scroller.jumpTo(scroller.position.maxScrollExtent);
+        await tester.pumpAndSettle();
+        await verifyHoverToggle(peopleShelf);
+      },
+    );
+  });
 }
