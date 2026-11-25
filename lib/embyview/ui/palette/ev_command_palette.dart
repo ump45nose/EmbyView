@@ -41,11 +41,7 @@ class _EvCommandPaletteHostState extends State<EvCommandPaletteHost> {
   FocusNode? _previousFocus;
 
   @override
-  void initState() {
-    super.initState();
-    _attach(widget.controller);
-    HardwareKeyboard.instance.addHandler(_onHardwareKey);
-  }
+  void initState() { super.initState(); _attach(widget.controller); HardwareKeyboard.instance.addHandler(_onHardwareKey); }
 
   void _attach(EvCommandPaletteController? provided) {
     _ownsController = provided == null;
@@ -56,28 +52,22 @@ class _EvCommandPaletteHostState extends State<EvCommandPaletteHost> {
   @override
   void didUpdateWidget(EvCommandPaletteHost oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.controller != widget.controller) {
-      _controller.removeListener(_onChanged);
-      if (_ownsController) _controller.dispose();
-      _attach(widget.controller);
-    }
+    if (oldWidget.controller == widget.controller) return;
+    _controller.removeListener(_onChanged);
+    if (_ownsController) _controller.dispose();
+    _attach(widget.controller);
   }
 
   void _onChanged() {
     final open = _controller.isOpen;
     if (open == _wasOpen) return;
     _wasOpen = open;
-    if (open) {
-      _previousFocus = FocusManager.instance.primaryFocus;
-      widget.onBeforeOpen?.call();
-    } else {
-      final prev = _previousFocus;
-      _previousFocus = null;
+    if (open) { _previousFocus = FocusManager.instance.primaryFocus; widget.onBeforeOpen?.call(); }
+    else {
+      final prev = _previousFocus; _previousFocus = null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final cur = FocusManager.instance.primaryFocus;
-        if (mounted && prev != null && prev.canRequestFocus && prev.context != null && (cur == null || cur is FocusScopeNode)) {
-          prev.requestFocus();
-        }
+        if (mounted && prev != null && prev.canRequestFocus && prev.context != null && (cur == null || cur is FocusScopeNode)) prev.requestFocus();
       });
     }
     if (mounted) setState(() {});
@@ -86,14 +76,8 @@ class _EvCommandPaletteHostState extends State<EvCommandPaletteHost> {
   bool _onHardwareKey(KeyEvent event) {
     if (!mounted || event is! KeyDownEvent || (ModalRoute.of(context)?.isCurrent == false)) return false;
     final hw = HardwareKeyboard.instance;
-    if (event.logicalKey == LogicalKeyboardKey.keyK && (hw.isMetaPressed || hw.isControlPressed) && !hw.isAltPressed) {
-      _controller.toggle();
-      return true;
-    }
-    if (_controller.isOpen && event.logicalKey == LogicalKeyboardKey.escape) {
-      _controller.close();
-      return true;
-    }
+    if (event.logicalKey == LogicalKeyboardKey.keyK && (hw.isMetaPressed || hw.isControlPressed) && !hw.isAltPressed) { _controller.toggle(); return true; }
+    if (_controller.isOpen && event.logicalKey == LogicalKeyboardKey.escape) { _controller.close(); return true; }
     return false;
   }
 
@@ -144,6 +128,7 @@ class _EvCommandPaletteOverlayState extends State<EvCommandPaletteOverlay>
   final Map<String, GlobalKey> _itemKeys = {};
 
   late final AnimationController _enterController;
+  late final CurvedAnimation _fadeAnim, _springAnim;
   EvScope? _scope;
   EmbyViewData? _boundData;
   StreamSubscription<LocalPreferences>? _prefsSub;
@@ -163,6 +148,8 @@ class _EvCommandPaletteOverlayState extends State<EvCommandPaletteOverlay>
   void initState() {
     super.initState();
     _enterController = AnimationController(vsync: this, duration: EvDurations.medium)..forward();
+    _fadeAnim = CurvedAnimation(parent: _enterController, curve: const Interval(0.0, 0.56, curve: EvCurves.soft));
+    _springAnim = CurvedAnimation(parent: _enterController, curve: EvCurves.spring);
     _inputFocus.onKeyEvent = (_, event) => _handleKeyEvent(event);
     WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _inputFocus.requestFocus(); });
   }
@@ -342,14 +329,17 @@ class _EvCommandPaletteOverlayState extends State<EvCommandPaletteOverlay>
 
   void _runRandom(EvScope? scope, List<ZoneTile> zones) {
     final data = scope?.services.data, openDetail = widget.onOpenDetail ?? scope?.shell.onOpenDetail;
+    final capturedSessionId = scope?.services.accounts.snapshot.sessionId;
     widget.onClose?.call();
-    if (data == null || openDetail == null) return;
+    if (data == null || openDetail == null || capturedSessionId == null) return;
     unawaited(() async {
       try {
         final candidates = zones.isNotEmpty ? zones : await data.zones();
         if (candidates.isEmpty) return;
         final card = await data.randomInZone(_pickRandomZone(candidates).id);
-        if (card != null) openDetail(card.id);
+        final snap = scope?.services.accounts.snapshot;
+        if (card == null || snap == null || snap.sessionId != capturedSessionId || snap.phase != AccountPhase.signedIn) return;
+        openDetail(card.id);
       } catch (_) {}
     }());
   }
@@ -359,11 +349,8 @@ class _EvCommandPaletteOverlayState extends State<EvCommandPaletteOverlay>
     _debounceTimer?.cancel();
     _scope?.shell.removeListener(_onShellChanged);
     unawaited(_prefsSub?.cancel());
-    _enterController.dispose();
-    _queryController.dispose();
-    _inputFocus.dispose();
-    _overlayScope.dispose();
-    _scrollController.dispose();
+    _fadeAnim.dispose(); _springAnim.dispose(); _enterController.dispose();
+    _queryController.dispose(); _inputFocus.dispose(); _overlayScope.dispose(); _scrollController.dispose();
     super.dispose();
   }
 
@@ -376,49 +363,35 @@ class _EvCommandPaletteOverlayState extends State<EvCommandPaletteOverlay>
     final selected = flat.isEmpty ? -1 : _selectedIndex.clamp(0, flat.length - 1);
     final activeIds = {for (final item in flat) item.id};
     _itemKeys.removeWhere((k, _) => !activeIds.contains(k));
-
     final topPad = math.min(s.vh(16), math.max(s.rem(2.0), s.size.height * 0.16));
-    final boxWidth = math.min(s.rem(36.0), s.size.width * 0.9);
+    final boxWidth = math.min(s.rem(42.0), s.size.width * 0.9);
     final boxMaxHeight = math.min(s.rem(32.0), math.max(s.rem(12.0), s.size.height - topPad - s.rem(2.0)));
     final scrimColor = t.isPaper ? const Color.fromRGBO(250, 249, 245, 0.60) : const Color.fromRGBO(0, 0, 0, 0.35);
-    final fadeAnim = CurvedAnimation(parent: _enterController, curve: const Interval(0.0, 0.56, curve: EvCurves.soft));
-    final springAnim = CurvedAnimation(parent: _enterController, curve: EvCurves.spring);
 
     return FocusScope(
-      node: _overlayScope,
-      onKeyEvent: (_, event) => _handleKeyEvent(event),
-      child: FadeTransition(
-        opacity: fadeAnim,
-        child: Stack(fit: StackFit.expand, children: [
-          Positioned.fill(child: GestureDetector(
-            key: const Key('ev_palette_scrim'), behavior: HitTestBehavior.opaque, onTap: widget.onClose,
-            child: ColoredBox(color: scrimColor),
-          )),
-          Align(
-            alignment: Alignment.topCenter,
-            child: Padding(
-              padding: EdgeInsets.only(top: topPad),
-              child: AnimatedBuilder(
-                animation: springAnim,
-                builder: (_, child) => Transform.translate(
-                  offset: Offset(0, s.rem(-0.75) * (1.0 - springAnim.value)),
-                  child: Transform.scale(scale: 0.97 + 0.03 * springAnim.value, child: child),
-                ),
-                child: Container(
-                  width: boxWidth, constraints: BoxConstraints(maxHeight: boxMaxHeight),
-                  child: EvGlass(
-                    key: const Key('ev_palette_box'), borderRadius: BorderRadius.circular(s.rem(1.25)),
-                    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                      _buildInputRow(t, s),
-                      Flexible(child: _buildList(t, s, groups, selected)),
-                    ]),
-                  ),
-                ),
-              ),
+      node: _overlayScope, onKeyEvent: (_, event) => _handleKeyEvent(event),
+      child: FadeTransition(opacity: _fadeAnim, child: Stack(fit: StackFit.expand, children: [
+        Positioned.fill(child: GestureDetector(
+          key: const Key('ev_palette_scrim'), behavior: HitTestBehavior.opaque, onTap: widget.onClose,
+          child: ColoredBox(color: scrimColor),
+        )),
+        Align(alignment: Alignment.topCenter, child: Padding(padding: EdgeInsets.only(top: topPad), child: AnimatedBuilder(
+          animation: _springAnim,
+          builder: (_, child) => Transform.translate(
+            offset: Offset(0, s.rem(-0.75) * (1.0 - _springAnim.value)),
+            child: Transform.scale(scale: 0.97 + 0.03 * _springAnim.value, child: child),
+          ),
+          child: Container(
+            width: boxWidth, constraints: BoxConstraints(maxHeight: boxMaxHeight),
+            child: EvGlass(
+              key: const Key('ev_palette_box'), borderRadius: BorderRadius.circular(s.rem(1.25)),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                _buildInputRow(t, s), Flexible(child: _buildList(t, s, groups, selected)),
+              ]),
             ),
           ),
-        ]),
-      ),
+        ))),
+      ])),
     );
   }
 

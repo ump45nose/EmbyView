@@ -65,41 +65,40 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
     if (!identical(_boundServices, scope.services)) _bindServices(scope);
   }
 
+  void _cancelSubs() { unawaited(_prefsSub?.cancel()); unawaited(_accountsSub?.cancel()); unawaited(_jobsSub?.cancel()); }
+
   void _bindServices(EvScope scope) {
     final services = scope.services;
     _boundServices = services;
-    unawaited(_prefsSub?.cancel());
-    unawaited(_accountsSub?.cancel());
-    unawaited(_jobsSub?.cancel());
+    _cancelSubs();
     _prefs = services.preferences.current;
     _account = services.accounts.snapshot;
+    _zoneTiles = const []; _tilesById = const {}; _zoneFacets = null; _aiUsage = null; _aiJobs = const []; _loadingAiUsage = false;
 
     _prefsSub = services.preferences.changes.listen((next) {
       final zc = _zonesSig(_prefs.zones) != _zonesSig(next.zones);
       final bc = _prefs.monthlyBudgetMicros != next.monthlyBudgetMicros;
-      if (!mounted) return;
+      if (!mounted || !identical(_boundServices, services)) return;
       setState(() => _prefs = next);
       if (zc) unawaited(_refreshZones(services));
-      if (bc && services.subtitles != null) unawaited(_refreshAiUsage(services.subtitles!));
+      if (bc && services.subtitles != null) unawaited(_refreshAiUsage(services));
     });
-    _accountsSub = services.accounts.changes.listen((next) { if (mounted) setState(() => _account = next); });
+    _accountsSub = services.accounts.changes.listen((next) { if (mounted && identical(_boundServices, services)) setState(() => _account = next); });
 
     final subs = services.subtitles;
     if (subs != null) {
-      _jobsSub = subs.jobs.listen((j) { if (mounted) setState(() => _aiJobs = List.unmodifiable(j)); }, onError: (_) {});
-      unawaited(_refreshAiUsage(subs));
-    } else {
-      _aiUsage = null; _aiJobs = const [];
+      _jobsSub = subs.jobs.listen((j) { if (mounted && identical(_boundServices, services)) setState(() => _aiJobs = List.unmodifiable(j)); }, onError: (_) {});
+      unawaited(_refreshAiUsage(services, notify: false));
     }
-    unawaited(_refreshSecrets(services.preferences));
+    unawaited(_refreshSecrets(services));
     unawaited(_refreshZones(services));
-    unawaited(_refreshFacets(services.data));
+    unawaited(_refreshFacets(services));
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || !identical(_boundServices, services)) return;
       scope.immersion.onCardHoverEnd();
       scope.stage..setMode(EvStageMode.ambient)..setScrollProgress(1.0)..setVeilLifted(false);
-      scope.shell.updateChrome(clearTitlePlate: true, rightActions: const [], hideTabs: false, hideAvatar: false);
+      scope.shell..updateChrome(clearTitlePlate: true, rightActions: const [], hideTabs: false, hideAvatar: false)..setScrollOffset(0.0);
       if (!_didHandleMountEditor && (widget.openZoneEditorOnMount || widget.editZoneId != null)) {
         _didHandleMountEditor = true;
         final target = widget.editZoneId != null ? _displayedZones.where((z) => z.id == widget.editZoneId).firstOrNull : null;
@@ -110,12 +109,12 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
 
   String _zonesSig(List<ZonePreference> zs) => zs.map((z) => '${z.id}:${z.name}:${z.iconKey}:${z.colorSlot}').join('|');
 
-  Future<void> _refreshSecrets(EmbyViewPreferences prefs) async {
+  Future<void> _refreshSecrets(EmbyViewServices services) async {
     try {
-      final s = await prefs.configuredSecrets();
-      if (mounted) setState(() { _configuredSecrets = s; _loadingSecrets = false; _secretsLoaded = true; });
+      final s = await services.preferences.configuredSecrets();
+      if (mounted && identical(_boundServices, services)) setState(() { _configuredSecrets = s; _loadingSecrets = false; _secretsLoaded = true; });
     } catch (_) {
-      if (mounted) setState(() { _loadingSecrets = false; _secretsLoaded = true; });
+      if (mounted && identical(_boundServices, services)) setState(() { _loadingSecrets = false; _secretsLoaded = true; });
     }
   }
 
@@ -125,19 +124,24 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
     final token = ++_loadToken;
     try {
       final tiles = await data.zones();
-      if (mounted && token == _loadToken) setState(() { _zoneTiles = List.unmodifiable(tiles); _tilesById = {for (final t in tiles) t.id: t}; });
+      if (mounted && token == _loadToken && identical(_boundServices, services)) {
+        setState(() { _zoneTiles = List.unmodifiable(tiles); _tilesById = {for (final t in tiles) t.id: t}; });
+      }
     } catch (_) {}
   }
 
-  Future<void> _refreshFacets(EmbyViewData? data) async {
+  Future<void> _refreshFacets(EmbyViewServices services) async {
+    final data = services.data;
     if (data == null) return;
-    try { final f = await data.customZoneFacets(); if (mounted) setState(() => _zoneFacets = f); } catch (_) {}
+    try { final f = await data.customZoneFacets(); if (mounted && identical(_boundServices, services)) setState(() => _zoneFacets = f); } catch (_) {}
   }
 
-  Future<void> _refreshAiUsage(EmbyViewSubtitles subs) async {
-    setState(() => _loadingAiUsage = true);
-    try { final u = await subs.usage(); if (mounted) setState(() { _aiUsage = u; _loadingAiUsage = false; }); }
-    catch (_) { if (mounted) setState(() => _loadingAiUsage = false); }
+  Future<void> _refreshAiUsage(EmbyViewServices services, {bool notify = true}) async {
+    final subs = services.subtitles;
+    if (subs == null) return;
+    if (notify && mounted) { setState(() => _loadingAiUsage = true); } else { _loadingAiUsage = true; }
+    try { final u = await subs.usage(); if (mounted && identical(_boundServices, services)) setState(() { _aiUsage = u; _loadingAiUsage = false; }); }
+    catch (_) { if (mounted && identical(_boundServices, services)) setState(() => _loadingAiUsage = false); }
   }
 
   Future<void> _guard(Future<void> Function() action) async {
@@ -155,31 +159,32 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
     unawaited(_guard(() => services.preferences.reorderZones(ids)));
   }
 
-  @override
-  void dispose() {
-    unawaited(_prefsSub?.cancel());
-    unawaited(_accountsSub?.cancel());
-    unawaited(_jobsSub?.cancel());
-    super.dispose();
-  }
+  @override void dispose() { _cancelSubs(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
-    final t = EvTheme.of(context), s = EvScale.of(context), services = _boundServices ?? EvScope.of(context).services;
+    final scope = EvScope.of(context), t = EvTheme.of(context), s = EvScale.of(context), services = _boundServices ?? scope.services;
+    final editTile = _editingZone != null ? _tilesById[_editingZone!.id] : null;
     return Stack(fit: StackFit.expand, children: [
       Padding(
         padding: EdgeInsets.fromLTRB(s.gutter, s.rem(6.0), s.gutter, 0),
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          SizedBox(width: s.rem(15.5), child: _sidebar(t, s)),
+          SizedBox(width: s.rem(15.5), child: _sidebar(scope, t, s)),
           SizedBox(width: s.rem(2.5)),
           Expanded(child: Align(alignment: Alignment.topLeft, child: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: s.rem(48.0)),
-            child: SingleChildScrollView(
-              key: ValueKey<EvSettingsSection>(_section), padding: EdgeInsets.only(bottom: s.rem(4.0)),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                if (_bannerError != null) _errorBanner(t, s, _bannerError!),
-                _buildPane(services),
-              ]),
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (n) {
+                if (n.depth == 0 && n.metrics.axis == Axis.vertical) scope.shell.setScrollOffset(n.metrics.pixels);
+                return false;
+              },
+              child: SingleChildScrollView(
+                key: ValueKey<EvSettingsSection>(_section), padding: EdgeInsets.only(bottom: s.rem(4.0)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  if (_bannerError != null) _errorBanner(t, s, _bannerError!),
+                  _buildPane(services),
+                ]),
+              ),
             ),
           ))),
         ]),
@@ -187,8 +192,7 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
       if (_zoneEditorOpen)
         Positioned.fill(child: EvZoneEditorOverlay(
           initialZone: _editingZone, facets: _zoneFacets, loadFacets: services.data?.customZoneFacets,
-          zoneTotal: _editingZone != null ? _tilesById[_editingZone!.id]?.total : null,
-          zoneUnit: _editingZone != null ? (_tilesById[_editingZone!.id]?.unit ?? '部') : '部',
+          zoneTotal: editTile?.total, zoneUnit: editTile?.unit ?? '部',
           onSave: (z) async { await services.preferences.saveZone(z); await _refreshZones(services); },
           onDelete: (id) async { await services.preferences.removeCustomZone(id); await _refreshZones(services); },
           onClose: () => setState(() { _zoneEditorOpen = false; _editingZone = null; }),
@@ -196,7 +200,7 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
     ]);
   }
 
-  Widget _sidebar(EvTheme t, EvScale s) {
+  Widget _sidebar(EvScope scope, EvTheme t, EvScale s) {
     final cur = _account.current;
     const navItems = [
       (EvSettingsSection.account, '用户与服务器', EvIcons.users), (EvSettingsSection.look, '外观', EvIcons.palette),
@@ -226,9 +230,10 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
             key: Key('ev_settings_nav_${sec.name}'), selected: _section == sec, label: label,
             onTap: () {
               if (_section == sec) return;
+              scope.shell.setScrollOffset(0.0);
               setState(() { _section = sec; _bannerError = null; });
-              if (sec == EvSettingsSection.ai && _boundServices?.subtitles != null) unawaited(_refreshAiUsage(_boundServices!.subtitles!));
-              if (sec == EvSettingsSection.keys && _boundServices != null) unawaited(_refreshSecrets(_boundServices!.preferences));
+              if (sec == EvSettingsSection.ai && _boundServices?.subtitles != null) unawaited(_refreshAiUsage(_boundServices!));
+              if (sec == EvSettingsSection.keys && _boundServices != null) unawaited(_refreshSecrets(_boundServices!));
             },
             builder: (_, hovered, focused) {
               final sel = _section == sec, fg = (sel || hovered || focused) ? t.ink : t.ink2;
@@ -292,7 +297,7 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
       EvSettingsSection.video => EvVideoSettingsPane(prefs: _prefs, onUpdatePrefs: update),
       EvSettingsSection.keys => EvKeysSettingsPane(
         configuredSecrets: _configuredSecrets, loadingSecrets: _loadingSecrets,
-        onSaveSecret: (kind, val) => _guard(() async { await services.preferences.setSecret(kind, val); await _refreshSecrets(services.preferences); })),
+        onSaveSecret: (kind, val) => _guard(() async { await services.preferences.setSecret(kind, val); await _refreshSecrets(services); })),
       EvSettingsSection.about => const EvAboutSettingsPane(),
     };
   }

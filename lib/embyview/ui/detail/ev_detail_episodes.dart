@@ -29,8 +29,8 @@ class EvDetailEpisodesSection extends StatefulWidget {
   final Set<String> completedJobEpisodeIds;
   final String? subtitleError;
   final VoidCallback? onDismissSubtitleError;
-  final ValueChanged<int> onSelectSeason;
   final VoidCallback onRequestSeasonQuote;
+  final ValueChanged<int> onSelectSeason;
   final ValueChanged<String> onCancelSeasonJob;
   final void Function(String jobId, String episodeId) onCancelEpisodeJob;
   final void Function(EpisodeCard ep, Rect origin) onPlayEpisode;
@@ -55,6 +55,8 @@ class _EvDetailEpisodesSectionState extends State<EvDetailEpisodesSection> {
   @override void didUpdateWidget(EvDetailEpisodesSection old) { super.didUpdateWidget(old); if (old.selectedSeasonIndex != widget.selectedSeasonIndex && _track.hasClients) _track.jumpTo(0); }
   @override void dispose() { _track.dispose(); super.dispose(); }
 
+  static const _aiDone = EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.completeAi, label: 'AI 中字', tooltip: 'AI 中文字幕已就绪');
+
   EvEpisodeSubtitleBadge _badgeFor(EpisodeCard ep) {
     if (!widget.subtitlesEnabled) return EvEpisodeSubtitleBadge.none;
     final ej = widget.activeSeasonJob?.episodes.where((e) => e.episodeId == ep.card.id).firstOrNull;
@@ -64,20 +66,17 @@ class _EvDetailEpisodesSectionState extends State<EvDetailEpisodesSection> {
         EpisodeJobState.reading => const EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.processing, label: '读取中', tooltip: '正在读取剧集音频', cancellable: true),
         EpisodeJobState.transcribing => const EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.processing, label: '听写中', tooltip: '正在听写对白', cancellable: true),
         EpisodeJobState.translating => const EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.processing, label: '翻译中', tooltip: '正在翻译为简体中文', cancellable: true),
-        EpisodeJobState.completed => const EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.completeAi, label: 'AI 中字', tooltip: 'AI 中文字幕已就绪'),
+        EpisodeJobState.completed => _aiDone,
         EpisodeJobState.failed => EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.failed, label: '失败', tooltip: ej.failure?.reason ?? '生成失败'),
         EpisodeJobState.cancelled => EvEpisodeSubtitleBadge.none,
       };
     }
-    if (widget.completedJobEpisodeIds.contains(ep.card.id)) {
-      return const EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.completeAi, label: 'AI 中字', tooltip: 'AI 中文字幕已就绪');
-    }
+    if (widget.completedJobEpisodeIds.contains(ep.card.id)) return _aiDone;
     final av = widget.availabilityByEpisode[ep.card.id];
     if (av == null) return EvEpisodeSubtitleBadge.none;
     return switch (av.chinese) {
       ChineseSubtitleState.complete => av.hasAiChinese == true
-          ? const EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.completeAi, label: 'AI 中字', tooltip: 'AI 中文字幕已就绪')
-          : const EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.completeChinese, label: '中字', tooltip: '中文字幕已就绪'),
+          ? _aiDone : const EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.completeChinese, label: '中字', tooltip: '中文字幕已就绪'),
       ChineseSubtitleState.partial => EvEpisodeSubtitleBadge(kind: EvEpisodeSubtitleBadgeKind.partial, label: '部分字幕', tooltip: av.reason ?? '仅覆盖部分时段，未完整覆盖本集'),
       ChineseSubtitleState.canGenerate || ChineseSubtitleState.unknown => EvEpisodeSubtitleBadge.none,
     };

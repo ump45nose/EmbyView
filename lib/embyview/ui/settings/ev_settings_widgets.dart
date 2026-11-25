@@ -342,11 +342,10 @@ class EvChevronIcon extends StatelessWidget {
 /// Compact themed text input matching `.zedit input.tx` in `proto.css`.
 class EvSettingsTextField extends StatefulWidget {
   const EvSettingsTextField({
-    super.key, required this.controller, this.focusNode, this.placeholder,
+    super.key, required this.controller, this.placeholder,
     this.obscureText = false, this.maxLength, this.accentColor, this.keyboardType, this.onSubmitted,
   });
   final TextEditingController controller;
-  final FocusNode? focusNode;
   final String? placeholder;
   final bool obscureText;
   final int? maxLength;
@@ -357,40 +356,34 @@ class EvSettingsTextField extends StatefulWidget {
 }
 
 class _EvSettingsTextFieldState extends State<EvSettingsTextField> {
-  FocusNode? _ownedNode;
-  bool _focused = false;
-  FocusNode get _node => widget.focusNode ?? (_ownedNode ??= FocusNode());
-  @override void initState() { super.initState(); _node.addListener(_onFocus); }
-  @override void didUpdateWidget(EvSettingsTextField old) {
-    super.didUpdateWidget(old);
-    if (old.focusNode != widget.focusNode) { (old.focusNode ?? _ownedNode)?.removeListener(_onFocus); _node.addListener(_onFocus); }
-  }
-  void _onFocus() { if (mounted && _focused != _node.hasFocus) setState(() => _focused = _node.hasFocus); }
-  @override void dispose() { _node.removeListener(_onFocus); _ownedNode?.dispose(); super.dispose(); }
+  final _node = FocusNode();
+  @override void dispose() { _node.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
     final t = EvTheme.of(context), s = EvScale.of(context);
-    final border = _focused ? (widget.accentColor ?? (t.isPaper ? t.brand : t.ink2)) : t.line;
     return GestureDetector(
       behavior: HitTestBehavior.opaque, onTap: _node.requestFocus,
-      child: Container(
-        height: s.rem(2.875), padding: EdgeInsets.symmetric(horizontal: s.rem(1.0)), alignment: Alignment.centerLeft,
-        decoration: BoxDecoration(color: t.fill2, borderRadius: BorderRadius.circular(s.rem(0.75)), border: Border.all(color: border, width: _focused ? 2.0 : 1.0)),
-        child: Stack(alignment: Alignment.centerLeft, children: [
-          if (widget.placeholder != null && widget.placeholder!.isNotEmpty)
-            ListenableBuilder(listenable: widget.controller, builder: (_, _) => widget.controller.text.isEmpty
-                ? IgnorePointer(child: Text(widget.placeholder!, maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: t.bodyStyle(s.font(0.9375), color: t.ink3)))
-                : const SizedBox.shrink()),
-          EditableText(
-            controller: widget.controller, focusNode: _node, obscureText: widget.obscureText, keyboardType: widget.keyboardType, maxLines: 1,
-            inputFormatters: [if (widget.maxLength != null) LengthLimitingTextInputFormatter(widget.maxLength)],
-            onSubmitted: widget.onSubmitted, style: t.bodyStyle(s.font(1.0), color: t.ink),
-            cursorColor: widget.accentColor ?? t.ink, backgroundCursorColor: t.ink4,
-            selectionColor: (widget.accentColor ?? t.brand).withValues(alpha: 0.28),
-          ),
-        ]),
+      child: ListenableBuilder(
+        listenable: Listenable.merge([_node, widget.controller]),
+        builder: (_, _) {
+          final focused = _node.hasFocus, border = focused ? (widget.accentColor ?? (t.isPaper ? t.brand : t.ink2)) : t.line;
+          return Container(
+            height: s.rem(2.875), padding: EdgeInsets.symmetric(horizontal: s.rem(1.0)), alignment: Alignment.centerLeft,
+            decoration: BoxDecoration(color: t.fill2, borderRadius: BorderRadius.circular(s.rem(0.75)), border: Border.all(color: border, width: focused ? 2.0 : 1.0)),
+            child: Stack(alignment: Alignment.centerLeft, children: [
+              if (widget.placeholder != null && widget.placeholder!.isNotEmpty && widget.controller.text.isEmpty)
+                IgnorePointer(child: Text(widget.placeholder!, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.font(0.9375), color: t.ink3))),
+              EditableText(
+                controller: widget.controller, focusNode: _node, obscureText: widget.obscureText, keyboardType: widget.keyboardType, maxLines: 1,
+                inputFormatters: [if (widget.maxLength != null) LengthLimitingTextInputFormatter(widget.maxLength)],
+                onSubmitted: widget.onSubmitted, style: t.bodyStyle(s.font(1.0), color: t.ink),
+                cursorColor: widget.accentColor ?? t.ink, backgroundCursorColor: t.ink4,
+                selectionColor: (widget.accentColor ?? t.brand).withValues(alpha: 0.28),
+              ),
+            ]),
+          );
+        },
       ),
     );
   }

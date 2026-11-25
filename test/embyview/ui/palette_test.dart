@@ -42,8 +42,9 @@ class _FakeAccounts implements EmbyViewAccounts {
           profiles: [AccountProfile(id: 'sfw', displayName: 'sfw')],
           sessionId: 'sess-1',
         );
-  final AccountSnapshot _snapshot;
+  AccountSnapshot _snapshot;
   final _changes = StreamController<AccountSnapshot>.broadcast();
+  void setSnapshot(AccountSnapshot next) { _snapshot = next; _changes.add(next); }
   @override AccountSnapshot get snapshot => _snapshot;
   @override Stream<AccountSnapshot> get changes => _changes.stream;
   Future<void> close() => _changes.close();
@@ -151,6 +152,7 @@ class _FakeData implements EmbyViewData {
     this.catalog = const [],
     this.randomCards = const {},
     this.onSearch,
+    this.onRandomInZone,
   });
 
   List<ResumeCard> resumes;
@@ -158,6 +160,7 @@ class _FakeData implements EmbyViewData {
   List<MediaCard> catalog;
   Map<String, MediaCard> randomCards;
   Future<SearchResults> Function(String text, int limit)? onSearch;
+  Future<MediaCard?> Function(String zoneId)? onRandomInZone;
 
   final List<int> continueLimits = [];
   final List<({String text, int limit})> searchCalls = [];
@@ -180,6 +183,7 @@ class _FakeData implements EmbyViewData {
   @override
   Future<MediaCard?> randomInZone(String zoneId) async {
     randomZoneCalls.add(zoneId);
+    if (onRandomInZone != null) return onRandomInZone!(zoneId);
     return randomCards[zoneId];
   }
 
@@ -212,6 +216,7 @@ class _Harness {
     List<MediaCard>? catalog,
     Map<String, MediaCard>? randomCards,
     Future<SearchResults> Function(String text, int limit)? onSearch,
+    Future<MediaCard?> Function(String zoneId)? onRandomInZone,
   })  : prefs = _FakePrefs(prefs),
         accounts = _FakeAccounts(),
         playback = _FakePlayback(),
@@ -231,6 +236,7 @@ class _Harness {
                 'anime': _card('rand_anime', '随机番剧'),
               },
           onSearch: onSearch,
+          onRandomInZone: onRandomInZone,
         ) {
     services = EmbyViewServices(
       preferences: this.prefs,
@@ -720,5 +726,50 @@ void main() {
         await h.dispose();
       }
     }
+  });
+
+  testWidgets('Regressions: 42rem width, stable CurvedAnimation across rebuilds, and _runRandom session guard', (tester) async {
+    await _setViewport(tester, const Size(1440, 900));
+    final randomCompleter = Completer<MediaCard?>();
+    final h = _Harness(resumes: const [], onRandomInZone: (_) => randomCompleter.future);
+    addTearDown(h.dispose);
+    final opened = <String>[];
+    final ctrl = EvCommandPaletteController();
+    addTearDown(ctrl.dispose);
+
+    await tester.pumpWidget(h.wrap(EvCommandPaletteHost(
+      controller: ctrl, onOpenDetail: opened.add, child: const SizedBox.expand(),
+    )));
+    ctrl.open();
+    await tester.pumpAndSettle();
+
+    // 1. Box width matches 42rem (672px at 1440x900).
+    final scale = EvScale.fromSize(const Size(1440, 900));
+    expect(tester.getRect(find.byKey(const Key('ev_palette_box'))).width, closeTo(scale.rem(42.0), 0.5));
+
+    // 2. CurvedAnimation instances are created once in initState, not recreated on rebuild.
+    final fadeFinder = find.descendant(of: find.byType(EvCommandPaletteOverlay), matching: find.byType(FadeTransition)).first;
+    final fadeAnimBefore = tester.widget<FadeTransition>(fadeFinder).opacity;
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    final fadeAnimAfter = tester.widget<FadeTransition>(fadeFinder).opacity;
+    expect(fadeAnimAfter, same(fadeAnimBefore));
+
+    // 3. _runRandom discards stale result if account session switches while in flight.
+    final randomRow = find.byKey(const ValueKey<String>('ev_palette_item_cmd_random'));
+    await tester.ensureVisible(randomRow);
+    await tester.tap(randomRow);
+    await tester.pumpAndSettle();
+    expect(ctrl.isOpen, isFalse);
+
+    h.accounts.setSnapshot(const AccountSnapshot(
+      phase: AccountPhase.signedIn,
+      current: AccountProfile(id: 'other', displayName: 'other'),
+      profiles: [AccountProfile(id: 'other', displayName: 'other')],
+      sessionId: 'sess-2',
+    ));
+    randomCompleter.complete(_card('stale_rand', '切换前随机片'));
+    await tester.pumpAndSettle();
+    expect(opened, isEmpty);
   });
 }

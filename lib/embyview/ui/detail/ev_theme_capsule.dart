@@ -42,7 +42,7 @@ class _EvThemeCapsuleState extends State<EvThemeCapsule> with SingleTickerProvid
           SizedBox(
             key: const Key('ev_detail_theme_ring'), width: rSz, height: rSz,
             child: Stack(alignment: Alignment.center, children: [
-              CustomPaint(key: ValueKey<double>(p), size: Size.square(rSz),
+              CustomPaint(size: Size.square(rSz),
                   painter: EvRingProgressPainter(progress: p, trackColor: t.fill3, progressColor: t.ink, strokeWidth: 2)),
               AnimatedBuilder(
                 animation: _eq,

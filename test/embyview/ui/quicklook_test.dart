@@ -842,4 +842,100 @@ void main() {
       });
     }
   }
+
+  testWidgets('Regressions: single logo (strips stage logo/text), 56rem + 2.2:1 + 2-column layout, and overlapping hosts zero leak', (tester) async {
+    await _setViewport(tester, const Size(1440, 900));
+    // ignore: deprecated_member_use
+    final initialHandler = ServicesBinding.instance.keyEventManager.keyMessageHandler;
+
+    final prefs = _FakePreferences(const LocalPreferences(backgroundVideo: false));
+    final accounts = _FakeAccounts();
+    final stage = EvStageController();
+    final shell = EvShellController();
+    final services = EmbyViewServices(preferences: prefs, accounts: accounts, sessionId: 's1');
+    final immersion = Immersion(stage: stage, services: services);
+    final ctrlA = EvQuickLookController(), ctrlB = EvQuickLookController();
+
+    addTearDown(() async {
+      ctrlA.dispose(); ctrlB.dispose(); immersion.dispose(); stage.dispose(); shell.dispose();
+      await prefs.close(); await accounts.close();
+    });
+
+    final bg = _FakeArtworkRef('stage_bg');
+    final logo = _FakeArtworkRef('stage_logo', aspectRatio: 3.0, width: 900, height: 300);
+    final card = MediaCard(
+      id: 'dup_logo_card', kind: MediaKind.movie, title: '双标测试片', year: 2025, score: 9.0,
+      overview: '测试舞台图层带 logo 与文字时底层 EvArtwork 不重复渲染。',
+      art: CardArtwork(
+        stage: ArtworkPlan(layers: [ArtworkLayer(source: bg, fit: ArtworkFit.cover, logo: logo, text: '双标测试片')], fallbackColor: 0xFF112233, fallbackTitle: '双标测试片'),
+        backdrops: [bg], logo: logo,
+      ),
+    );
+
+    final showA = ValueNotifier<bool>(true), showB = ValueNotifier<bool>(false);
+    addTearDown(() { showA.dispose(); showB.dispose(); });
+
+    await tester.pumpWidget(MaterialApp(
+      home: EvThemeScope(
+        preferences: prefs,
+        child: EvScope(
+          services: services, stage: stage, immersion: immersion, shell: shell,
+          child: ValueListenableBuilder<bool>(
+            valueListenable: showA,
+            builder: (_, aOn, _) => ValueListenableBuilder<bool>(
+              valueListenable: showB,
+              builder: (_, bOn, _) => Stack(children: [
+                if (aOn) EvQuickLookHost(controller: ctrlA, child: const SizedBox.expand()),
+                if (bOn) EvQuickLookHost(controller: ctrlB, child: Center(child: EvCard(card: card, style: EvCardStyle.poster, width: 180))),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // Mount Host B while Host A is still alive (overlapping lifecycle), then dispose Host A first.
+    showB.value = true;
+    await tester.pumpAndSettle();
+    showA.value = false;
+    await tester.pumpAndSettle();
+
+    // Host B must still intercept Space before EvCard._handleKey.
+    await _focusWidget(tester, find.byType(EvCard));
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pumpAndSettle();
+    expect(ctrlB.isOpen, isTrue);
+
+    // 1. Single logo: EvArtwork plan has stripped logo/text, and only one logo Image exists inside media.
+    final artWidget = tester.widget<EvArtwork>(find.byKey(const Key('ev_quicklook_artwork')));
+    expect(artWidget.plan.layers.single.logo, isNull);
+    expect(artWidget.plan.layers.single.text, isNull);
+    expect(artWidget.plan.fallbackColor, 0xFF112233);
+    expect(find.byKey(ValueKey<String>('ev_quicklook_logo_${logo.cacheKey}')), findsOneWidget);
+    expect(find.byKey(ValueKey<String>('ev_art_logo_0_${logo.cacheKey}')), findsNothing);
+
+    // 2. Layout: 56rem width (896px at 1440), 2.2:1 media ratio, two-column body with vertically stacked actions on right.
+    final scale = EvScale.fromSize(const Size(1440, 900));
+    final winRect = tester.getRect(find.byKey(const Key('ev_quicklook_window')));
+    expect(winRect.width, closeTo(scale.rem(56.0), 0.5));
+    final mediaRect = tester.getRect(find.byKey(const Key('ev_quicklook_artwork')));
+    expect(mediaRect.width / mediaRect.height, closeTo(2.2, 0.02));
+
+    final ovRect = tester.getRect(find.byKey(const Key('ev_quicklook_overview')));
+    final actRect = tester.getRect(find.byKey(const Key('ev_quicklook_actions')));
+    final playRect = tester.getRect(find.byKey(const Key('ev_quicklook_play_btn')));
+    final detailRect = tester.getRect(find.byKey(const Key('ev_quicklook_detail_btn')));
+    final closeRect = tester.getRect(find.byKey(const Key('ev_quicklook_close_btn')));
+    expect(actRect.left, greaterThan(ovRect.left));
+    expect(detailRect.top, greaterThanOrEqualTo(playRect.bottom));
+    expect(closeRect.top, greaterThanOrEqualTo(detailRect.bottom));
+
+    // 3. Unmount remaining Host B -> original keyMessageHandler restored cleanly.
+    showB.value = false;
+    await tester.pumpAndSettle();
+    // ignore: deprecated_member_use
+    expect(ServicesBinding.instance.keyEventManager.keyMessageHandler, same(initialHandler));
+    expect(tester.takeException(), isNull);
+  });
 }

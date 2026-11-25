@@ -283,9 +283,8 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     unawaited(_prefsSub?.cancel()); unawaited(_accountsSub?.cancel());
     _prefs = services.preferences.current; _account = services.accounts.snapshot;
     _prefsSub = services.preferences.changes.listen((next) {
-      final zc = _prefs.zones.length != next.zones.length || Iterable.generate(_prefs.zones.length).any((i) =>
-          _prefs.zones[i].id != next.zones[i].id || _prefs.zones[i].name != next.zones[i].name ||
-          _prefs.zones[i].iconKey != next.zones[i].iconKey || _prefs.zones[i].colorSlot != next.zones[i].colorSlot);
+      String sig(List<ZonePreference> zs) => zs.map((z) => '${z.id}:${z.name}:${z.iconKey}:${z.colorSlot}').join('|');
+      final zc = sig(_prefs.zones) != sig(next.zones);
       if (!mounted) return;
       setState(() => _prefs = next);
       if (zc && !_shellMounted) unawaited(_loadZones(services, force: true));
@@ -307,7 +306,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     super.didUpdateWidget(old);
     if (old.services.sessionId != widget.services.sessionId) {
       final prev = _runtime; _runtime = _StageThreeRuntime.acquire(widget.services); prev.release();
-      _closeOverlays(rebuild: false); _s4Stack.clear(); _shellMounted = true; _shell.goHome();
+      ++_zonesToken; _closeOverlays(rebuild: false); _s4Stack.clear(); _shellMounted = true; _shell..setZones(const [])..goHome();
       _attachServices(widget.services);
     } else if (!identical(old.services, widget.services)) {
       unawaited(_runtime.immersion.rebind(widget.services)); _attachServices(widget.services);
@@ -348,6 +347,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   void _focusStageFourLater() => WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _s4Stack.isNotEmpty && !_s4Scope.hasFocus) _s4Scope.requestFocus(); });
 
   void _pushStageFour(_S4Entry next) {
+    if (!mounted) return;
     _closeOverlays(rebuild: false); _runtime.immersion.onCardHoverEnd();
     final saved = _captureSnap();
     _shell.updateChrome(scrolled: false, topFade: 0.0);

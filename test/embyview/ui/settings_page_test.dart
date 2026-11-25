@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
 import 'package:moonfin/embyview/ui/settings/ev_settings_page.dart';
+import 'package:moonfin/embyview/ui/settings/ev_settings_widgets.dart';
 import 'package:moonfin/embyview/ui/settings/ev_zone_editor.dart';
 
 const List<ZonePreference> _kDefaultZones = [
@@ -1078,5 +1079,179 @@ void main() {
       expect(find.textContaining('未启用'), findsWidgets);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('regressions: auto swatch height, color swatch shadow order, nearest trailer delay, scroll sync & reset', (
+      tester,
+    ) async {
+      final env = await _pumpSettings(
+        tester,
+        size: const Size(1440, 560),
+        initialSection: EvSettingsSection.look,
+        initialPrefs: const LocalPreferences(
+          zones: _kDefaultZones,
+          detailTrailerDelay: Duration(seconds: 15),
+        ),
+      );
+
+      // 1) Auto theme preview split ColoredBoxes stretch to full swatch height (> 0)
+      final autoCard = find.byKey(const Key('ev_theme_card_automatic'));
+      final boxes = find.descendant(of: autoCard, matching: find.byType(ColoredBox));
+      expect(boxes, findsNWidgets(2));
+      for (final el in boxes.evaluate()) {
+        final box = el.renderObject! as RenderBox;
+        expect(box.size.height, greaterThan(60));
+        expect(box.size.width, greaterThan(40));
+      }
+
+      // 2) Zone editor selected color swatch paints outer color (spread 4) before inner glassSolid (spread 2)
+      await tester.tap(find.byKey(const Key('ev_settings_nav_zones')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('ev_zone_add')));
+      await tester.pumpAndSettle();
+      final selectedSwatch = tester.widget<Container>(
+        find.descendant(
+          of: find.byKey(const Key('ev_zone_color_4')),
+          matching: find.byType(Container),
+        ),
+      );
+      final shadows = (selectedSwatch.decoration! as BoxDecoration).boxShadow!;
+      expect(shadows, hasLength(2));
+      expect(shadows[0].spreadRadius, 4);
+      expect(shadows[1].spreadRadius, 2);
+      // Esc closes overlay immediately after opening via button tap
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('ev_zone_editor_dialog')), findsNothing);
+
+      // 3) Non-preset detailTrailerDelay (15s) nearest-matches 12s instead of falling back to 0 (关闭)
+      await tester.tap(find.byKey(const Key('ev_settings_nav_immerse')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<EvInteractive>(find.byKey(const Key('ev_trailer_delay_12'))).selected, isTrue);
+      expect(tester.widget<EvInteractive>(find.byKey(const Key('ev_trailer_delay_0'))).selected, isFalse);
+
+      // 4) Right pane vertical scroll updates shell scroll offset, and switching section resets to 0
+      expect(env.shell.scrolled, isFalse);
+      final paneScroll = find.byKey(const ValueKey<EvSettingsSection>(EvSettingsSection.immerse));
+      await tester.drag(paneScroll, const Offset(0, -180));
+      await tester.pumpAndSettle();
+      expect(env.shell.scrolled, isTrue);
+      expect(env.shell.topFade, greaterThan(0));
+
+      await tester.tap(find.byKey(const Key('ev_settings_nav_look')));
+      await tester.pumpAndSettle();
+      expect(env.shell.scrolled, isFalse);
+      expect(env.shell.topFade, 0.0);
+      final lookScroll = tester.widget<SingleChildScrollView>(
+        find.byKey(const ValueKey<EvSettingsSection>(EvSettingsSection.look)),
+      );
+      expect(lookScroll.key, const ValueKey<EvSettingsSection>(EvSettingsSection.look));
+      final scrollable = tester.state<ScrollableState>(
+        find.descendant(
+          of: find.byKey(const ValueKey<EvSettingsSection>(EvSettingsSection.look)),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      expect(scrollable.position.pixels, 0.0);
+    });
+
+    testWidgets('regression: stale secrets/facets/usage responses from previous session are ignored after rebind', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final staleSecrets = Completer<Set<SecretKind>>();
+      final staleFacets = Completer<ZoneFacets>();
+      final staleUsage = Completer<AiUsage>();
+
+      final prefsA = _DelayedSecretsPrefs(staleSecrets.future);
+      final prefsB = _FakePreferences(configuredSecrets: {SecretKind.openAi, SecretKind.gemini, SecretKind.assrt, SecretKind.openSubtitles});
+      final accountsA = _FakeAccounts();
+      final accountsB = _FakeAccounts();
+      final dataA = _DelayedFacetsData(prefsA, staleFacets.future);
+      final dataB = _FakeData(prefsB);
+      final subsA = _DelayedUsageSubtitles(staleUsage.future);
+      final subsB = _FakeSubtitles(
+        initialUsage: const AiUsage(month: '2026-11', state: AiUsageState.available, usedMicros: 5000000, budgetMicros: 30000000, completedEpisodes: 9),
+      );
+      final immersionPlayback = _FakeImmersionPlayback();
+      final servicesA = EmbyViewServices(preferences: prefsA, accounts: accountsA, sessionId: 'sess_a', data: dataA, immersion: immersionPlayback, subtitles: subsA);
+      final servicesB = EmbyViewServices(preferences: prefsB, accounts: accountsB, sessionId: 'sess_b', data: dataB, immersion: immersionPlayback, subtitles: subsB);
+      final stage = EvStageController();
+      final immersion = Immersion(stage: stage, services: servicesA);
+      final shell = EvShellController();
+      addTearDown(() async {
+        shell.dispose(); immersion.dispose(); stage.dispose();
+        await immersionPlayback.close(); await subsA.close(); await subsB.close();
+        await accountsA.close(); await accountsB.close(); await prefsA.close(); await prefsB.close();
+      });
+
+      var active = servicesA;
+      late StateSetter hostSetState;
+      await tester.pumpWidget(
+        WidgetsApp(
+          color: const Color(0xFF09090B),
+          pageRouteBuilder: <T>(settings, builder) => PageRouteBuilder<T>(settings: settings, pageBuilder: (ctx, _, _) => builder(ctx)),
+          home: StatefulBuilder(
+            builder: (context, setState) {
+              hostSetState = setState;
+              return EvThemeScope(
+                preferences: active.preferences,
+                child: EvScope(
+                  services: active, stage: stage, immersion: immersion, shell: shell,
+                  child: const EvSettingsPage(initialSection: EvSettingsSection.ai),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Switch to session B before session A's async calls resolve
+      hostSetState(() => active = servicesB);
+      await tester.pumpAndSettle();
+      expect(find.text('\$5.00 / \$30'), findsOneWidget);
+      expect(find.byKey(const Key('ev_settings_keys_badge')), findsNothing);
+
+      // Now complete stale session A futures -> must NOT overwrite session B
+      staleSecrets.complete(const {});
+      staleFacets.complete(const ZoneFacets(genres: [FacetOption(value: 'stale', label: '旧会话类型', count: 1)]));
+      staleUsage.complete(const AiUsage(month: '2026-11', state: AiUsageState.available, usedMicros: 99000000, budgetMicros: 100000000, completedEpisodes: 99));
+      await tester.pumpAndSettle();
+
+      expect(find.text('\$5.00 / \$30'), findsOneWidget);
+      expect(find.text('\$99.00 / \$100'), findsNothing);
+      expect(find.byKey(const Key('ev_settings_keys_badge')), findsNothing);
+
+      await tester.tap(find.byKey(const Key('ev_settings_nav_zones')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('ev_zone_add')));
+      await tester.pumpAndSettle();
+      expect(find.text('旧会话类型'), findsNothing);
+      expect(find.byKey(const Key('ev_zone_facet_genre_g_scifi')), findsOneWidget);
+    });
   });
+}
+
+class _DelayedSecretsPrefs extends _FakePreferences {
+  _DelayedSecretsPrefs(this._future);
+  final Future<Set<SecretKind>> _future;
+  @override Future<Set<SecretKind>> configuredSecrets() => _future;
+}
+
+class _DelayedFacetsData extends _FakeData {
+  _DelayedFacetsData(super.preferences, this._future);
+  final Future<ZoneFacets> _future;
+  @override Future<ZoneFacets> customZoneFacets() => _future;
+}
+
+class _DelayedUsageSubtitles extends _FakeSubtitles {
+  _DelayedUsageSubtitles(this._future);
+  final Future<AiUsage> _future;
+  @override Future<AiUsage> usage() => _future;
 }

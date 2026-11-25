@@ -177,7 +177,7 @@ class EvLookSettingsPane extends StatelessWidget {
           child: EvIcon(EvIcons.navAnime, size: s.rem(3.0), color: const Color(0xFF141413), accentColor: const Color(0xFFD97757), forcePaper: true)),
       ])),
     ThemeMode.automatic => Stack(fit: StackFit.expand, children: [
-      const Row(children: [Expanded(child: ColoredBox(color: Color(0xFFFAF9F5))), Expanded(child: ColoredBox(color: Color(0xFF0B0B0D)))]),
+      const Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [Expanded(child: ColoredBox(color: Color(0xFFFAF9F5))), Expanded(child: ColoredBox(color: Color(0xFF0B0B0D)))]),
       Center(child: EvIcon(EvIcons.clock, size: s.rem(2.75), color: const Color(0xFFB5532F), accentColor: const Color(0xFFD97757), forcePaper: true)),
     ]),
   };
@@ -300,7 +300,7 @@ class EvImmerseSettingsPane extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = EvTheme.of(context), s = EvScale.of(context), trailerSec = prefs.detailTrailerDelay?.inSeconds ?? 0;
+    final t = EvTheme.of(context), s = EvScale.of(context), trailer = prefs.detailTrailerDelay;
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       evPaneTitle(t, s, '沉浸'),
       EvSettingsGroup(title: '浏览', children: [
@@ -319,7 +319,7 @@ class EvImmerseSettingsPane extends StatelessWidget {
       ]),
       EvSettingsGroup(title: '详情页', children: [
         EvSettingsRow(title: '停留后转入预告', subtitle: '详情页停留这么久，剧照换成静音预告片；没有预告的剧集改为播放一段正片',
-          trailing: EvSegmentedControl<int>(value: const [0, 8, 12, 20].contains(trailerSec) ? trailerSec : 0,
+          trailing: EvSegmentedControl<int>(value: (trailer == null || trailer <= Duration.zero) ? 0 : _nearest(trailer.inSeconds, const [8, 12, 20]),
             onChanged: (sec) => onUpdatePrefs(evCopyPreferences(prefs, detailTrailerDelay: sec == 0 ? null : Duration(seconds: sec))),
             options: const [
               EvSegmentOption(key: Key('ev_trailer_delay_0'), value: 0, label: '关闭'),

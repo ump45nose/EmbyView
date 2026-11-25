@@ -617,4 +617,36 @@ void main() {
     expect(hasSeenCheck('星际穿越'), isFalse);
     expect(hasSeenCheck('盗梦空间'), isTrue);
   });
+
+  testWidgets('regression: arrow keys move cursor inside inline form text fields without shifting focus', (tester) async {
+    final prefs = _FakePreferences();
+    final accounts = _FakeAccounts();
+    addTearDown(() async { await prefs.close(); await accounts.close(); });
+
+    await _pumpUsersPage(tester, accounts: accounts, prefs: prefs);
+    await tester.tap(find.byKey(const Key('ev_users_add_btn')));
+    await tester.pumpAndSettle();
+
+    final userEditableFinder = find.descendant(
+      of: find.byKey(const Key('ev_users_username_field')),
+      matching: find.byType(EditableText),
+    );
+    await tester.tap(userEditableFinder);
+    await tester.enterText(userEditableFinder, 'alice');
+    await tester.pump();
+
+    final editable = tester.widget<EditableText>(userEditableFinder);
+    expect(editable.focusNode.hasFocus, isTrue);
+    expect(editable.controller.selection.baseOffset, 5);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    expect(editable.focusNode.hasFocus, isTrue);
+    expect(editable.controller.selection.baseOffset, 4);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(editable.focusNode.hasFocus, isTrue);
+    expect(editable.controller.selection.baseOffset, 5);
+  });
 }

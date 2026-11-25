@@ -166,16 +166,16 @@ class _EvSearchPageState extends State<EvSearchPage> {
     try {
       final more = await data.search(_activeQuery, zoneId: widget.zoneId, offset: nextOffset, limit: _pageSize);
       if (!mounted || gen != _searchGen) return;
-      final byLib = <String, SearchGroup>{for (final g in cur.groups) g.libraryId: g};
+      SearchGroup makeGroup(String id, String name, List<MediaCard> items, int total, int? next) =>
+          SearchGroup(libraryId: id, name: name, items: items, total: total, nextOffset: items.length < total ? next : null);
+      final byLib = <String, SearchGroup>{for (final g in cur.groups) g.libraryId: makeGroup(g.libraryId, g.name, g.items, g.total, more.nextOffset)};
       final order = <String>[for (final g in cur.groups) g.libraryId];
       for (final inc in more.groups) {
-        final ex = byLib[inc.libraryId];
-        if (ex == null) { byLib[inc.libraryId] = inc; order.add(inc.libraryId); continue; }
+        final ex = byLib[inc.libraryId], next = inc.nextOffset ?? more.nextOffset;
+        if (ex == null) { byLib[inc.libraryId] = makeGroup(inc.libraryId, inc.name, inc.items, inc.total, next); order.add(inc.libraryId); continue; }
         final seen = {for (final c in ex.items) c.id};
         final merged = [...ex.items, for (final c in inc.items) if (seen.add(c.id)) c];
-        final total = math.max(ex.total, inc.total);
-        byLib[inc.libraryId] = SearchGroup(libraryId: ex.libraryId, name: ex.name.isNotEmpty ? ex.name : inc.name,
-            items: merged, total: total, nextOffset: merged.length < total ? inc.nextOffset : null);
+        byLib[inc.libraryId] = makeGroup(ex.libraryId, ex.name.isNotEmpty ? ex.name : inc.name, merged, math.max(ex.total, inc.total), next);
       }
       setState(() {
         _results = SearchResults(bestMatch: cur.bestMatch ?? more.bestMatch,
@@ -295,7 +295,7 @@ class _EvSearchPageState extends State<EvSearchPage> {
         for (final g in groups) ...[
           _heading(t, s, g.name, count: g.total),
           _buildGroupGrid(s, g),
-          if (g.nextOffset != null)
+          if (g.items.length < g.total && g.nextOffset != null)
             Padding(padding: EdgeInsets.only(top: s.rem(1.5)), child: Align(alignment: Alignment.centerLeft, child: EvButton.ghost(
               key: Key('ev_search_more_${g.libraryId}'), small: true, glass: true,
               label: _loadingMore ? '正在加载…' : '加载更多', onPressed: _loadingMore ? null : () => unawaited(_loadMore(g.nextOffset!)),

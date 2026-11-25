@@ -579,4 +579,71 @@ void main() {
       });
     }
   }
+
+  testWidgets('Regressions: group load-more hides when items >= total or exhausted across pages, and Unicode highlight avoids RangeError', (tester) async {
+    await setViewport(tester, const Size(1440, 900));
+    final data = _FakeData(
+      landing: const SearchLanding(),
+      onSearch: (text, _, offset, _) async {
+        if (text == '多组分页') {
+          if (offset == 0) {
+            return SearchResults(
+              groups: [
+                SearchGroup(libraryId: 'done', name: '已满分组', items: [_card('d1', '已满片')], total: 1, nextOffset: 2),
+                SearchGroup(libraryId: 'movie', name: '电影', items: [_card('m1', '电影一')], total: 2, nextOffset: 2),
+                SearchGroup(libraryId: 'anime', name: '番剧', items: [_card('a1', '番剧一')], total: 2, nextOffset: 2),
+              ],
+              total: 5, nextOffset: 2,
+            );
+          }
+          // Page 2 returns only movie and exhausts global pagination (nextOffset == null).
+          return SearchResults(
+            groups: [SearchGroup(libraryId: 'movie', name: '电影', items: [_card('m2', '电影二')], total: 2)],
+            total: 5,
+          );
+        }
+        if (text == 'istanbul') {
+          return SearchResults(bestMatch: _card('u1', 'İSTANBUL 冒险'), total: 1);
+        }
+        if (text == 'İ') {
+          return SearchResults(bestMatch: _card('u2', 'i\u0307stanbul'), total: 1);
+        }
+        return const SearchResults();
+      },
+    );
+    final h = _Harness(data: data);
+    addTearDown(h.dispose);
+
+    await tester.pumpWidget(h.wrap(const EvSearchPage()));
+    await tester.pumpAndSettle();
+
+    // 1. Group with items.length >= total hides Load More even if nextOffset != null.
+    await tester.enterText(find.byKey(const Key('ev_search_input')), '多组分页');
+    await tester.pump(const Duration(milliseconds: 220));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ev_search_more_done')), findsNothing);
+    expect(find.byKey(const Key('ev_search_more_movie')), findsOneWidget);
+    expect(find.byKey(const Key('ev_search_more_anime')), findsOneWidget);
+
+    // Loading page 2 updates all existing groups with more.nextOffset (null), clearing anime's stale button too.
+    await tester.ensureVisible(find.byKey(const Key('ev_search_more_movie')));
+    await tester.tap(find.byKey(const Key('ev_search_more_movie')));
+    await tester.pumpAndSettle();
+    expect(find.text('电影二'), findsOneWidget);
+    expect(find.byKey(const Key('ev_search_more_movie')), findsNothing);
+    expect(find.byKey(const Key('ev_search_more_anime')), findsNothing);
+
+    // 2. Unicode dotted I case-mapping does not throw RangeError.
+    await tester.enterText(find.byKey(const Key('ev_search_input')), 'istanbul');
+    await tester.pump(const Duration(milliseconds: 220));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ev_search_top_match_title')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.enterText(find.byKey(const Key('ev_search_input')), 'İ');
+    await tester.pump(const Duration(milliseconds: 220));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ev_search_top_match_title')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

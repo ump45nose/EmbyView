@@ -778,7 +778,16 @@ void main() {
       await _pumpFrames(tester, 200);
       expect(find.byType(EvSettingsPage), findsOneWidget);
 
-      // Click Add Zone -> fill "杜比视界" + technology dolbyVision -> save
+      // Click Add Zone -> Esc closes ONLY the zone editor without popping Settings
+      await tester.tap(find.byKey(const Key('ev_zone_add')));
+      await _pumpFrames(tester, 200);
+      expect(find.byKey(const Key('ev_zone_editor_dialog')), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _pumpFrames(tester, 150);
+      expect(find.byKey(const Key('ev_zone_editor_dialog')), findsNothing);
+      expect(find.byType(EvSettingsPage), findsOneWidget);
+
+      // Re-open Add Zone -> fill "杜比视界" + technology dolbyVision -> save
       await tester.tap(find.byKey(const Key('ev_zone_add')));
       await _pumpFrames(tester, 200);
       expect(find.byKey(const Key('ev_zone_editor_dialog')), findsOneWidget);
@@ -817,4 +826,64 @@ void main() {
       await tester.runAsync(() async { await prefs.close(); await accounts.close(); await immersion.close(); });
     }
   });
+
+  testWidgets('7. Regression: didUpdateWidget clears shell.zones immediately on sessionId change and guards unmounted _pushStageFour', (tester) async {
+    await _setViewport(tester);
+    final prefs = _FakePrefs();
+    final accounts = _FakeAccounts(current: _kAlice, sessionId: 'sess-a');
+    final playback = _FakePlayback();
+    final immersion = _FakeImmersion();
+    final bobZonesGate = Completer<List<ZoneTile>>();
+    final aliceData = _FakeData(prefs, owner: 'alice');
+    final bobData = _PendingZonesData(prefs, bobZonesGate.future, owner: 'bob');
+    final servicesA = EmbyViewServices(preferences: prefs, accounts: accounts, sessionId: 'sess-a', data: aliceData, playback: playback, immersion: immersion);
+    final servicesB = EmbyViewServices(preferences: prefs, accounts: accounts, sessionId: 'sess-b', data: bobData, playback: playback, immersion: immersion);
+
+    var active = servicesA;
+    late StateSetter hostSetState;
+    try {
+      await tester.pumpWidget(_appShell(StatefulBuilder(builder: (ctx, setState) {
+        hostSetState = setState;
+        return embyViewRegistration.stageThreeHome!(ctx, active);
+      })));
+      await _pumpFrames(tester, 200);
+
+      final shell = EvScope.of(tester.element(find.byType(EvHomePage))).shell;
+      expect(shell.zones.map((z) => z.id), ['movie', 'tv']);
+
+      // Open Users overlay then swap sessionId in-place via didUpdateWidget
+      shell.onOpenUsers?.call();
+      await _pumpFrames(tester, 150);
+      expect(find.byType(EvUsersPage), findsOneWidget);
+
+      hostSetState(() => active = servicesB);
+      await tester.pump();
+      expect(shell.zones, isEmpty);
+      expect(find.byType(EvUsersPage), findsNothing);
+
+      // Complete Bob's zones and verify fresh zones populate
+      bobZonesGate.complete(const [ZoneTile(id: 'bob_only', name: 'Bob片库', iconKey: 'nav_movie', colorSlot: 0, total: 3, unit: '部')]);
+      await _pumpFrames(tester, 200);
+      expect(shell.zones.map((z) => z.id), ['bob_only']);
+
+      // Unmount host and invoke stale shell callback -> _pushStageFour mounted guard prevents StateError
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(() => shell.onOpenDetail?.call('m1'), returnsNormally);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() async { await prefs.close(); await accounts.close(); await immersion.close(); });
+    }
+  });
+}
+
+class _PendingZonesData extends _FakeData {
+  _PendingZonesData(super.prefs, this._zonesFuture, {super.owner});
+  final Future<List<ZoneTile>> _zonesFuture;
+  @override Future<List<ZoneTile>> zones() => _zonesFuture;
+  @override
+  Future<HomeData> home({required ShelfSort seriesSort}) async => HomeData(
+    recommendations: [HomeRecommendation(card: heroCard, reason: RecommendationReason.daily)],
+    zones: await _zonesFuture,
+    recentMovies: HomeShelf(id: 'movies', title: '$owner 最近电影', items: [movieCard]),
+  );
 }

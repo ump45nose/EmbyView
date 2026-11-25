@@ -26,14 +26,17 @@ class EvSearchTopMatch extends StatelessWidget {
     final needle = query.trim();
     if (needle.isEmpty) return [TextSpan(text: card.title, style: base)];
     final lower = card.title.toLowerCase(), qLower = needle.toLowerCase();
+    if (qLower.isEmpty || lower.length != card.title.length) return [TextSpan(text: card.title, style: base)];
     final hl = base.copyWith(color: t.isPaper ? const Color(0xFFB5532F) : t.brand);
     final spans = <TextSpan>[];
     for (var i = 0; i < card.title.length;) {
       final hit = lower.indexOf(qLower, i);
       if (hit < 0) { spans.add(TextSpan(text: card.title.substring(i), style: base)); break; }
-      if (hit > i) spans.add(TextSpan(text: card.title.substring(i, hit), style: base));
-      spans.add(TextSpan(text: card.title.substring(hit, hit + needle.length), style: hl));
-      i = hit + needle.length;
+      final start = hit.clamp(i, card.title.length), end = (hit + qLower.length).clamp(start, card.title.length);
+      if (start > i) spans.add(TextSpan(text: card.title.substring(i, start), style: base));
+      if (end > start) spans.add(TextSpan(text: card.title.substring(start, end), style: hl));
+      if (end <= i) break;
+      i = end;
     }
     return spans;
   }

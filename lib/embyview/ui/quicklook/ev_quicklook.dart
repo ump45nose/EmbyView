@@ -47,7 +47,6 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
   late final AnimationController _anim;
   late final CurvedAnimation _fadeAnim, _scaleCurve;
   late final Animation<double> _scaleAnim;
-  late final _ChainedKeyInterceptor _keyInterceptor;
 
   final GlobalKey _mediaKey = GlobalKey();
   EvScope? _scope;
@@ -67,7 +66,7 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     _fadeAnim = CurvedAnimation(parent: _anim, curve: const Interval(0.0, 0.55, curve: EvCurves.soft));
     _scaleCurve = CurvedAnimation(parent: _anim, curve: EvCurves.spring);
     _scaleAnim = Tween<double>(begin: 0.6, end: 1.0).animate(_scaleCurve);
-    _keyInterceptor = _ChainedKeyInterceptor(_handleKeyMessage)..attach();
+    _QuickLookKeyDispatcher.add(_handleKeyMessage);
   }
 
   @override
@@ -90,7 +89,7 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
 
   @override
   void dispose() {
-    _keyInterceptor.detach();
+    _QuickLookKeyDispatcher.remove(_handleKeyMessage);
     _controller.removeListener(_onControllerChanged);
     if (_ownsController) _controller.dispose();
     _fadeAnim.dispose(); _scaleCurve.dispose(); _anim.dispose();
@@ -188,18 +187,16 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
       ctx.widget is EditableText || ctx.findAncestorWidgetOfExactType<EditableText>() != null;
 
   EvQuickLookTarget? _resolveEvCard(BuildContext focusCtx) {
-    EvCard? evCard;
-    BuildContext? cardCtx;
-    if (focusCtx.widget is EvCard) {
-      evCard = focusCtx.widget as EvCard; cardCtx = focusCtx;
-    } else {
+    EvCard? evCard = focusCtx.widget is EvCard ? focusCtx.widget as EvCard : null;
+    BuildContext cardCtx = focusCtx;
+    if (evCard == null) {
       focusCtx.visitAncestorElements((el) {
         if (el.widget is EvCard) { evCard = el.widget as EvCard; cardCtx = el; return false; }
         return !identical(el, context);
       });
     }
     if (evCard == null) return null;
-    final ro = (cardCtx ?? focusCtx).findRenderObject();
+    final ro = cardCtx.findRenderObject();
     return EvQuickLookTarget(
       card: evCard!.card, resume: evCard!.resume,
       origin: ro is RenderBox && ro.hasSize ? (ro.localToGlobal(Offset.zero) & ro.size) : null,
@@ -231,14 +228,10 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
 
   static Future<T?> _safe<T>(Future<T> Function() fn) async { try { return await fn(); } catch (_) { return null; } }
 
-  static MediaQuality? _mergeQuality(MediaQuality? fetched, MediaQuality? base) {
-    if (fetched == null) return base;
-    if (base == null) return fetched;
-    return MediaQuality(
-      resolution: fetched.resolution ?? base.resolution, videoRange: fetched.videoRange ?? base.videoRange,
-      audioLabel: fetched.audioLabel ?? base.audioLabel, origin: fetched.origin ?? base.origin,
-    );
-  }
+  static MediaQuality? _mergeQuality(MediaQuality? fetched, MediaQuality? base) => fetched == null ? base : base == null ? fetched : MediaQuality(
+    resolution: fetched.resolution ?? base.resolution, videoRange: fetched.videoRange ?? base.videoRange,
+    audioLabel: fetched.audioLabel ?? base.audioLabel, origin: fetched.origin ?? base.origin,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -257,7 +250,7 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     return LayoutBuilder(builder: (_, c) {
       final vw = c.hasBoundedWidth && c.maxWidth > 0 ? c.maxWidth : s.size.width;
       final vh = c.hasBoundedHeight && c.maxHeight > 0 ? c.maxHeight : s.size.height;
-      final winW = math.min(s.rem(46.0), math.max(0.0, vw - s.rem(3.0)));
+      final winW = math.min(s.rem(56.0), vw * 0.92);
       final maxH = math.max(0.0, vh - s.rem(3.0));
       final align = _originAlignment(target.origin, vw, vh, winW, math.min(maxH, s.rem(44.0)));
       final radius = BorderRadius.circular(s.rem(1.5));
@@ -306,11 +299,15 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
   }
 
   Widget _buildMedia(EvScale s, MediaCard card) {
-    final immersion = _scope?.immersion, logo = card.art.logo;
+    final immersion = _scope?.immersion, logo = card.art.logo, stage = card.art.stage;
+    final bgPlan = ArtworkPlan(
+      layers: [for (final l in stage.layers) ArtworkLayer(source: l.source, fit: l.fit, blurred: l.blurred)],
+      fallbackColor: stage.fallbackColor,
+    );
     return AspectRatio(
-      key: _mediaKey, aspectRatio: 16 / 9,
+      key: _mediaKey, aspectRatio: 2.2,
       child: ColoredBox(color: const Color(0xFF000000), child: Stack(fit: StackFit.expand, children: [
-        EvArtwork(key: const Key('ev_quicklook_artwork'), plan: card.art.stage, overrideFit: BoxFit.cover, showFallbackTitle: false),
+        EvArtwork(key: const Key('ev_quicklook_artwork'), plan: bgPlan, overrideFit: BoxFit.cover, showFallbackTitle: false),
         if (immersion != null)
           ListenableBuilder(listenable: immersion, builder: (ctx, _) {
             final show = _videoActive && immersion.isVideoVisible && immersion.videoSurfaceBuilder != null;
@@ -324,17 +321,17 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
           begin: Alignment.bottomCenter, end: Alignment(0.0, -0.2),
           colors: [Color.fromRGBO(0, 0, 0, 0.65), Color.fromRGBO(0, 0, 0, 0.0)],
         )))),
-        Positioned(left: s.rem(1.75), right: s.rem(1.75), bottom: s.rem(1.25), child: EvOnImage(child: Builder(builder: (ctx) {
+        Positioned(left: s.rem(2.0), right: s.rem(2.0), bottom: s.rem(1.25), child: EvOnImage(child: Builder(builder: (ctx) {
           final onImg = EvTheme.of(ctx);
           Widget fallback() => Text(
             card.title, key: const Key('ev_quicklook_title'), maxLines: 2, overflow: TextOverflow.ellipsis,
-            style: onImg.displayStyle(s.font(2.25), color: onImg.ink, height: 1.12).copyWith(
+            style: onImg.displayStyle(s.font(2.5), color: onImg.ink, height: 1.12).copyWith(
               fontWeight: FontWeight.w700, shadows: const [Shadow(offset: Offset(0, 2), blurRadius: 12, color: Color.fromRGBO(0, 0, 0, 0.5))],
             ),
           );
           if (logo == null || _failedLogoKey == logo.cacheKey) return fallback();
           return Align(alignment: Alignment.bottomLeft, child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: s.rem(4.5), maxWidth: s.rem(20.0)),
+            constraints: BoxConstraints(maxHeight: s.rem(5.0), maxWidth: s.rem(20.0)),
             child: Image(
               key: ValueKey<String>('ev_quicklook_logo_${logo.cacheKey}'), image: logo.image,
               fit: BoxFit.contain, alignment: Alignment.bottomLeft, gaplessPlayback: true, filterQuality: FilterQuality.medium,
@@ -358,19 +355,21 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     ) : null;
 
     return Padding(
-      padding: EdgeInsets.fromLTRB(s.rem(1.75), s.rem(1.25), s.rem(1.75), s.rem(1.5)),
-      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        _buildMetaLine(t, s, target.card, quality),
-        if (overview.isNotEmpty) ...[
-          SizedBox(height: s.rem(0.75)),
-          Text(overview, key: const Key('ev_quicklook_overview'), maxLines: 3, overflow: TextOverflow.ellipsis,
-              style: t.bodyStyle(s.font(1.0), color: t.ink2, height: 1.6)),
-        ],
-        if (subPill != null || originPill != null) ...[
-          SizedBox(height: s.rem(0.875)),
-          Wrap(key: const Key('ev_quicklook_pills'), spacing: s.rem(0.5), runSpacing: s.rem(0.5), children: [?subPill, ?originPill]),
-        ],
-        SizedBox(height: s.rem(1.25)),
+      padding: EdgeInsets.fromLTRB(s.rem(2.0), s.rem(1.25), s.rem(2.0), s.rem(1.75)),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+        Expanded(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _buildMetaLine(t, s, target.card, quality),
+          if (overview.isNotEmpty) ...[
+            SizedBox(height: s.rem(0.75)),
+            Text(overview, key: const Key('ev_quicklook_overview'), maxLines: 3, overflow: TextOverflow.ellipsis,
+                style: t.bodyStyle(s.font(1.0), color: t.ink2, height: 1.6)),
+          ],
+          if (subPill != null || originPill != null) ...[
+            SizedBox(height: s.rem(0.875)),
+            Wrap(key: const Key('ev_quicklook_pills'), spacing: s.rem(0.5), runSpacing: s.rem(0.5), children: [?subPill, ?originPill]),
+          ],
+        ])),
+        SizedBox(width: s.rem(1.5)),
         _buildActions(t, s, target),
       ]),
     );
@@ -433,67 +432,69 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
       decoration: BoxDecoration(borderRadius: BorderRadius.circular(s.rem(0.375)), border: Border.all(color: c.withValues(alpha: 0.45))),
       child: Text(text, style: t.bodyStyle(s.font(0.8125), fontWeight: FontWeight.w500, color: c.withValues(alpha: 0.72), height: 1.0)),
     );
-    return Wrap(
-      key: const Key('ev_quicklook_actions'), spacing: s.rem(0.75), runSpacing: s.rem(0.5), crossAxisAlignment: WrapCrossAlignment.center,
+    return IntrinsicWidth(child: Column(
+      key: const Key('ev_quicklook_actions'), mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         EvButton.primary(
           key: const Key('ev_quicklook_play_btn'), onPressed: _playCurrent,
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            EvIcon(EvIcons.play, size: s.rem(1.125), color: t.priFg), SizedBox(width: s.rem(0.5)),
-            Text(target.resume != null ? '继续' : '播放', style: t.bodyStyle(btnFont, fontWeight: FontWeight.w600, color: t.priFg)),
-            SizedBox(width: s.rem(0.625)), kbd('⏎', t.priFg),
+          child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Padding(padding: EdgeInsets.only(right: s.rem(1.5)), child: Row(mainAxisSize: MainAxisSize.min, children: [
+              EvIcon(EvIcons.play, size: s.rem(1.125), color: t.priFg), SizedBox(width: s.rem(0.5)),
+              Text(target.resume != null ? '继续' : '播放', style: t.bodyStyle(btnFont, fontWeight: FontWeight.w600, color: t.priFg)),
+            ])),
+            kbd('⏎', t.priFg),
           ]),
         ),
+        SizedBox(height: s.rem(0.5)),
         EvButton.ghost(key: const Key('ev_quicklook_detail_btn'), label: '详情', glass: true, onPressed: _openDetail),
+        SizedBox(height: s.rem(0.5)),
         EvButton.ghost(
           key: const Key('ev_quicklook_close_btn'), glass: true, onPressed: _controller.close,
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Text('关闭', style: t.bodyStyle(btnFont, fontWeight: FontWeight.w600, color: t.ink)),
-            SizedBox(width: s.rem(0.5)), kbd('空格', t.ink),
+          child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Padding(padding: EdgeInsets.only(right: s.rem(1.5)), child: Text('关闭', style: t.bodyStyle(btnFont, fontWeight: FontWeight.w600, color: t.ink))),
+            kbd('空格', t.ink),
           ]),
         ),
       ],
-    );
+    ));
   }
 }
 
-/// Chainable, safely-detachable wrapper around [KeyEventManager.keyMessageHandler].
-class _ChainedKeyInterceptor {
-  // ignore: deprecated_member_use
-  _ChainedKeyInterceptor(bool Function(KeyMessage message) handler) : _handler = handler;
-  // ignore: deprecated_member_use
-  bool Function(KeyMessage message)? _handler;
-  // ignore: deprecated_member_use
-  KeyMessageHandler? _previous;
-  // ignore: deprecated_member_use
-  late final KeyMessageHandler _fn = _dispatch;
-  bool _attached = false;
+// ignore: deprecated_member_use
+typedef _KeyMsgHandler = bool Function(KeyMessage message);
 
-  void attach() {
-    if (_attached) return;
-    _attached = true;
+/// Global static dispatcher around [KeyEventManager.keyMessageHandler] so
+/// overlapping [EvQuickLookHost] lifetimes never leak handlers or break chains.
+class _QuickLookKeyDispatcher {
+  static final List<_KeyMsgHandler> _handlers = [];
+  // ignore: deprecated_member_use
+  static KeyMessageHandler? _original;
+  static bool _installed = false;
+
+  static void add(_KeyMsgHandler handler) {
+    if (_handlers.contains(handler)) return;
+    if (!_installed) {
+      // ignore: deprecated_member_use
+      final m = ServicesBinding.instance.keyEventManager;
+      // ignore: deprecated_member_use
+      _original = m.keyMessageHandler; m.keyMessageHandler = _dispatch; _installed = true;
+    }
+    _handlers.add(handler);
+  }
+
+  static void remove(_KeyMsgHandler handler) {
+    _handlers.remove(handler);
+    if (_handlers.isNotEmpty || !_installed) return;
     // ignore: deprecated_member_use
-    final manager = ServicesBinding.instance.keyEventManager;
+    final m = ServicesBinding.instance.keyEventManager;
     // ignore: deprecated_member_use
-    _previous = manager.keyMessageHandler;
-    // ignore: deprecated_member_use
-    manager.keyMessageHandler = _fn;
+    if (identical(m.keyMessageHandler, _dispatch)) m.keyMessageHandler = _original;
+    _original = null; _installed = false;
   }
 
   // ignore: deprecated_member_use
-  bool _dispatch(KeyMessage message) => (_handler?.call(message) ?? false) || (_previous?.call(message) ?? false);
-
-  void detach() {
-    if (!_attached) return;
-    _attached = false;
-    _handler = null;
-    // ignore: deprecated_member_use
-    final manager = ServicesBinding.instance.keyEventManager;
-    // ignore: deprecated_member_use
-    if (identical(manager.keyMessageHandler, _fn)) {
-      // ignore: deprecated_member_use
-      manager.keyMessageHandler = _previous;
-      _previous = null;
-    }
+  static bool _dispatch(KeyMessage message) {
+    for (final h in _handlers.reversed.toList()) { if (h(message)) return true; }
+    return _original?.call(message) ?? false;
   }
 }

@@ -26,6 +26,7 @@ class EvDetailPage extends StatefulWidget {
 class _EvDetailPageState extends State<EvDetailPage> {
   final _scroll = ScrollController();
   EvScope? _scope;
+  Immersion? _attachedImmersion;
   EmbyViewData? _attachedData;
   String? _attachedSessionId, _subError, _hoveredEpId;
   StreamSubscription<LocalPreferences>? _prefsSub;
@@ -33,7 +34,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
 
   LocalPreferences _prefs = const LocalPreferences();
   int _loadToken = 0, _seasonIdx = 0, _bdIdx = 0, _stillIdx = 0, _cdSec = 0, _cdTotal = 0;
-  bool _loading = true, _loadingEps = false, _quoting = false, _trailerLive = false, _stillLive = false;
+  bool _loading = true, _loadingEps = false, _quoting = false, _trailerLive = false, _stillLive = false, _trailerStarting = false;
   bool _epHovering = false, _themeStarted = false, _ownsChrome = false;
   Object? _error;
 
@@ -81,6 +82,8 @@ class _EvDetailPageState extends State<EvDetailPage> {
   }
 
   void _attachServices(EvScope scope) {
+    _attachedImmersion?.removeListener(_onImmersionChanged);
+    _attachedImmersion = scope.immersion..addListener(_onImmersionChanged);
     unawaited(_prefsSub?.cancel()); unawaited(_jobsSub?.cancel());
     _prefs = scope.services.preferences.current;
     _prefsSub = scope.services.preferences.changes.listen((next) {
@@ -127,11 +130,9 @@ class _EvDetailPageState extends State<EvDetailPage> {
     if (scope.services.playback != null) unawaited(_safe(() => scope.services.playback!.prepare(id), null));
     if (mounted) setState(() { _loading = true; _error = null; });
 
-    final detailF = data.detail(id);
-    final peopleF = _safe(() => data.people(id), const <PersonCredit>[]);
-    final simF = _safe(() => data.similar(id, limit: 16), const <MediaCard>[]);
-    final themeF = _safe(() => data.themeMedia(id), const ThemeMedia());
-    final qualF = _safe<MediaQuality?>(() => data.quality(id), null);
+    final detailF = data.detail(id), peopleF = _safe(() => data.people(id), const <PersonCredit>[]),
+        simF = _safe(() => data.similar(id, limit: 16), const <MediaCard>[]),
+        themeF = _safe(() => data.themeMedia(id), const ThemeMedia()), qualF = _safe<MediaQuality?>(() => data.quality(id), null);
 
     late final MediaDetail detail;
     try { detail = await detailF; } catch (e) { if (mounted && token == _loadToken) setState(() { _error = e; _loading = false; }); return; }
@@ -148,9 +149,9 @@ class _EvDetailPageState extends State<EvDetailPage> {
       }));
     }
 
-    final (people, sim, tm, qual) = (await peopleF, await simF, await themeF, await qualF);
+    final (people, sim, tm, qual) = await (peopleF, simF, themeF, qualF).wait;
     if (!mounted || token != _loadToken) return;
-    setState(() { _people = people; _similar = sim; _themeMedia = tm; _quality = _detail?.card.quality ?? qual; });
+    setState(() { _people = people; _similar = sim; _themeMedia = tm; _quality = _mergeQuality(_detail?.card.quality, qual); });
     _startThemeIfEnabled();
 
     if (isSeries) await _loadSeries(data, id, token);
@@ -158,7 +159,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
   }
 
   Future<void> _loadSeries(EmbyViewData data, String seriesId, int token) async {
-    final (seasons, stills) = (await _safe(() => data.seasons(seriesId), const <SeasonSummary>[]), await _safe(() => data.safeEpisodeStills(seriesId), const <ArtworkRef>[]));
+    final (seasons, stills) = await (_safe(() => data.seasons(seriesId), const <SeasonSummary>[]), _safe(() => data.safeEpisodeStills(seriesId), const <ArtworkRef>[])).wait;
     if (!mounted || token != _loadToken) return;
     setState(() { _seasons = seasons; _safeStills = stills; });
     if (seasons.isEmpty) { setState(() => _loadingEps = false); return; }
@@ -265,7 +266,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
 
   void _resetCountdown() {
     _cdT?.cancel(); _cdT = null;
-    if (_trailerLive) _stopLive();
+    if (_trailerLive) _stopLive(restartCountdown: false);
     final delay = _prefs.detailTrailerDelay;
     if (!_canTrailer || delay == null) { if (mounted) setState(() { _cdSec = _cdTotal = 0; }); return; }
     final total = math.max(1, delay.inSeconds);
@@ -281,8 +282,12 @@ class _EvDetailPageState extends State<EvDetailPage> {
     if (!_canTrailer) return;
     _cdT?.cancel(); _cdT = null;
     if (_hasTrailer) {
-      setState(() { _trailerLive = true; _stillLive = false; _cdSec = 0; });
-      unawaited(_scope?.immersion.showMutedVideo(_themeMedia.trailer, label: '预告片 · 静音'));
+      final token = _loadToken;
+      setState(() { _trailerLive = true; _stillLive = false; _trailerStarting = true; _cdSec = 0; });
+      unawaited((_scope?.immersion.showMutedVideo(_themeMedia.trailer, label: '预告片 · 静音') ?? Future<void>.value()).whenComplete(() {
+        _trailerStarting = false;
+        if (mounted && token == _loadToken) _onImmersionChanged();
+      }));
       return;
     }
     _stillIdx = 0; setState(() { _trailerLive = _stillLive = true; _cdSec = 0; });
@@ -292,13 +297,18 @@ class _EvDetailPageState extends State<EvDetailPage> {
     _stillT = Timer.periodic(const Duration(milliseconds: 3200), (_) { if (mounted && _stillLive && _safeStills.isNotEmpty) { _stillIdx = (_stillIdx + 1) % _safeStills.length; show(); } });
   }
 
-  void _stopLive() {
+  void _stopLive({bool restartCountdown = true}) {
     _stillT?.cancel(); _stillT = null;
     final wasLive = _trailerLive, wasStill = _stillLive;
-    _trailerLive = _stillLive = false;
-    final d = _prefs.detailTrailerDelay;
-    if (d != null && d > Duration.zero) _cdSec = _cdTotal = d.inSeconds;
-    if (wasLive) { if (!wasStill) unawaited(_scope?.immersion.stopVideo()); _scope?.stage.setBaseBackdrop(_bdPlan(_bdIdx)); if (mounted) setState(() {}); }
+    _trailerLive = _stillLive = _trailerStarting = false;
+    if (wasLive) { if (!wasStill) unawaited(_scope?.immersion.stopVideo()); _scope?.stage.setBaseBackdrop(_bdPlan(_bdIdx)); }
+    if (restartCountdown) { _resetCountdown(); } else if (wasLive && mounted) { setState(() {}); }
+  }
+
+  void _onImmersionChanged() {
+    if (!mounted || !_trailerLive || _stillLive || _trailerStarting) return;
+    final im = _scope?.immersion;
+    if (im != null && (!im.isVideoVisible || im.snapshot.video == PreviewState.idle || im.snapshot.video == PreviewState.failed)) _stopLive();
   }
 
   void _onScroll() {
@@ -343,12 +353,13 @@ class _EvDetailPageState extends State<EvDetailPage> {
   void _stopTimers({required bool stopMedia}) {
     _bdT?.cancel(); _cdT?.cancel(); _stillT?.cancel(); _epT?.cancel();
     _bdT = _cdT = _stillT = _epT = null;
-    _trailerLive = _stillLive = _epHovering = false; _hoveredEpId = null;
+    _trailerLive = _stillLive = _trailerStarting = _epHovering = false; _hoveredEpId = null;
     if (stopMedia) { _themeStarted = false; unawaited(_scope?.immersion.stopTheme()); unawaited(_scope?.immersion.stopVideo()); }
   }
 
   @override
   void dispose() {
+    _attachedImmersion?.removeListener(_onImmersionChanged); _attachedImmersion = null;
     unawaited(_prefsSub?.cancel()); unawaited(_jobsSub?.cancel());
     _stopTimers(stopMedia: false);
     _scroll..removeListener(_onScroll)..dispose();
@@ -364,6 +375,10 @@ class _EvDetailPageState extends State<EvDetailPage> {
     super.dispose();
   }
 
+  static MediaQuality? _mergeQuality(MediaQuality? base, MediaQuality? fetched) => fetched == null ? base : base == null ? fetched : MediaQuality(
+    resolution: fetched.resolution ?? base.resolution, videoRange: fetched.videoRange ?? base.videoRange,
+    audioLabel: fetched.audioLabel ?? base.audioLabel, origin: fetched.origin ?? base.origin,
+  );
   static Future<T> _safe<T>(Future<T> Function() fn, T fb) async { try { return await fn(); } catch (_) { return fb; } }
 
   @override

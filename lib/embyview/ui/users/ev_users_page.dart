@@ -17,8 +17,7 @@ class EvUsersPage extends StatefulWidget {
   final ValueChanged<AccountProfile>? onSelected;
   final VoidCallback? onManageUsers, onAddUser;
 
-  @override
-  State<EvUsersPage> createState() => _EvUsersPageState();
+  @override State<EvUsersPage> createState() => _EvUsersPageState();
 }
 
 class _EvUsersPageState extends State<EvUsersPage> {
@@ -115,6 +114,12 @@ class _EvUsersPageState extends State<EvUsersPage> {
     await _performSwitch(profile);
   }
 
+  void _applySignedIn(AccountSnapshot snap, [AccountProfile? fallback]) {
+    final selected = snap.current ?? fallback;
+    setState(() { _snapshot = snap; _activeSessionId = snap.sessionId; _activeUserId = selected?.id; _resetTransientState(); });
+    if (selected != null) widget.onSelected?.call(selected);
+  }
+
   Future<void> _performSwitch(AccountProfile profile, {String? password}) async {
     final accounts = _boundAccounts;
     if (accounts == null || _busy) return;
@@ -128,10 +133,7 @@ class _EvUsersPageState extends State<EvUsersPage> {
     });
     try {
       await accounts.switchTo(profile.id, password: password);
-      if (!mounted) return;
-      final snap = accounts.snapshot, selected = snap.current ?? profile;
-      setState(() { _snapshot = snap; _activeSessionId = snap.sessionId; _activeUserId = selected.id; _resetTransientState(); });
-      widget.onSelected?.call(selected);
+      if (mounted) _applySignedIn(accounts.snapshot, profile);
     } catch (error) {
       if (!mounted) return;
       final failure = error is EmbyViewFailure ? error : null;
@@ -181,10 +183,8 @@ class _EvUsersPageState extends State<EvUsersPage> {
     try {
       await accounts.signIn(uri, username, _passwordCtrl.text);
       if (!mounted) return;
-      final snap = accounts.snapshot;
       _userCtrl.clear();
-      setState(() { _snapshot = snap; _activeSessionId = snap.sessionId; _activeUserId = snap.current?.id; _resetTransientState(); });
-      if (snap.current != null) widget.onSelected?.call(snap.current!);
+      _applySignedIn(accounts.snapshot);
     } catch (error) {
       if (!mounted) return;
       setState(() { _busy = false; _statusText = null; _errorMessage = error is EmbyViewFailure ? error.reason : '登录失败，请检查信息后重试。'; });
@@ -216,12 +216,12 @@ class _EvUsersPageState extends State<EvUsersPage> {
         (_snapshot.phase == AccountPhase.signingIn ? '正在登录…' : _snapshot.phase == AccountPhase.switching ? '正在切换用户…' : null);
 
     return Shortcuts(
-      shortcuts: const <ShortcutActivator, Intent>{
+      shortcuts: _formMode == _UsersFormMode.none ? const <ShortcutActivator, Intent>{
         SingleActivator(LogicalKeyboardKey.arrowLeft): DirectionalFocusIntent(TraversalDirection.left),
         SingleActivator(LogicalKeyboardKey.arrowRight): DirectionalFocusIntent(TraversalDirection.right),
         SingleActivator(LogicalKeyboardKey.arrowUp): DirectionalFocusIntent(TraversalDirection.up),
         SingleActivator(LogicalKeyboardKey.arrowDown): DirectionalFocusIntent(TraversalDirection.down),
-      },
+      } : const {},
       child: CallbackShortcuts(
         bindings: {if (_formMode != _UsersFormMode.none) const SingleActivator(LogicalKeyboardKey.escape): _closeForm},
         child: FocusTraversalGroup(

@@ -198,9 +198,9 @@ class _EvDetailHeroState extends State<EvDetailHero> {
     final sec = res != null && tot != null && tot > Duration.zero ? '· ${EvCard.formatRemaining(tot > res.position ? tot - res.position : Duration.zero)}' : null;
     return Wrap(spacing: s.rem(0.75), runSpacing: s.rem(0.5), crossAxisAlignment: WrapCrossAlignment.center, children: [
       Builder(builder: (c) => EvButton.primary(key: const Key('ev_detail_play_btn'), icon: EvIcons.play, label: pri, secondaryLabel: sec, progress: EvCard.resumeProgress(res), onPressed: () => _play(c))),
-      EvButton.ghost(key: const Key('ev_detail_favorite_btn'), round: true, glass: true, icon: EvIcons.plus, tooltip: '加入片单', onPressed: widget.onToggleFavorite ?? () {}),
-      EvButton.ghost(key: const Key('ev_detail_played_btn'), round: true, glass: true, icon: EvIcons.check, tooltip: '标为已看', onPressed: widget.onTogglePlayed ?? () {}),
-      EvButton.ghost(key: const Key('ev_detail_more_btn'), round: true, glass: true, icon: EvIcons.more, tooltip: '更多', onPressed: widget.onMore ?? () {}),
+      EvButton.ghost(key: const Key('ev_detail_favorite_btn'), round: true, glass: true, icon: EvIcons.plus, tooltip: '加入片单', onPressed: widget.onToggleFavorite),
+      EvButton.ghost(key: const Key('ev_detail_played_btn'), round: true, glass: true, icon: EvIcons.check, tooltip: '标为已看', onPressed: widget.onTogglePlayed),
+      EvButton.ghost(key: const Key('ev_detail_more_btn'), round: true, glass: true, icon: EvIcons.more, tooltip: '更多', onPressed: widget.onMore),
     ]);
   }
 

@@ -31,7 +31,7 @@ class EvZoneEditorOverlay extends StatefulWidget {
 
 class _EvZoneEditorOverlayState extends State<EvZoneEditorOverlay> {
   late final _nameController = TextEditingController(text: widget.initialZone?.name ?? '');
-  final _nameFocus = FocusNode(debugLabel: 'ev_zone_name');
+  final _scopeNode = FocusScopeNode(debugLabel: 'ev_zone_editor_scope');
   late String _iconKey = widget.initialZone?.iconKey ?? EvIcons.star.key;
   late int _colorSlot = (widget.initialZone?.colorSlot ?? 4) % 7;
   late ZoneRule? _rule = widget.initialZone?.rule;
@@ -51,6 +51,7 @@ class _EvZoneEditorOverlayState extends State<EvZoneEditorOverlay> {
   void initState() {
     super.initState();
     if (widget.facets != null) { _facets = widget.facets; _facetsRequested = true; _ensureRuleFromFacets(widget.facets!); }
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && !_scopeNode.hasFocus) _scopeNode.requestFocus(); });
   }
 
   @override
@@ -59,7 +60,7 @@ class _EvZoneEditorOverlayState extends State<EvZoneEditorOverlay> {
     if (!_facetsRequested) { _facetsRequested = true; unawaited(_fetchFacets()); }
   }
 
-  @override void dispose() { _nameController.dispose(); _nameFocus.dispose(); super.dispose(); }
+  @override void dispose() { _nameController.dispose(); _scopeNode.dispose(); super.dispose(); }
 
   Future<void> _fetchFacets() async {
     final loader = widget.loadFacets ?? EvScope.maybeOf(context)?.services.data?.customZoneFacets;
@@ -135,8 +136,8 @@ class _EvZoneEditorOverlayState extends State<EvZoneEditorOverlay> {
     Widget lbl(String text) => Padding(padding: EdgeInsets.only(top: s.rem(1.25), bottom: s.rem(0.5)),
       child: Text(text, style: t.bodyStyle(s.font(0.875), fontWeight: FontWeight.w600, color: t.ink3)));
 
-    return Focus(
-      autofocus: true,
+    return FocusScope(
+      node: _scopeNode, autofocus: true,
       onKeyEvent: (_, e) {
         if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.escape) { widget.onClose(); return KeyEventResult.handled; }
         return KeyEventResult.ignored;
@@ -163,7 +164,7 @@ class _EvZoneEditorOverlayState extends State<EvZoneEditorOverlay> {
                   Expanded(child: Text(_isNew ? '添加分区' : '编辑分区', style: t.displayStyle(s.font(1.75)))),
                 ]),
                 lbl('名字'),
-                EvSettingsTextField(key: const Key('ev_zone_name_input'), controller: _nameController, focusNode: _nameFocus,
+                EvSettingsTextField(key: const Key('ev_zone_name_input'), controller: _nameController,
                   placeholder: '比如：科幻、杜比视界', maxLength: 16, accentColor: c, onSubmitted: (_) => _save()),
                 lbl('图标'),
                 GridView.builder(
@@ -196,7 +197,7 @@ class _EvZoneEditorOverlayState extends State<EvZoneEditorOverlay> {
                         return AnimatedScale(
                           scale: (sel || hovered || focused) ? 1.08 : 1.0, duration: EvDurations.normal, curve: EvCurves.spring,
                           child: Container(width: s.rem(2.0), height: s.rem(2.0), decoration: BoxDecoration(color: sc, shape: BoxShape.circle,
-                            boxShadow: sel ? [BoxShadow(color: t.glassSolid, spreadRadius: 2), BoxShadow(color: sc, spreadRadius: 4)] : null)),
+                            boxShadow: sel ? [BoxShadow(color: sc, spreadRadius: 4), BoxShadow(color: t.glassSolid, spreadRadius: 2)] : null)),
                         );
                       },
                     ),

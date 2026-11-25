@@ -282,6 +282,9 @@ class _FakeDetailData implements EmbyViewData {
     this.similarByItem = const {},
     this.themeByItem = const {},
     this.safeStillsBySeries = const {},
+    this.qualityByItem = const {},
+    this.onSeasons,
+    this.onSafeStills,
   });
 
   final Map<String, MediaDetail> details;
@@ -291,6 +294,9 @@ class _FakeDetailData implements EmbyViewData {
   final Map<String, List<MediaCard>> similarByItem;
   final Map<String, ThemeMedia> themeByItem;
   final Map<String, List<ArtworkRef>> safeStillsBySeries;
+  final Map<String, MediaQuality> qualityByItem;
+  final Future<List<SeasonSummary>> Function(String seriesId)? onSeasons;
+  final Future<List<ArtworkRef>> Function(String seriesId)? onSafeStills;
 
   @override
   Future<MediaDetail> detail(String itemId) async {
@@ -301,7 +307,7 @@ class _FakeDetailData implements EmbyViewData {
 
   @override
   Future<List<SeasonSummary>> seasons(String seriesId) async =>
-      seasonsBySeries[seriesId] ?? const [];
+      onSeasons != null ? onSeasons!(seriesId) : (seasonsBySeries[seriesId] ?? const []);
 
   @override
   Future<SeasonEpisodes> episodes(String seriesId, String seasonId) async =>
@@ -321,10 +327,10 @@ class _FakeDetailData implements EmbyViewData {
 
   @override
   Future<List<ArtworkRef>> safeEpisodeStills(String seriesId) async =>
-      safeStillsBySeries[seriesId] ?? const [];
+      onSafeStills != null ? onSafeStills!(seriesId) : (safeStillsBySeries[seriesId] ?? const []);
 
   @override
-  Future<MediaQuality?> quality(String itemId) async => null;
+  Future<MediaQuality?> quality(String itemId) async => qualityByItem[itemId];
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -834,12 +840,13 @@ void main() {
         );
         await tester.pump();
 
-        final ringPaint = tester.widget<CustomPaint>(
-          find.descendant(
-            of: find.byKey(const Key('ev_detail_theme_ring')),
-            matching: find.byType(CustomPaint),
-          ),
+        final ringFinder = find.descendant(
+          of: find.byKey(const Key('ev_detail_theme_ring')),
+          matching: find.byType(CustomPaint),
         );
+        final ringPaint = tester.widget<CustomPaint>(ringFinder);
+        final ringRenderBefore = tester.renderObject(ringFinder);
+        expect(ringPaint.key, isNull);
         expect((ringPaint.painter! as EvRingProgressPainter).progress, closeTo(0.4, 0.01));
 
         h.immersionPlayback.emit(
@@ -851,12 +858,8 @@ void main() {
           ),
         );
         await tester.pump();
-        final ringPaint2 = tester.widget<CustomPaint>(
-          find.descendant(
-            of: find.byKey(const Key('ev_detail_theme_ring')),
-            matching: find.byType(CustomPaint),
-          ),
-        );
+        final ringPaint2 = tester.widget<CustomPaint>(ringFinder);
+        expect(tester.renderObject(ringFinder), same(ringRenderBefore));
         expect((ringPaint2.painter! as EvRingProgressPainter).progress, closeTo(0.75, 0.01));
 
         // 4. Mute toggle calls setThemeMuted.
@@ -1477,5 +1480,104 @@ void main() {
         );
       },
     );
+  });
+
+  group('Regressions: quality merge, immersion failure reset + countdown restart, disabled secondary buttons, concurrent series fetch', () {
+    testWidgets('merges data.quality fields into card.quality, disables unwired hero buttons, and resets trailer & restarts countdown on failure', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final card = _makeCard(
+        id: 'm_merge', title: '字段合并测试', backdropCount: 3,
+        quality: const MediaQuality(resolution: '4K', origin: MediaOrigin.nasLocal),
+      );
+      final data = _FakeDetailData(
+        details: {'m_merge': MediaDetail(card: card, playTarget: const PlayTarget(itemId: 'm_merge'))},
+        qualityByItem: {'m_merge': const MediaQuality(videoRange: 'Dolby Vision', audioLabel: 'Atmos')},
+        themeByItem: {'m_merge': const ThemeMedia(trailer: _FakePreviewRef(id: 'tr_merge', name: '预告片'))},
+      );
+      final h = _createHarness(
+        initialPrefs: const LocalPreferences(detailTrailerDelay: Duration(seconds: 4)),
+        data: data,
+      );
+      addTearDown(h.dispose);
+
+      await tester.pumpWidget(_wrapDetail(h, child: const EvDetailPage(itemId: 'm_merge', enableAnimations: false)));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      // 1. Field-level quality merge keeps card fields and adds data.quality fields.
+      final heroFinder = find.byKey(const Key('ev_detail_hero'));
+      expect(find.descendant(of: heroFinder, matching: find.text('4K')), findsOneWidget);
+      expect(find.descendant(of: heroFinder, matching: find.text('DOLBY VISION')), findsOneWidget);
+      expect(find.descendant(of: heroFinder, matching: find.text('Atmos')), findsOneWidget);
+      expect(find.descendant(of: heroFinder, matching: find.text('NAS 本地')), findsOneWidget);
+
+      // 2. Unwired secondary buttons pass null onPressed (disabled state).
+      expect(tester.widget<EvButton>(find.byKey(const Key('ev_detail_favorite_btn'))).onPressed, isNull);
+      expect(tester.widget<EvButton>(find.byKey(const Key('ev_detail_played_btn'))).onPressed, isNull);
+      expect(tester.widget<EvButton>(find.byKey(const Key('ev_detail_more_btn'))).onPressed, isNull);
+
+      // 3. Start trailer, emit video failure -> resets trailerLive, restarts ticking countdown, and unlocks 7s backdrop rotation.
+      await tester.tap(find.byKey(const Key('ev_detail_trailer_btn')));
+      await tester.pump();
+      expect(find.text('预告片播放中 · 点此停止'), findsOneWidget);
+
+      h.immersionPlayback.emit(const ImmersionSnapshot(video: PreviewState.failed));
+      await tester.pump();
+      expect(find.text('4 秒后播放预告'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('3 秒后播放预告'), findsOneWidget);
+
+      // Stop manually after starting again, and verify 7s backdrop rotation is unlocked (not frozen).
+      final initialBd = h.stage.activeBackdropKey;
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('1 秒后播放预告'), findsOneWidget);
+      // Select dot 0 to verify countdown keeps ticking while backdrops rotate every 7s.
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('预告片播放中 · 点此停止'), findsOneWidget);
+      h.immersionPlayback.emit(const ImmersionSnapshot(video: PreviewState.idle));
+      await tester.pump();
+      expect(find.text('4 秒后播放预告'), findsOneWidget);
+      // Let 3s pass (still before 4s trailer restart, and total 7s since start -> backdrop rotated!).
+      await tester.pump(const Duration(seconds: 3));
+      expect(h.stage.activeBackdropKey, isNot(initialBd));
+      expect(find.text('1 秒后播放预告'), findsOneWidget);
+    });
+
+    testWidgets('starts seasons and safeEpisodeStills concurrently in _loadSeries', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final seasonsC = Completer<List<SeasonSummary>>();
+      final stillsC = Completer<List<ArtworkRef>>();
+      var seasonsStarted = false, stillsStarted = false;
+
+      final sCard = _makeCard(id: 's_conc', title: '并发剧集', kind: MediaKind.series, childCount: 1);
+      final data = _FakeDetailData(
+        details: {'s_conc': MediaDetail(card: sCard)},
+        onSeasons: (_) { seasonsStarted = true; return seasonsC.future; },
+        onSafeStills: (_) { stillsStarted = true; return stillsC.future; },
+      );
+      final h = _createHarness(initialPrefs: const LocalPreferences(detailTrailerDelay: null), data: data);
+      addTearDown(h.dispose);
+
+      await tester.pumpWidget(_wrapDetail(h, child: const EvDetailPage(itemId: 's_conc', enableAnimations: false)));
+      await tester.pump();
+      await tester.pump();
+
+      expect(seasonsStarted, isTrue);
+      expect(stillsStarted, isTrue);
+
+      seasonsC.complete(const []);
+      stillsC.complete(const []);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
   });
 }
