@@ -646,4 +646,91 @@ void main() {
     expect(find.byKey(const Key('ev_search_top_match_title')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  for (final themeMode in [ThemeMode.cinema, ThemeMode.paper]) {
+    for (final size in const [Size(1440, 900), Size(2560, 1440)]) {
+      testWidgets(
+        'recent search chips stay compact, centered on one row, and trigger search in ${themeMode.name} at ${size.width.toInt()}x${size.height.toInt()}',
+        (tester) async {
+          await setViewport(tester, size);
+          const terms = ['盗梦', '宫崎骏', '4K 杜比视界'];
+          final data = _FakeData(
+            landing: SearchLanding(
+              recentTerms: terms,
+              shelves: [HomeShelf(id: 'rec', title: '大家都在看', items: [for (final c in _sampleCatalog()) c.card])],
+            ),
+            catalog: _sampleCatalog(),
+          );
+          final h = _Harness(data: data, themeMode: themeMode);
+          addTearDown(h.dispose);
+
+          await tester.pumpWidget(h.wrap(const EvSearchPage()));
+          await tester.pumpAndSettle();
+
+          final wrapFinder = find.byKey(const Key('ev_search_recent_terms'));
+          expect(wrapFinder, findsOneWidget);
+          final wrapRect = tester.getRect(wrapFinder);
+          final scale = EvScale.of(tester.element(wrapFinder));
+          final expectedHorizInset = scale.rem(1.0625) * 2 + 2.0;
+
+          final chipRects = <Rect>[];
+          for (var i = 0; i < terms.length; i++) {
+            final chipFinder = find.byKey(Key('ev_search_recent_$i'));
+            final textFinder = find.descendant(of: chipFinder, matching: find.byType(Text));
+            final chipRect = tester.getRect(chipFinder);
+            final textRect = tester.getRect(textFinder);
+            chipRects.add(chipRect);
+
+            // Compact width hugs text content and never stretches across the row.
+            expect(chipRect.width, lessThan(wrapRect.width * 0.35));
+            expect(chipRect.width, closeTo(textRect.width + expectedHorizInset, 4.0));
+            expect(textRect.center.dy, closeTo(chipRect.center.dy, 1.0));
+          }
+
+          // All chips sit on the same horizontal row, laid out left-to-right and centered as a group.
+          for (var i = 1; i < chipRects.length; i++) {
+            expect(chipRects[i].top, closeTo(chipRects[0].top, 0.5));
+            expect(chipRects[i].left, greaterThan(chipRects[i - 1].right));
+          }
+          final rowCenterX = (chipRects.first.left + chipRects.last.right) / 2;
+          expect(rowCenterX, closeTo(wrapRect.center.dx, 1.5));
+
+          // Tapping a recent chip still populates the query and executes search.
+          await tester.tap(find.byKey(const Key('ev_search_recent_0')));
+          await tester.pumpAndSettle();
+          expect(data.searchCalls.map((c) => c.text), contains('盗梦'));
+          expect(find.byKey(const Key('ev_search_top_match')), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets('recent search chips wrap onto multiple rows on narrow viewport without stretching', (tester) async {
+    await setViewport(tester, const Size(420, 900));
+    const terms = ['盗梦空间', '千与千寻', '星际穿越', '攻壳机动队', '银翼杀手 2049', '新世纪福音战士'];
+    final data = _FakeData(
+      landing: const SearchLanding(recentTerms: terms),
+      catalog: _sampleCatalog(),
+    );
+    final h = _Harness(data: data);
+    addTearDown(h.dispose);
+
+    await tester.pumpWidget(h.wrap(const EvSearchPage()));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    final wrapRect = tester.getRect(find.byKey(const Key('ev_search_recent_terms')));
+    final chipRects = [for (var i = 0; i < terms.length; i++) tester.getRect(find.byKey(Key('ev_search_recent_$i')))];
+
+    final distinctRows = <double>{};
+    for (final rect in chipRects) {
+      expect(rect.left, greaterThanOrEqualTo(wrapRect.left - 0.5));
+      expect(rect.right, lessThanOrEqualTo(wrapRect.right + 0.5));
+      expect(rect.width, lessThan(wrapRect.width * 0.8));
+      distinctRows.add(rect.top.roundToDouble());
+    }
+    expect(distinctRows.length, greaterThanOrEqualTo(2));
+    expect(chipRects.last.top, greaterThan(chipRects.first.top));
+  });
 }

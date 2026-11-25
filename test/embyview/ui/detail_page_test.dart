@@ -285,6 +285,8 @@ class _FakeDetailData implements EmbyViewData {
     this.qualityByItem = const {},
     this.onSeasons,
     this.onSafeStills,
+    this.onSetFavorite,
+    this.onSetPlayed,
   });
 
   final Map<String, MediaDetail> details;
@@ -297,6 +299,11 @@ class _FakeDetailData implements EmbyViewData {
   final Map<String, MediaQuality> qualityByItem;
   final Future<List<SeasonSummary>> Function(String seriesId)? onSeasons;
   final Future<List<ArtworkRef>> Function(String seriesId)? onSafeStills;
+  final Future<void> Function(String itemId, bool favorite)? onSetFavorite;
+  final Future<void> Function(String itemId, bool played)? onSetPlayed;
+
+  final List<(String, bool)> favoriteCalls = [];
+  final List<(String, bool)> playedCalls = [];
 
   @override
   Future<MediaDetail> detail(String itemId) async {
@@ -333,6 +340,18 @@ class _FakeDetailData implements EmbyViewData {
   Future<MediaQuality?> quality(String itemId) async => qualityByItem[itemId];
 
   @override
+  Future<void> setFavorite(String itemId, bool favorite) async {
+    favoriteCalls.add((itemId, favorite));
+    if (onSetFavorite != null) return onSetFavorite!(itemId, favorite);
+  }
+
+  @override
+  Future<void> setPlayed(String itemId, bool played) async {
+    playedCalls.add((itemId, played));
+    if (onSetPlayed != null) return onSetPlayed!(itemId, played);
+  }
+
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
@@ -352,6 +371,7 @@ MediaCard _makeCard({
   bool withLogo = true,
   int backdropCount = 3,
   bool? played,
+  bool? favorite,
   int? episodeNumber,
 }) {
   final bds = [
@@ -373,6 +393,7 @@ MediaCard _makeCard({
     childCount: childCount,
     quality: quality,
     played: played,
+    favorite: favorite,
     episodeNumber: episodeNumber,
     art: CardArtwork(
       landscape: ArtworkPlan(
@@ -950,6 +971,15 @@ void main() {
               final scale = EvScale.fromSize(size);
               final heroRect = tester.getRect(find.byKey(const Key('ev_detail_hero')));
               expect(heroRect.height, closeTo(scale.vh(100) - scale.peek, 0.5));
+              expect(find.byKey(const Key('ev_detail_more_btn')), findsNothing);
+              for (final btnKey in const [Key('ev_detail_favorite_btn'), Key('ev_detail_played_btn')]) {
+                final btnFinder = find.byKey(btnKey);
+                expect(btnFinder, findsOneWidget);
+                final opacity = tester.widget<Opacity>(
+                  find.descendant(of: btnFinder, matching: find.byType(Opacity)),
+                );
+                expect(opacity.opacity, 1.0, reason: '$btnKey should be clearly visible (not disabled) in $themeMode at $size');
+              }
               expect(
                 tester.takeException(),
                 isNull,
@@ -1515,10 +1545,22 @@ void main() {
       expect(find.descendant(of: heroFinder, matching: find.text('Atmos')), findsOneWidget);
       expect(find.descendant(of: heroFinder, matching: find.text('NAS 本地')), findsOneWidget);
 
-      // 2. Unwired secondary buttons pass null onPressed (disabled state).
-      expect(tester.widget<EvButton>(find.byKey(const Key('ev_detail_favorite_btn'))).onPressed, isNull);
-      expect(tester.widget<EvButton>(find.byKey(const Key('ev_detail_played_btn'))).onPressed, isNull);
-      expect(tester.widget<EvButton>(find.byKey(const Key('ev_detail_more_btn'))).onPressed, isNull);
+      // 2. More button removed; favorite & played action buttons are wired and clearly visible.
+      expect(find.byKey(const Key('ev_detail_more_btn')), findsNothing);
+      expect(find.byKey(const Key('ev_detail_favorite_btn')), findsOneWidget);
+      expect(find.byKey(const Key('ev_detail_played_btn')), findsOneWidget);
+      expect(
+        tester.widget<Opacity>(
+          find.descendant(of: find.byKey(const Key('ev_detail_favorite_btn')), matching: find.byType(Opacity)),
+        ).opacity,
+        1.0,
+      );
+      expect(
+        tester.widget<Opacity>(
+          find.descendant(of: find.byKey(const Key('ev_detail_played_btn')), matching: find.byType(Opacity)),
+        ).opacity,
+        1.0,
+      );
 
       // 3. Start trailer, emit video failure -> resets trailerLive, restarts ticking countdown, and unlocks 7s backdrop rotation.
       await tester.tap(find.byKey(const Key('ev_detail_trailer_btn')));
@@ -1579,5 +1621,163 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     });
+  });
+
+  group('Visual review: Favorite & Played action buttons, rollback, series refresh, and no more button', () {
+    EvIcon buttonIcon(WidgetTester tester, Key key) =>
+        tester.widget<EvIcon>(find.descendant(of: find.byKey(key), matching: find.byType(EvIcon)));
+
+    Tooltip buttonTooltip(WidgetTester tester, Key key) =>
+        tester.widget<Tooltip>(find.descendant(of: find.byKey(key), matching: find.byType(Tooltip)));
+
+    testWidgets(
+      'removes more button, toggles favorite icon/highlight with re-entry guard, and rolls back with error message on failure',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        Completer<void>? inFlight;
+        var failNext = false;
+        final movieCard = _makeCard(id: 'm_fav', title: '收藏测试电影', favorite: false, played: false);
+        final data = _FakeDetailData(
+          details: {'m_fav': MediaDetail(card: movieCard, playTarget: const PlayTarget(itemId: 'm_fav'))},
+          onSetFavorite: (id, fav) async {
+            final pending = inFlight;
+            if (pending != null) return pending.future;
+            if (failNext) throw const EmbyViewFailure('服务器拒绝写入');
+          },
+        );
+        final h = _createHarness(
+          initialPrefs: const LocalPreferences(detailTrailerDelay: null, themeMusic: false),
+          data: data,
+        );
+        addTearDown(h.dispose);
+
+        await tester.pumpWidget(_wrapDetail(h, child: const EvDetailPage(itemId: 'm_fav', enableAnimations: false)));
+        await tester.pumpAndSettle();
+
+        const favKey = Key('ev_detail_favorite_btn');
+        expect(find.byKey(const Key('ev_detail_more_btn')), findsNothing);
+        expect(buttonIcon(tester, favKey).icon, EvIcons.plus);
+        expect(buttonTooltip(tester, favKey).message, '加入片单');
+
+        // Start in-flight write: optimistic switch to solid star, ignore second tap while busy.
+        inFlight = Completer<void>();
+        await tester.tap(find.byKey(favKey));
+        await tester.pump();
+        expect(buttonIcon(tester, favKey).icon, EvIcons.star);
+        expect(buttonIcon(tester, favKey).icon.solid, isTrue);
+        expect(buttonTooltip(tester, favKey).message, '已加入片单');
+        expect(data.favoriteCalls, [('m_fav', true)]);
+
+        await tester.tap(find.byKey(favKey));
+        await tester.pump();
+        expect(data.favoriteCalls.length, 1, reason: 'In-flight favorite request must ignore re-entrant taps');
+
+        inFlight.complete();
+        inFlight = null;
+        await tester.pumpAndSettle();
+        expect(buttonIcon(tester, favKey).icon, EvIcons.star);
+
+        // Second tap unfavorites back to plus icon.
+        await tester.tap(find.byKey(favKey));
+        await tester.pumpAndSettle();
+        expect(data.favoriteCalls, [('m_fav', true), ('m_fav', false)]);
+        expect(buttonIcon(tester, favKey).icon, EvIcons.plus);
+        expect(buttonTooltip(tester, favKey).message, '加入片单');
+
+        // Write failure rolls back immediately and shows clear error banner, dismissible by user.
+        failNext = true;
+        await tester.tap(find.byKey(favKey));
+        await tester.pumpAndSettle();
+        expect(buttonIcon(tester, favKey).icon, EvIcons.plus);
+        expect(buttonTooltip(tester, favKey).message, '加入片单');
+        expect(find.byKey(const Key('ev_detail_action_error')), findsOneWidget);
+        expect(find.textContaining('加入片单失败：服务器拒绝写入'), findsOneWidget);
+
+        await tester.tap(find.byKey(const Key('ev_detail_action_error_dismiss')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_detail_action_error')), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'toggles played highlight on series targeting whole seriesId, refreshes episodes list, and rolls back on failure',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        var seriesAllPlayed = false;
+        var failNext = false;
+        const sea1 = SeasonSummary(id: 'sea1', name: '第 1 季', number: 1, total: 2);
+        SeasonEpisodes buildEps(bool allPlayed) => SeasonEpisodes(
+          season: sea1,
+          playedCount: allPlayed ? 2 : 1,
+          episodes: [
+            _makeEpisode(id: 'e1', seriesId: 's_play', seasonId: 'sea1', number: 1, title: '第一集', overview: '简介1', played: true),
+            _makeEpisode(id: 'e2', seriesId: 's_play', seasonId: 'sea1', number: 2, title: '第二集', overview: '简介2', played: allPlayed),
+          ],
+        );
+
+        final episodesMap = <String, SeasonEpisodes>{'s_play:sea1': buildEps(false)};
+        final seriesCard = _makeCard(
+          id: 's_play',
+          title: '整剧已看测试',
+          kind: MediaKind.series,
+          childCount: 1,
+          played: false,
+          withLogo: false,
+        );
+        final data = _FakeDetailData(
+          details: {'s_play': MediaDetail(card: seriesCard, episodeCount: 2)},
+          seasonsBySeries: {'s_play': const [sea1]},
+          episodesBySeason: episodesMap,
+          onSetPlayed: (id, played) async {
+            if (failNext) throw const EmbyViewFailure('网络异常');
+            seriesAllPlayed = played;
+            episodesMap['s_play:sea1'] = buildEps(seriesAllPlayed);
+          },
+        );
+        final h = _createHarness(
+          initialPrefs: const LocalPreferences(theme: ThemeMode.paper, detailTrailerDelay: null, themeMusic: false),
+          data: data,
+        );
+        addTearDown(h.dispose);
+
+        await tester.pumpWidget(_wrapDetail(h, child: const EvDetailPage(itemId: 's_play', enableAnimations: false)));
+        await tester.pumpAndSettle();
+
+        const playedKey = Key('ev_detail_played_btn');
+        expect(buttonTooltip(tester, playedKey).message, '标为已看');
+        expect(find.text('1 / 2 已看'), findsOneWidget);
+        expect(find.byKey(const Key('ev_episode_played_e2')), findsNothing);
+
+        // Tap played -> calls setPlayed with seriesId, highlights button, refreshes episodes to 2 / 2 已看.
+        await tester.tap(find.byKey(playedKey));
+        await tester.pumpAndSettle();
+        expect(data.playedCalls, [('s_play', true)]);
+        expect(buttonTooltip(tester, playedKey).message, '已看');
+        expect(find.text('2 / 2 已看'), findsOneWidget);
+        expect(find.byKey(const Key('ev_episode_played_e2')), findsOneWidget);
+
+        // Verify active highlight fill color on played button (terracotta brand color).
+        final activeContainer = tester.widget<AnimatedContainer>(
+          find.descendant(of: find.byKey(playedKey), matching: find.byType(AnimatedContainer)),
+        );
+        expect((activeContainer.decoration! as BoxDecoration).color, EvTheme.paper.brand);
+
+        // Failing unmark rolls back to played == true and shows error message.
+        failNext = true;
+        await tester.tap(find.byKey(playedKey));
+        await tester.pumpAndSettle();
+        expect(buttonTooltip(tester, playedKey).message, '已看');
+        expect(find.byKey(const Key('ev_detail_action_error')), findsOneWidget);
+        expect(find.textContaining('取消已看失败：网络异常'), findsOneWidget);
+      },
+    );
   });
 }

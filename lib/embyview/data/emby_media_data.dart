@@ -134,6 +134,73 @@ class EmbyMediaData implements EmbyViewData {
     }
   }
 
+  Future<void> _mutate(Future<void> Function() action) async {
+    _check();
+    try {
+      await action();
+      _check();
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 401) {
+        await (await _storage).remove(_cacheKey);
+        dispose();
+        throw const EmbyViewFailure('登录已失效或没有访问权限', code: 'unauthorized');
+      }
+      _check();
+      if (e.response?.statusCode == 403) {
+        throw const EmbyViewFailure('没有访问此资源的权限', code: 'forbidden');
+      }
+      final network =
+          e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.receiveTimeout ||
+          e.type == DioExceptionType.sendTimeout;
+      throw EmbyViewFailure(
+        network ? '无法连接媒体服务器，请重试' : '媒体服务器未能完成请求',
+        retryable: network || (e.response?.statusCode ?? 0) >= 500,
+        code: network ? 'network' : 'server',
+      );
+    }
+  }
+
+  Future<void> _syncUserData(String itemId, {bool? favorite, bool? played}) async {
+    _revision++;
+    final index = _index;
+    if (index == null) return;
+    var updated = false;
+    for (final item in index) {
+      final matchesItem = item.id == itemId;
+      final matchesChild = played != null && item.raw['SeriesId']?.toString() == itemId;
+      if (!matchesItem && !matchesChild) continue;
+      final userData = Map<String, dynamic>.from(item.raw['UserData'] as Map? ?? const {});
+      if (matchesItem && favorite != null) userData['IsFavorite'] = favorite;
+      if (played != null) {
+        userData['Played'] = played;
+        if (played) userData['PlaybackPositionTicks'] = 0;
+      }
+      item.raw['UserData'] = userData;
+      updated = true;
+    }
+    if (updated && _indexedAt != null) {
+      await _saveIndex();
+    }
+  }
+
+  @override
+  Future<void> setFavorite(String itemId, bool favorite) async {
+    await _mutate(
+      () => favorite ? _client.userLibraryApi.markFavorite(itemId) : _client.userLibraryApi.unmarkFavorite(itemId),
+    );
+    await _syncUserData(itemId, favorite: favorite);
+  }
+
+  @override
+  Future<void> setPlayed(String itemId, bool played) async {
+    await _mutate(
+      () => played ? _client.userLibraryApi.markPlayed(itemId) : _client.userLibraryApi.unmarkPlayed(itemId),
+    );
+    await _syncUserData(itemId, played: played);
+  }
+
   Future<List<Json>> _views() => _viewLoad ??= _get('views')
       .then(itemRecords)
       .then(

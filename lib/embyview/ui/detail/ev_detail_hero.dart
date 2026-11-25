@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+// ignore: deprecated_member_use
+import 'package:flutter/material.dart' show Colors, Tooltip;
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/detail/ev_theme_capsule.dart';
@@ -13,7 +15,11 @@ class EvDetailHero extends StatefulWidget {
     required this.backdropCount, required this.backdropIndex, required this.onSelectBackdrop,
     required this.canTrailer, required this.isTrailerClip, required this.trailerLive,
     required this.countdownSeconds, required this.countdownTotalSeconds, required this.onToggleTrailer,
-    required this.onPlay, this.onToggleFavorite, this.onTogglePlayed, this.onMore,
+    required this.onPlay,
+    this.isFavorite = false, this.isPlayed = false,
+    this.favoriteBusy = false, this.playedBusy = false,
+    this.actionError, this.onDismissActionError,
+    this.onToggleFavorite, this.onTogglePlayed,
   });
 
   final MediaDetail detail;
@@ -22,10 +28,13 @@ class EvDetailHero extends StatefulWidget {
   final MediaQuality? quality;
   final int backdropCount, backdropIndex, countdownSeconds, countdownTotalSeconds;
   final bool canTrailer, isTrailerClip, trailerLive;
+  final bool isFavorite, isPlayed, favoriteBusy, playedBusy;
+  final String? actionError;
+  final VoidCallback? onDismissActionError;
   final ValueChanged<int> onSelectBackdrop;
   final VoidCallback onToggleTrailer;
   final void Function(PlayTarget target, CardArtwork art, Rect? origin) onPlay;
-  final VoidCallback? onToggleFavorite, onTogglePlayed, onMore;
+  final VoidCallback? onToggleFavorite, onTogglePlayed;
 
   @override State<EvDetailHero> createState() => _EvDetailHeroState();
 }
@@ -89,7 +98,49 @@ class _EvDetailHeroState extends State<EvDetailHero> {
         ),
       ],
       SizedBox(height: s.rem(1.5)),
-      _buildActions(s),
+      _buildActions(t, s),
+      if (widget.actionError?.isNotEmpty ?? false) ...[
+        SizedBox(height: s.rem(0.75)),
+        EvGlass(
+          key: const Key('ev_detail_action_error'),
+          solid: true,
+          borderRadius: BorderRadius.circular(s.rem(0.625)),
+          borderColor: const Color.fromRGBO(229, 72, 77, 0.55),
+          padding: EdgeInsets.symmetric(horizontal: s.rem(0.875), vertical: s.rem(0.4375)),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  widget.actionError!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: t.bodyStyle(s.font(0.875), fontWeight: FontWeight.w500, color: t.ink),
+                ),
+              ),
+              if (widget.onDismissActionError != null) ...[
+                SizedBox(width: s.rem(0.5)),
+                Semantics(
+                  button: true,
+                  label: '关闭错误提示',
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: GestureDetector(
+                      key: const Key('ev_detail_action_error_dismiss'),
+                      behavior: HitTestBehavior.opaque,
+                      onTap: widget.onDismissActionError,
+                      child: Padding(
+                        padding: EdgeInsets.all(s.rem(0.125)),
+                        child: EvIcon(EvIcons.x, size: s.rem(0.875), color: t.ink2),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
       if (dirs.isNotEmpty || acts.isNotEmpty) ...[
         SizedBox(height: s.rem(1.125)),
         Text.rich(
@@ -190,7 +241,7 @@ class _EvDetailHeroState extends State<EvDetailHero> {
         children: [...bits, if (badges.isNotEmpty) Wrap(spacing: s.rem(0.375), runSpacing: s.rem(0.375), crossAxisAlignment: WrapCrossAlignment.center, children: badges)]);
   }
 
-  Widget _buildActions(EvScale s) {
+  Widget _buildActions(EvTheme t, EvScale s) {
     final d = widget.detail, res = d.resume;
     final ep = res?.target.episodeNumber ?? d.card.episodeNumber;
     final pri = res != null ? (ep != null ? '继续第 $ep 集' : '继续') : (d.card.kind == MediaKind.series ? '播放第 1 集' : '播放');
@@ -198,9 +249,24 @@ class _EvDetailHeroState extends State<EvDetailHero> {
     final sec = res != null && tot != null && tot > Duration.zero ? '· ${EvCard.formatRemaining(tot > res.position ? tot - res.position : Duration.zero)}' : null;
     return Wrap(spacing: s.rem(0.75), runSpacing: s.rem(0.5), crossAxisAlignment: WrapCrossAlignment.center, children: [
       Builder(builder: (c) => EvButton.primary(key: const Key('ev_detail_play_btn'), icon: EvIcons.play, label: pri, secondaryLabel: sec, progress: EvCard.resumeProgress(res), onPressed: () => _play(c))),
-      EvButton.ghost(key: const Key('ev_detail_favorite_btn'), round: true, glass: true, icon: EvIcons.plus, tooltip: '加入片单', onPressed: widget.onToggleFavorite),
-      EvButton.ghost(key: const Key('ev_detail_played_btn'), round: true, glass: true, icon: EvIcons.check, tooltip: '标为已看', onPressed: widget.onTogglePlayed),
-      EvButton.ghost(key: const Key('ev_detail_more_btn'), round: true, glass: true, icon: EvIcons.more, tooltip: '更多', onPressed: widget.onMore),
+      _EvDetailActionButton(
+        key: const Key('ev_detail_favorite_btn'),
+        icon: widget.isFavorite ? EvIcons.star : EvIcons.plus,
+        tooltip: widget.isFavorite ? '已加入片单' : '加入片单',
+        active: widget.isFavorite,
+        busy: widget.favoriteBusy,
+        kind: _EvDetailActionKind.favorite,
+        onPressed: widget.onToggleFavorite,
+      ),
+      _EvDetailActionButton(
+        key: const Key('ev_detail_played_btn'),
+        icon: EvIcons.check,
+        tooltip: widget.isPlayed ? '已看' : '标为已看',
+        active: widget.isPlayed,
+        busy: widget.playedBusy,
+        kind: _EvDetailActionKind.played,
+        onPressed: widget.onTogglePlayed,
+      ),
     ]);
   }
 
@@ -261,5 +327,144 @@ class _EvDetailHeroState extends State<EvDetailHero> {
       MediaKind.series || MediaKind.episode => ('剧集', EvIcons.navTv, t.tv),
       MediaKind.collection => ('合集', EvIcons.navBox, t.box),
     };
+  }
+}
+
+enum _EvDetailActionKind { favorite, played }
+
+/// Glass round toggle button for detail hero actions (`+` favorite / `✓` played).
+/// Renders clear frosted glass when inactive and crisp high-contrast highlight
+/// when active across both cinema and paper (`EvOnImage`) themes.
+class _EvDetailActionButton extends StatefulWidget {
+  const _EvDetailActionButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.active,
+    required this.busy,
+    required this.kind,
+    required this.onPressed,
+  });
+
+  final EvIconData icon;
+  final String tooltip;
+  final bool active;
+  final bool busy;
+  final _EvDetailActionKind kind;
+  final VoidCallback? onPressed;
+
+  @override
+  State<_EvDetailActionButton> createState() => _EvDetailActionButtonState();
+}
+
+class _EvDetailActionButtonState extends State<_EvDetailActionButton> {
+  bool _hovered = false, _focused = false, _pressed = false;
+  bool get _enabled => widget.onPressed != null;
+  bool get _interactive => _enabled && !widget.busy;
+  bool get _highlighted => _hovered || _focused;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context);
+    final size = s.rem(3.25);
+    final radius = BorderRadius.circular(t.isPaper ? s.rem(0.625) : 999.0);
+
+    final Color bg;
+    final Color fg;
+    Color? border;
+    List<BoxShadow>? shadows;
+    var useGlass = false;
+
+    if (widget.active) {
+      if (widget.kind == _EvDetailActionKind.favorite) {
+        bg = _highlighted ? const Color(0xFFFFFFFF) : t.indBg;
+        fg = t.isPaper ? const Color(0xFFB5532F) : t.indFg;
+        border = t.isPaper ? const Color.fromRGBO(255, 255, 255, 0.45) : null;
+        shadows = _highlighted && !t.isPaper ? [BoxShadow(color: t.fill2, spreadRadius: 4)] : t.glassShadow;
+      } else {
+        bg = _highlighted
+            ? (t.isPaper ? const Color(0xFFCC6848) : const Color(0xFFE08566))
+            : t.brand;
+        fg = Colors.white;
+        border = Color.fromRGBO(255, 255, 255, t.isPaper ? 0.30 : 0.22);
+        shadows = _highlighted && !t.isPaper ? [BoxShadow(color: t.fill2, spreadRadius: 4)] : t.glassShadow;
+      }
+    } else if (t.isPaper) {
+      fg = Colors.white;
+      bg = Color.fromRGBO(255, 255, 255, _highlighted ? 0.24 : 0.14);
+      border = const Color.fromRGBO(255, 255, 255, 0.28);
+      useGlass = true;
+    } else {
+      fg = t.ink;
+      bg = _highlighted ? t.fill3 : t.glass;
+      border = t.glassBorder;
+      shadows = t.glassShadow;
+      useGlass = !_highlighted;
+    }
+
+    final body = SizedBox(
+      width: size,
+      height: size,
+      child: Center(
+        child: EvIcon(widget.icon, size: s.rem(1.125), color: fg),
+      ),
+    );
+
+    final surface = useGlass
+        ? EvGlass(
+            borderRadius: radius,
+            color: bg,
+            borderColor: border,
+            shadows: shadows,
+            blurSigma: t.isPaper ? 20 : null,
+            child: body,
+          )
+        : AnimatedContainer(
+            duration: EvDurations.fast,
+            curve: EvCurves.soft,
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: radius,
+              border: border != null ? Border.all(color: border, width: 1) : null,
+              boxShadow: shadows,
+            ),
+            child: body,
+          );
+
+    Widget button = Focus(
+      canRequestFocus: _enabled,
+      onFocusChange: (v) => setState(() => _focused = v),
+      onKeyEvent: (_, event) {
+        if (!_interactive || !evIsActivateKey(event)) return KeyEventResult.ignored;
+        widget.onPressed!();
+        return KeyEventResult.handled;
+      },
+      child: MouseRegion(
+        cursor: _interactive ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() { _hovered = false; _pressed = false; }),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: _interactive ? (_) => setState(() => _pressed = true) : null,
+          onTapUp: _interactive ? (_) => setState(() => _pressed = false) : null,
+          onTapCancel: _interactive ? () => setState(() => _pressed = false) : null,
+          onTap: _interactive ? widget.onPressed : null,
+          child: AnimatedScale(
+            scale: !_interactive ? 1.0 : _pressed ? 0.96 : _highlighted ? 1.04 : 1.0,
+            duration: EvDurations.normal,
+            curve: EvCurves.spring,
+            child: Opacity(opacity: _enabled ? 1.0 : 0.45, child: surface),
+          ),
+        ),
+      ),
+    );
+    button = Tooltip(message: widget.tooltip, child: button);
+    return Semantics(
+      button: true,
+      toggled: widget.active,
+      enabled: _interactive,
+      label: widget.tooltip,
+      child: button,
+    );
   }
 }

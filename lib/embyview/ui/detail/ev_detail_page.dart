@@ -28,7 +28,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
   EvScope? _scope;
   Immersion? _attachedImmersion;
   EmbyViewData? _attachedData;
-  String? _attachedSessionId, _subError, _hoveredEpId;
+  String? _attachedSessionId, _subError, _actionError, _hoveredEpId;
   StreamSubscription<LocalPreferences>? _prefsSub;
   StreamSubscription<List<SeasonJob>>? _jobsSub;
 
@@ -36,6 +36,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
   int _loadToken = 0, _seasonIdx = 0, _bdIdx = 0, _stillIdx = 0, _cdSec = 0, _cdTotal = 0;
   bool _loading = true, _loadingEps = false, _quoting = false, _trailerLive = false, _stillLive = false, _trailerStarting = false;
   bool _epHovering = false, _themeStarted = false, _ownsChrome = false;
+  bool _favorite = false, _played = false, _savingFavorite = false, _savingPlayed = false;
   Object? _error;
 
   MediaDetail? _detail;
@@ -50,7 +51,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
   final Map<String, SeasonEpisodes> _epCache = {};
   final Map<String, SubtitleAvailability> _epAvail = {};
   final Set<String> _doneJobEpIds = {};
-  Timer? _bdT, _cdT, _stillT, _epT;
+  Timer? _bdT, _cdT, _stillT, _epT, _actionErrT;
 
   @override void initState() { super.initState(); _scroll.addListener(_onScroll); }
 
@@ -121,7 +122,8 @@ class _EvDetailPageState extends State<EvDetailPage> {
   Future<void> _loadAll() async {
     final scope = _scope, data = scope?.services.data, id = widget.itemId, token = ++_loadToken;
     _stopTimers(stopMedia: false);
-    _detail = null; _quality = null; _itemAvail = null; _subError = null;
+    _detail = null; _quality = null; _itemAvail = null; _subError = null; _actionError = null;
+    _favorite = false; _played = false; _savingFavorite = false; _savingPlayed = false;
     _people = const []; _similar = const []; _themeMedia = const ThemeMedia(); _safeStills = const []; _seasons = const [];
     _epCache.clear(); _epAvail.clear(); _doneJobEpIds.clear();
     _seasonIdx = _bdIdx = 0; _themeStarted = false;
@@ -139,7 +141,15 @@ class _EvDetailPageState extends State<EvDetailPage> {
     if (!mounted || token != _loadToken) return;
 
     final isSeries = detail.card.kind == MediaKind.series;
-    setState(() { _detail = detail; _quality = detail.card.quality; _loading = false; _error = null; _loadingEps = isSeries; });
+    setState(() {
+      _detail = detail;
+      _quality = detail.card.quality;
+      _favorite = detail.card.favorite == true;
+      _played = detail.card.played == true;
+      _loading = false;
+      _error = null;
+      _loadingEps = isSeries;
+    });
     scope.stage..setMode(EvStageMode.detail, detailNoBlur: isSeries)..setScrollProgress(0)..setVeilLifted(false)..clearPreviewBackdrop()..setBaseBackdrop(_bdPlan(0));
     _startBdRotation();
 
@@ -350,9 +360,79 @@ class _EvDetailPageState extends State<EvDetailPage> {
     unawaited(EvPlayer.open(context, target, origin: origin, art: art));
   }
 
+  void _showActionError(String message) {
+    _actionErrT?.cancel();
+    setState(() => _actionError = message);
+    _actionErrT = Timer(const Duration(seconds: 5), () {
+      if (mounted && _actionError == message) setState(() => _actionError = null);
+    });
+  }
+
+  Future<void> _toggleFavorite() async {
+    final data = _scope?.services.data, d = _detail;
+    if (data == null || d == null || _savingFavorite) return;
+    final token = _loadToken, prev = _favorite, next = !prev;
+    _actionErrT?.cancel();
+    setState(() { _favorite = next; _savingFavorite = true; _actionError = null; });
+    try {
+      await data.setFavorite(widget.itemId, next);
+      if (!mounted || token != _loadToken) return;
+      setState(() => _savingFavorite = false);
+    } catch (e) {
+      if (!mounted || token != _loadToken) return;
+      setState(() { _favorite = prev; _savingFavorite = false; });
+      final reason = e is EmbyViewFailure ? e.reason : '请稍后重试';
+      _showActionError(next ? '加入片单失败：$reason' : '移出片单失败：$reason');
+    }
+  }
+
+  Future<void> _togglePlayed() async {
+    final data = _scope?.services.data, d = _detail;
+    if (data == null || d == null || _savingPlayed) return;
+    final token = _loadToken, prev = _played, next = !prev;
+    _actionErrT?.cancel();
+    setState(() { _played = next; _savingPlayed = true; _actionError = null; });
+    try {
+      await data.setPlayed(widget.itemId, next);
+      if (!mounted || token != _loadToken) return;
+      setState(() => _savingPlayed = false);
+      if (d.card.kind == MediaKind.series) {
+        await _refreshSeriesAfterPlayed(data, widget.itemId, token);
+      }
+    } catch (e) {
+      if (!mounted || token != _loadToken) return;
+      setState(() { _played = prev; _savingPlayed = false; });
+      final reason = e is EmbyViewFailure ? e.reason : '请稍后重试';
+      _showActionError(next ? '标为已看失败：$reason' : '取消已看失败：$reason');
+    }
+  }
+
+  Future<void> _refreshSeriesAfterPlayed(EmbyViewData data, String seriesId, int token) async {
+    final curSeasonId = _curSeason?.id;
+    final (seasons, stills) = await (
+      _safe(() => data.seasons(seriesId), _seasons),
+      _safe(() => data.safeEpisodeStills(seriesId), _safeStills),
+    ).wait;
+    if (!mounted || token != _loadToken) return;
+    _epCache.clear();
+    var nextIdx = _seasonIdx;
+    if (curSeasonId != null) {
+      final found = seasons.indexWhere((s) => s.id == curSeasonId);
+      if (found >= 0) nextIdx = found;
+    }
+    if (seasons.isNotEmpty) {
+      nextIdx = nextIdx.clamp(0, seasons.length - 1);
+      final se = await _safe<SeasonEpisodes?>(() => data.episodes(seriesId, seasons[nextIdx].id), null);
+      if (!mounted || token != _loadToken) return;
+      if (se != null) _epCache[seasons[nextIdx].id] = se;
+    }
+    setState(() { _seasons = seasons; _safeStills = stills; _seasonIdx = nextIdx; });
+    _querySeasonAvail();
+  }
+
   void _stopTimers({required bool stopMedia}) {
-    _bdT?.cancel(); _cdT?.cancel(); _stillT?.cancel(); _epT?.cancel();
-    _bdT = _cdT = _stillT = _epT = null;
+    _bdT?.cancel(); _cdT?.cancel(); _stillT?.cancel(); _epT?.cancel(); _actionErrT?.cancel();
+    _bdT = _cdT = _stillT = _epT = _actionErrT = null;
     _trailerLive = _stillLive = _trailerStarting = _epHovering = false; _hoveredEpId = null;
     if (stopMedia) { _themeStarted = false; unawaited(_scope?.immersion.stopTheme()); unawaited(_scope?.immersion.stopVideo()); }
   }
@@ -436,6 +516,11 @@ class _EvDetailPageState extends State<EvDetailPage> {
         quality: _quality ?? d.card.quality, backdropCount: _backdrops.length, backdropIndex: _bdIdx,
         onSelectBackdrop: _selectBd, canTrailer: _canTrailer, isTrailerClip: _hasTrailer, trailerLive: _trailerLive,
         countdownSeconds: _cdSec, countdownTotalSeconds: _cdTotal, onToggleTrailer: () => _trailerLive ? _stopLive() : _startLive(), onPlay: _playTarget,
+        isFavorite: _favorite, isPlayed: _played, favoriteBusy: _savingFavorite, playedBusy: _savingPlayed,
+        actionError: _actionError,
+        onDismissActionError: () { _actionErrT?.cancel(); setState(() => _actionError = null); },
+        onToggleFavorite: () => unawaited(_toggleFavorite()),
+        onTogglePlayed: () => unawaited(_togglePlayed()),
       ),
       if (d.card.kind == MediaKind.series && (_seasons.isNotEmpty || _loadingEps))
         EvDetailEpisodesSection(

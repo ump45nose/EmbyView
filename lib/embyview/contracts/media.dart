@@ -572,6 +572,8 @@ abstract interface class EmbyViewData {
     int offset = 0,
     int limit = 20,
   });
+  Future<void> setFavorite(String itemId, bool favorite);
+  Future<void> setPlayed(String itemId, bool played);
 }
 
 abstract interface class WallListing {

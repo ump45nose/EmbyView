@@ -270,8 +270,11 @@ class _EvSearchPageState extends State<EvSearchPage> {
         duration: EvDurations.fast, curve: EvCurves.soft, height: s.rem(2.375), padding: EdgeInsets.symmetric(horizontal: s.rem(1.0625)),
         decoration: BoxDecoration(color: hi ? t.fill2 : (t.isPaper ? const Color(0xFFFFFFFF) : t.fill),
           borderRadius: BorderRadius.circular(999), border: Border.all(color: focused ? t.focusColor : t.line, width: focused ? 1.5 : 1.0)),
-        alignment: Alignment.center,
-        child: Text(term, maxLines: 1, softWrap: false, style: t.bodyStyle(s.font(0.9375), fontWeight: FontWeight.w500, color: hi ? t.ink : t.ink2)),
+        child: Center(
+          widthFactor: 1.0,
+          child: Text(term, maxLines: 1, softWrap: false, overflow: TextOverflow.ellipsis,
+            style: t.bodyStyle(s.font(0.9375), fontWeight: FontWeight.w500, color: hi ? t.ink : t.ink2)),
+        ),
       )),
   );
 

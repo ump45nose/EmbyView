@@ -30,7 +30,7 @@ WallQuery query({
   years: years,
   technology: tech,
 );
-Json movie(String id, String name, {bool played = false, double ratio = .67}) => {
+Json movie(String id, String name, {bool played = false, bool favorite = false, double ratio = .67}) => {
   'Id': id,
   'Name': name,
   'Type': 'Movie',
@@ -45,7 +45,7 @@ Json movie(String id, String name, {bool played = false, double ratio = .67}) =>
   'GenreItems': [
     {'Id': 'g1', 'Name': '科幻'},
   ],
-  'UserData': {'Played': played},
+  'UserData': {'Played': played, 'IsFavorite': favorite},
 };
 String latin(String s) => s.replaceAll('盗梦空间', 'dao meng kong jian');
 
@@ -113,6 +113,9 @@ class Fixture {
                   }
                   if (p['IsPlayed'] != null) {
                     rows = rows.where((e) => (e['UserData'] as Map)['Played'] == p['IsPlayed']).toList();
+                  }
+                  if (p['IsFavorite'] != null) {
+                    rows = rows.where((e) => (e['UserData'] as Map)['IsFavorite'] == p['IsFavorite']).toList();
                   }
                   if (p['Is4K'] == true || p['ExtendedVideoTypes'] == 'DolbyVision') {
                     rows = rows.where((e) => e['Id'] == 'b').toList();
@@ -491,5 +494,120 @@ void main() {
     f.preferences.clear();
     expect((await f.data.zones()).single.id, defaults.single.id);
     expect(f.requests.where((r) => r.path.endsWith('/Views')).length, 1);
+  });
+
+  test('setFavorite and setPlayed send standard Emby POST/DELETE routes and invalidate/sync cache', () async {
+    final f = Fixture();
+    addTearDown(f.dispose);
+    f.hook = (o) async {
+      final favMatch = RegExp(r'^/Users/([^/]+)/FavoriteItems/([^/]+)$').firstMatch(o.path);
+      if (favMatch != null) {
+        final item = f.items.firstWhere((e) => e['Id'] == favMatch.group(2));
+        (item['UserData'] as Map)['IsFavorite'] = o.method == 'POST';
+        return item['UserData'];
+      }
+      final playedMatch = RegExp(r'^/Users/([^/]+)/PlayedItems/([^/]+)$').firstMatch(o.path);
+      if (playedMatch != null) {
+        final item = f.items.firstWhere((e) => e['Id'] == playedMatch.group(2));
+        (item['UserData'] as Map)['Played'] = o.method == 'POST';
+        return item['UserData'];
+      }
+      return null;
+    };
+
+    // Seed catalog index and open an initial wall snapshot.
+    expect((await f.data.search('Inception')).bestMatch?.id, 'b');
+    final staleWall = await f.data.openWall(query(watched: WatchFilter.favorite));
+    expect(staleWall.info.total, 0);
+
+    await f.data.setFavorite('b', true);
+    expect(f.requests.last.method, 'POST');
+    expect(f.requests.last.path, '/Users/u1/FavoriteItems/b');
+
+    // Open wall snapshot is invalidated after write; fresh wall sees the updated favorite filter.
+    await expectLater(
+      staleWall.page(offset: 0, limit: 1),
+      throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'wall_changed')),
+    );
+    final favWall = await f.data.openWall(query(watched: WatchFilter.favorite));
+    expect(favWall.info.total, 1);
+    final favCards = (await favWall.page(offset: 0, limit: 10)).items;
+    expect(favCards.single.id, 'b');
+    expect(favCards.single.favorite, isTrue);
+
+    await f.data.setFavorite('b', false);
+    expect(f.requests.last.method, 'DELETE');
+    expect(f.requests.last.path, '/Users/u1/FavoriteItems/b');
+    expect((await f.data.openWall(query(watched: WatchFilter.favorite))).info.total, 0);
+
+    await f.data.setPlayed('b', true);
+    expect(f.requests.last.method, 'POST');
+    expect(f.requests.last.path, '/Users/u1/PlayedItems/b');
+    final playedWall = await f.data.openWall(query(watched: WatchFilter.played));
+    expect(playedWall.info.total, 2);
+    expect((await playedWall.page(offset: 0, limit: 10)).items.firstWhere((c) => c.id == 'b').played, isTrue);
+
+    await f.data.setPlayed('b', false);
+    expect(f.requests.last.method, 'DELETE');
+    expect(f.requests.last.path, '/Users/u1/PlayedItems/b');
+    expect((await f.data.openWall(query(watched: WatchFilter.played))).info.total, 1);
+
+    // Persisted index UserData reflects the latest state.
+    final prefs = await SharedPreferences.getInstance();
+    final cacheKey = prefs.getKeys().singleWhere((k) => !k.endsWith('.terms'));
+    final saved = jsonDecode(prefs.getString(cacheKey)!) as Map<String, dynamic>;
+    final savedB = (saved['rows'] as List).cast<Map>().firstWhere((r) => (r['raw'] as Map)['Id'] == 'b');
+    expect(((savedB['raw'] as Map)['UserData'] as Map)['IsFavorite'], isFalse);
+    expect(((savedB['raw'] as Map)['UserData'] as Map)['Played'], isFalse);
+  });
+
+  test('setFavorite and setPlayed reject invalidated sessions and map HTTP/network errors', () async {
+    final f = Fixture();
+    addTearDown(f.dispose);
+
+    f.rejectStatus = (o) => o.path.contains('/FavoriteItems/') ? 500 : null;
+    await expectLater(
+      f.data.setFavorite('b', true),
+      throwsA(
+        isA<EmbyViewFailure>().having((e) => e.code, 'code', 'server').having((e) => e.retryable, 'retryable', true),
+      ),
+    );
+
+    f.rejectStatus = (o) => o.path.contains('/PlayedItems/') ? 403 : null;
+    await expectLater(
+      f.data.setPlayed('b', true),
+      throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'forbidden')),
+    );
+
+    // 401 revokes session and disposes EmbyMediaData.
+    f.rejectStatus = null;
+    f.deny = true;
+    await expectLater(
+      f.data.setFavorite('b', true),
+      throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'unauthorized')),
+    );
+    // Subsequent call after 401 disposal is rejected immediately without HTTP request.
+    f.deny = false;
+    final countBefore = f.requests.length;
+    await expectLater(
+      f.data.setPlayed('b', true),
+      throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'session_changed')),
+    );
+    expect(f.requests.length, countBefore);
+
+    // Session switch on a fresh instance rejects before sending HTTP request.
+    final f2 = Fixture();
+    addTearDown(f2.dispose);
+    final boundData = f2.data;
+    f2.client.userId = 'u2';
+    await expectLater(
+      boundData.setFavorite('b', true),
+      throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'session_changed')),
+    );
+    await expectLater(
+      boundData.setPlayed('b', false),
+      throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'session_changed')),
+    );
+    expect(f2.requests, isEmpty);
   });
 }
