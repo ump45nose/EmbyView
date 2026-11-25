@@ -4,6 +4,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get_it/get_it.dart';
 import 'package:go_router/go_router.dart';
@@ -28,10 +29,18 @@ import 'playback/moonfin_playback.dart';
 import 'playback/native_playback.dart';
 import 'prefs/machine_preferences.dart';
 import 'subtitles/subtitle_service.dart';
+import 'ui/detail/ev_detail_page.dart';
 import 'ui/home/ev_home_page.dart';
 import 'ui/kit.dart';
+import 'ui/palette/ev_command_palette.dart';
+import 'ui/quicklook/ev_quicklook.dart';
+import 'ui/search/ev_search_page.dart';
+import 'ui/settings/ev_settings_page.dart';
+import 'ui/users/ev_users_page.dart';
 import 'ui/wall/ev_wall_page.dart';
 import 'ui/zone/ev_zone_page.dart';
+
+export 'ui/settings/ev_settings_page.dart' show EvSettingsSection;
 
 typedef EmbyViewSessionFactory = FutureOr<EmbyViewSessionServices> Function(
   AccountSnapshot account,
@@ -96,8 +105,10 @@ class EmbyViewRegistration {
   ];
 }
 
-final embyViewRegistration = _registerStageThree(
-  EmbyViewRegistration()..stageTwoSubtitles = (services) => services.subtitles,
+final embyViewRegistration = _registerStageFour(
+  _registerStageThree(
+    EmbyViewRegistration()..stageTwoSubtitles = (services) => services.subtitles,
+  ),
 );
 final _installedEntry = ValueNotifier<EmbyViewEntry?>(null);
 
@@ -117,7 +128,7 @@ EmbyViewRegistration _registerStageThree(EmbyViewRegistration registration) {
       path: 'zone/:zoneId',
       builder: (context, state) {
         final zoneId = state.pathParameters['zoneId'] ?? '';
-        return _EmbyViewStageThreeRoute(
+        return _EmbyViewRouteHost(
           destination: zoneId.isNotEmpty
               ? EvZoneDestination(zoneId)
               : const EvHomeDestination(),
@@ -126,7 +137,7 @@ EmbyViewRegistration _registerStageThree(EmbyViewRegistration registration) {
     ),
     GoRoute(
       path: 'wall',
-      builder: (context, state) => _EmbyViewStageThreeRoute(
+      builder: (context, state) => _EmbyViewRouteHost(
         destination: _wallDestinationFromRoute(state),
       ),
     ),
@@ -134,8 +145,44 @@ EmbyViewRegistration _registerStageThree(EmbyViewRegistration registration) {
   return registration;
 }
 
-Widget _buildStageThreeShell(EmbyViewServices services, {EvShellDestination? initialDestination}) =>
-    _StageThreeShellHost(services: services, initialDestination: initialDestination);
+EmbyViewRegistration _registerStageFour(EmbyViewRegistration registration) {
+  registration.stageFourRoutes.addAll([
+    GoRoute(path: 'detail/:itemId', builder: (_, s) {
+      final id = s.pathParameters['itemId'] ?? '';
+      return _EmbyViewRouteHost(initialEntry: id.isNotEmpty ? _S4Detail(0, id) : null);
+    }),
+    GoRoute(path: 'search', builder: (_, s) {
+      final qp = s.uri.queryParameters;
+      return _EmbyViewRouteHost(initialEntry: _S4Search(0, zoneId: qp['zone']?.isNotEmpty == true ? qp['zone'] : null, initialQuery: qp['q']));
+    }),
+    GoRoute(path: 'settings', builder: (_, s) {
+      final qp = s.uri.queryParameters;
+      final sec = EvSettingsSection.values.where((v) => v.name == qp['section']).firstOrNull ?? EvSettingsSection.account;
+      return _EmbyViewRouteHost(initialEntry: _S4Settings(0, section: sec, openZoneEditor: qp['zedit'] == '1' || qp['zedit'] == 'true'));
+    }),
+    GoRoute(path: 'users', builder: (_, _) => const _EmbyViewRouteHost(initialEntry: _S4Users(0))),
+  ]);
+  return registration;
+}
+
+Widget _buildStageThreeShell(EmbyViewServices services, {EvShellDestination? initialDestination, _S4Entry? initialEntry}) =>
+    _StageFourShellHost(services: services, initialDestination: initialDestination, initialEntry: initialEntry);
+
+/// Test and smoke-verification helper mounting the full Stage 4 EmbyView host.
+Widget buildStageFourTestShell({
+  required EmbyViewServices services, EvShellDestination? initialDestination,
+  String? initialDetailId, bool initialSearch = false, EvSettingsSection? initialSettings,
+  bool initialUsers = false, bool openZoneEditorOnMount = false,
+}) => KeyedSubtree(
+  key: ValueKey(services.sessionId),
+  child: _StageFourShellHost(
+    services: services, initialDestination: initialDestination,
+    initialEntry: initialDetailId != null ? _S4Detail(0, initialDetailId)
+        : initialSearch ? const _S4Search(0)
+        : initialSettings != null ? _S4Settings(0, section: initialSettings, openZoneEditor: openZoneEditorOnMount)
+        : initialUsers ? const _S4Users(0) : null,
+  ),
+);
 
 Future<void> _macWin(Future<void> Function() action) async {
   if (kIsWeb || defaultTargetPlatform != TargetPlatform.macOS) return;
@@ -182,41 +229,305 @@ class _StageThreeRuntime {
   }
 }
 
-class _StageThreeShellHost extends StatefulWidget {
-  const _StageThreeShellHost({required this.services, this.initialDestination});
+sealed class _S4Entry { const _S4Entry(this.id); final int id; }
+final class _S4Detail extends _S4Entry { const _S4Detail(super.id, this.itemId); final String itemId; }
+final class _S4Search extends _S4Entry { const _S4Search(super.id, {this.zoneId, this.initialQuery}); final String? zoneId, initialQuery; }
+final class _S4Settings extends _S4Entry { const _S4Settings(super.id, {this.section = EvSettingsSection.account, this.openZoneEditor = false}); final EvSettingsSection section; final bool openZoneEditor; }
+final class _S4Users extends _S4Entry { const _S4Users(super.id); }
+class _S4Cmd extends Intent { const _S4Cmd(this.kind); final String kind; }
+
+typedef _StageSnap = ({
+  EvStageMode mode, ArtworkPlan? baseBackdrop, double scrollProgress, bool detailNoBlur, Color? ambientColor,
+  bool scrolled, double topFade, EvChromeTitlePlate? titlePlate, List<Widget> rightActions,
+  bool hideTabs, bool hideAvatar, bool showBack,
+});
+
+class _StageFourShellHost extends StatefulWidget {
+  const _StageFourShellHost({required this.services, this.initialDestination, this.initialEntry});
   final EmbyViewServices services;
   final EvShellDestination? initialDestination;
-  @override State<_StageThreeShellHost> createState() => _StageThreeShellHostState();
+  final _S4Entry? initialEntry;
+  @override State<_StageFourShellHost> createState() => _StageFourShellHostState();
 }
 
-class _StageThreeShellHostState extends State<_StageThreeShellHost> {
+class _StageFourShellHostState extends State<_StageFourShellHost> {
   late _StageThreeRuntime _runtime;
-  @override void initState() { super.initState(); _runtime = _StageThreeRuntime.acquire(widget.services); }
-  @override
-  void didUpdateWidget(_StageThreeShellHost old) {
-    super.didUpdateWidget(old);
-    if (old.services.sessionId != widget.services.sessionId) {
-      final prev = _runtime;
-      _runtime = _StageThreeRuntime.acquire(widget.services);
-      prev.release();
-    } else if (!identical(old.services, widget.services)) {
-      unawaited(_runtime.immersion.rebind(widget.services));
-    }
-  }
-  @override void dispose() { _runtime.release(); super.dispose(); }
+  late EvShellController _shell;
+  late EvShellDestination _lastShellDest;
+  late LocalPreferences _prefs;
+  late AccountSnapshot _account;
+  StreamSubscription<LocalPreferences>? _prefsSub;
+  StreamSubscription<AccountSnapshot>? _accountsSub;
+  final _quickLook = EvQuickLookController(), _palette = EvCommandPaletteController();
+  final _s4Scope = FocusScopeNode(debugLabel: 'ev_stage4_scope'), _s4MenuScope = FocusScopeNode(debugLabel: 'ev_stage4_menu_scope');
+  final List<({_S4Entry entry, _StageSnap? saved})> _s4Stack = [];
+  bool _shellMounted = true, _avatarMenuOpen = false;
+  int _nextEntryId = 1, _zonesToken = 0;
 
   @override
-  Widget build(BuildContext context) => EvShell(
-    services: widget.services,
-    initialDestination: widget.initialDestination,
-    stage: _runtime.stage,
-    immersion: _runtime.immersion,
-    onConfigureWindow: () => _macWin(() => windowManager.setTitleBarStyle(TitleBarStyle.hidden, windowButtonVisibility: true)),
-    windowDragBuilder: _buildMacWindowDragArea,
-    homeBuilder: (_) => const EvHomePage(),
-    zoneBuilder: (_, zoneId) => EvZonePage(zoneId: zoneId),
-    wallBuilder: (_, query, title) => EvWallPage(initialQuery: query, title: title),
+  void initState() {
+    super.initState();
+    _runtime = _StageThreeRuntime.acquire(widget.services);
+    _shell = EvShellController(
+      initial: widget.initialDestination ?? const EvHomeDestination(),
+      onOpenDetail: _openDetail, onOpenSearch: _openSearch, onOpenSettings: _openSettings,
+      onOpenUsers: _openUsers, onManageZones: () => _openSettings(section: EvSettingsSection.zones),
+    )..addListener(_onShellChanged);
+    _lastShellDest = _shell.current;
+    if (widget.initialEntry != null) { _s4Stack.add((entry: widget.initialEntry!, saved: null)); _shellMounted = false; }
+    _attachServices(widget.services);
+    if (_s4Stack.isNotEmpty) _focusStageFourLater();
+  }
+
+  void _attachServices(EmbyViewServices services) {
+    unawaited(_prefsSub?.cancel()); unawaited(_accountsSub?.cancel());
+    _prefs = services.preferences.current; _account = services.accounts.snapshot;
+    _prefsSub = services.preferences.changes.listen((next) {
+      final zc = _prefs.zones.length != next.zones.length || Iterable.generate(_prefs.zones.length).any((i) =>
+          _prefs.zones[i].id != next.zones[i].id || _prefs.zones[i].name != next.zones[i].name ||
+          _prefs.zones[i].iconKey != next.zones[i].iconKey || _prefs.zones[i].colorSlot != next.zones[i].colorSlot);
+      if (!mounted) return;
+      setState(() => _prefs = next);
+      if (zc && !_shellMounted) unawaited(_loadZones(services, force: true));
+    });
+    _accountsSub = services.accounts.changes.listen((next) { if (mounted) setState(() => _account = next); });
+    if (!_shellMounted && _shell.zones.isEmpty) unawaited(_loadZones(services, force: false));
+  }
+
+  Future<void> _loadZones(EmbyViewServices services, {required bool force}) async {
+    final data = services.data;
+    if (data == null) return;
+    final token = ++_zonesToken;
+    try { final loaded = await data.zones(); if (mounted && token == _zonesToken && (loaded.isNotEmpty || force)) _shell.setZones(loaded); }
+    catch (_) { if (mounted && token == _zonesToken && force) _shell.setZones(const []); }
+  }
+
+  @override
+  void didUpdateWidget(_StageFourShellHost old) {
+    super.didUpdateWidget(old);
+    if (old.services.sessionId != widget.services.sessionId) {
+      final prev = _runtime; _runtime = _StageThreeRuntime.acquire(widget.services); prev.release();
+      _closeOverlays(rebuild: false); _s4Stack.clear(); _shellMounted = true; _shell.goHome();
+      _attachServices(widget.services);
+    } else if (!identical(old.services, widget.services)) {
+      unawaited(_runtime.immersion.rebind(widget.services)); _attachServices(widget.services);
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_prefsSub?.cancel()); unawaited(_accountsSub?.cancel());
+    _shell..removeListener(_onShellChanged)..dispose();
+    _quickLook.dispose(); _palette.dispose(); _s4Scope.dispose(); _s4MenuScope.dispose();
+    _runtime.release(); super.dispose();
+  }
+
+  void _onShellChanged() { if (mounted && _shell.current != _lastShellDest) { _lastShellDest = _shell.current; _closeOverlays(); } }
+  void _closeOverlays({bool rebuild = true}) { _quickLook.close(); _palette.close(); if (_avatarMenuOpen) { _avatarMenuOpen = false; if (rebuild && mounted) setState(() {}); } }
+
+  _StageSnap _captureSnap() => (
+    mode: _runtime.stage.mode, baseBackdrop: _runtime.stage.baseBackdrop, scrollProgress: _runtime.stage.scrollProgress,
+    detailNoBlur: _runtime.stage.detailNoBlur, ambientColor: _runtime.stage.ambientColor, scrolled: _shell.scrolled,
+    topFade: _shell.topFade, titlePlate: _shell.titlePlate, rightActions: _shell.rightActions,
+    hideTabs: _shell.hideTabs, hideAvatar: _shell.hideAvatar, showBack: _shell.showBack,
   );
+
+  void _restoreSnap(_StageSnap snap, {required bool restoreShellChrome}) {
+    _runtime.stage..setMode(snap.mode, detailNoBlur: snap.detailNoBlur)..setBaseBackdrop(snap.baseBackdrop)
+      ..setScrollProgress(snap.scrollProgress)..setAmbientColor(snap.ambientColor)..setVeilLifted(false)..clearPreviewBackdrop();
+    if (!restoreShellChrome) return;
+    void apply() => _shell.updateChrome(
+      scrolled: snap.scrolled, topFade: snap.topFade, titlePlate: snap.titlePlate, clearTitlePlate: snap.titlePlate == null,
+      rightActions: snap.rightActions, hideTabs: snap.hideTabs, hideAvatar: snap.hideAvatar, showBack: snap.showBack,
+    );
+    apply();
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _s4Stack.isEmpty) apply(); });
+  }
+
+  void _resetHeroStage() => _runtime.stage..setMode(EvStageMode.hero)..setScrollProgress(0.0)..setVeilLifted(false)..clearPreviewBackdrop()..setAmbientColor(null);
+  void _focusStageFourLater() => WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _s4Stack.isNotEmpty && !_s4Scope.hasFocus) _s4Scope.requestFocus(); });
+
+  void _pushStageFour(_S4Entry next) {
+    _closeOverlays(rebuild: false); _runtime.immersion.onCardHoverEnd();
+    final saved = _captureSnap();
+    _shell.updateChrome(scrolled: false, topFade: 0.0);
+    setState(() => _s4Stack.add((entry: next, saved: saved)));
+    _focusStageFourLater();
+  }
+
+  void _openDetail(String id) { final top = _s4Stack.lastOrNull?.entry; if (id.isNotEmpty && (top is! _S4Detail || top.itemId != id)) _pushStageFour(_S4Detail(_nextEntryId++, id)); }
+  void _openSearch({String? zoneId, String? query}) {
+    final top = _s4Stack.lastOrNull?.entry;
+    if (top is _S4Search && top.zoneId == zoneId && query == null) { _closeOverlays(); return; }
+    _pushStageFour(_S4Search(_nextEntryId++, zoneId: zoneId, initialQuery: query));
+  }
+  void _openSettings({EvSettingsSection section = EvSettingsSection.account, bool openZoneEditor = false}) {
+    final top = _s4Stack.lastOrNull?.entry;
+    if (top is _S4Settings && top.section == section && !openZoneEditor) { _closeOverlays(); return; }
+    _pushStageFour(_S4Settings(_nextEntryId++, section: section, openZoneEditor: openZoneEditor));
+  }
+  void _openUsers() { _s4Stack.lastOrNull?.entry is _S4Users ? _closeOverlays() : _pushStageFour(_S4Users(_nextEntryId++)); }
+
+  void _returnToShell(EvShellDestination target, VoidCallback navigate, {bool resetHero = false}) {
+    _closeOverlays(rebuild: false);
+    final firstSaved = _s4Stack.firstOrNull?.saved, sameDest = _shellMounted && _shell.current == target;
+    setState(() { _s4Stack.clear(); _shellMounted = true; });
+    if (sameDest && firstSaved != null) { _restoreSnap(firstSaved, restoreShellChrome: true); }
+    else { navigate(); if (resetHero) _resetHeroStage(); }
+  }
+
+  void _popStageFour() {
+    _closeOverlays(rebuild: false);
+    if (_s4Stack.isEmpty) { if (!_shell.pop()) unawaited(Navigator.maybePop(context)); return; }
+    if (_s4Stack.length == 1 && _s4Stack.first.saved == null && Navigator.canPop(context)) { unawaited(Navigator.maybePop(context)); return; }
+    final popped = _s4Stack.removeLast(), backToShell = _s4Stack.isEmpty;
+    if (backToShell) _shellMounted = true;
+    setState(() {});
+    if (popped.saved != null) { _restoreSnap(popped.saved!, restoreShellChrome: backToShell); }
+    else if (backToShell) { _resetHeroStage(); }
+    if (!backToShell) _focusStageFourLater();
+  }
+
+  void _onUserSelected(AccountProfile _) {
+    if (!mounted) return;
+    if (widget.services.accounts.snapshot.sessionId != widget.services.sessionId) {
+      _closeOverlays(rebuild: false); setState(() { _s4Stack.clear(); _shellMounted = true; }); return;
+    }
+    _popStageFour();
+  }
+
+  void _selectStageFourTab(String id) => id == 'home'
+      ? _returnToShell(const EvHomeDestination(), _shell.goHome, resetHero: true)
+      : id == 'search' ? _openSearch() : _returnToShell(EvZoneDestination(id), () => _shell.openZone(id));
+
+  void _toggleAvatarMenu() {
+    setState(() => _avatarMenuOpen = !_avatarMenuOpen);
+    if (_avatarMenuOpen) WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _avatarMenuOpen) _s4MenuScope.requestFocus(); });
+  }
+
+  EvQuickLookTarget? _resolveEpisodeQuickLook(BuildContext focusCtx) {
+    EvEpisodeCard? epW; BuildContext? cardCtx;
+    if (focusCtx.widget is EvEpisodeCard) { epW = focusCtx.widget as EvEpisodeCard; cardCtx = focusCtx; }
+    else { focusCtx.visitAncestorElements((el) { if (el.widget is EvEpisodeCard) { epW = el.widget as EvEpisodeCard; cardCtx = el; return false; } return true; }); }
+    if (epW == null) return null;
+    final ep = epW!.episode, ro = (cardCtx ?? focusCtx).findRenderObject(), pos = ep.resumePosition;
+    final origin = ro is RenderBox && ro.hasSize ? (ro.localToGlobal(Offset.zero) & ro.size) : null;
+    final resume = (pos != null && pos > Duration.zero)
+        ? ResumeCard(card: epW!.card, target: PlayTarget(itemId: epW!.card.id, startAt: pos, episodeNumber: ep.episodeNumber), position: pos, duration: epW!.card.duration)
+        : null;
+    return EvQuickLookTarget(card: epW!.card, resume: resume, origin: origin);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showingStageFour = _s4Stack.isNotEmpty;
+    return EvThemeScope(
+      preferences: widget.services.preferences,
+      child: EvScope(
+        services: widget.services, stage: _runtime.stage, immersion: _runtime.immersion, shell: _shell,
+        child: EvQuickLookHost(
+          controller: _quickLook,
+          isSuppressed: () => _palette.isOpen || ModalRoute.of(context)?.isCurrent == false,
+          resolveFocusTarget: _resolveEpisodeQuickLook, onOpenDetail: _openDetail,
+          child: EvCommandPaletteHost(
+            controller: _palette, onBeforeOpen: _quickLook.close,
+            onOpenDetail: _openDetail, onOpenSearch: _openSearch, onOpenSettings: _openSettings, onOpenUsers: _openUsers,
+            onAddZone: () => _openSettings(section: EvSettingsSection.zones, openZoneEditor: true),
+            onOpenZone: (z) => _returnToShell(EvZoneDestination(z), () => _shell.openZone(z)),
+            child: Stack(fit: StackFit.expand, children: [
+              if (_shellMounted)
+                ExcludeFocus(
+                  excluding: showingStageFour,
+                  child: Offstage(
+                    offstage: showingStageFour,
+                    child: TickerMode(
+                      enabled: !showingStageFour,
+                      child: EvShell(
+                        services: widget.services, initialDestination: widget.initialDestination,
+                        controller: _shell, stage: _runtime.stage, immersion: _runtime.immersion,
+                        onConfigureWindow: () => _macWin(() => windowManager.setTitleBarStyle(TitleBarStyle.hidden, windowButtonVisibility: true)),
+                        windowDragBuilder: _buildMacWindowDragArea,
+                        homeBuilder: (_) => const EvHomePage(), zoneBuilder: (_, z) => EvZonePage(zoneId: z),
+                        wallBuilder: (_, q, t) => EvWallPage(initialQuery: q, title: t),
+                      ),
+                    ),
+                  ),
+                ),
+              if (showingStageFour) Positioned.fill(child: _buildStageFourFrame(context, _s4Stack.last.entry)),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStageFourFrame(BuildContext context, _S4Entry entry) {
+    final page = switch (entry) {
+      _S4Detail(:final id, :final itemId) => EvDetailPage(key: ValueKey('s4_detail_${id}_$itemId'), itemId: itemId, onOpenItem: _openDetail),
+      _S4Search(:final id, :final zoneId, :final initialQuery) => EvSearchPage(
+        key: ValueKey('s4_search_$id'), zoneId: zoneId, initialQuery: initialQuery, onOpenItem: _openDetail, onOpenPalette: _palette.open),
+      _S4Settings(:final id, :final section, :final openZoneEditor) => EvSettingsPage(
+        key: ValueKey('s4_settings_$id'), initialSection: section, openZoneEditorOnMount: openZoneEditor, onOpenUsers: _openUsers),
+      _S4Users(:final id) => EvUsersPage(
+        key: ValueKey('s4_users_$id'), onSelected: _onUserSelected, onManageUsers: () => _openSettings(section: EvSettingsSection.account)),
+    };
+    return Builder(builder: (context) {
+      final theme = EvTheme.of(context), scale = EvScale.of(context);
+      return Shortcuts(
+        shortcuts: const <ShortcutActivator, Intent>{
+          SingleActivator(LogicalKeyboardKey.escape): _S4Cmd('esc'),
+          SingleActivator(LogicalKeyboardKey.keyF, meta: true): _S4Cmd('search'),
+          SingleActivator(LogicalKeyboardKey.keyF, control: true): _S4Cmd('search'),
+          SingleActivator(LogicalKeyboardKey.comma, meta: true): _S4Cmd('settings'),
+          SingleActivator(LogicalKeyboardKey.comma, control: true): _S4Cmd('settings'),
+        },
+        child: Actions(
+          actions: <Type, Action<Intent>>{
+            _S4Cmd: CallbackAction<_S4Cmd>(onInvoke: (i) {
+              if (i.kind == 'esc') { _avatarMenuOpen ? setState(() => _avatarMenuOpen = false) : _popStageFour(); }
+              else if (i.kind == 'search') { _openSearch(); }
+              else if (i.kind == 'settings') { _openSettings(); }
+              return null;
+            }),
+          },
+          child: FocusScope(
+            node: _s4Scope, autofocus: true,
+            child: ColoredBox(
+              color: theme.bg,
+              child: Stack(fit: StackFit.expand, children: [
+                Positioned.fill(child: EvStage(controller: _runtime.stage, immersion: _runtime.immersion)),
+                Positioned.fill(child: page),
+                if (entry is! _S4Users)
+                  Positioned(left: 0, right: 0, top: 0, child: ListenableBuilder(
+                    listenable: Listenable.merge([_shell, _runtime.stage]),
+                    builder: (_, _) => EvTopBar(
+                      zones: _shell.zones, activeTabId: entry is _S4Search ? 'search' : null,
+                      navigationStyle: _prefs.navigation, scrolled: _shell.scrolled, topFade: _shell.topFade,
+                      onImageBackdrop: _runtime.stage.mode != EvStageMode.ambient, showBack: true,
+                      hideTabs: entry is _S4Detail, hideAvatar: entry is _S4Detail, showSearchTab: true,
+                      currentProfile: _account.current, avatarMenuOpen: _avatarMenuOpen,
+                      windowDragBuilder: _buildMacWindowDragArea, onSelectTab: _selectStageFourTab,
+                      onBack: _popStageFour, onAvatarTap: _toggleAvatarMenu,
+                    ),
+                  )),
+                if (_avatarMenuOpen && entry is! _S4Users && entry is! _S4Detail) ...[
+                  Positioned.fill(child: GestureDetector(key: const Key('ev_avatar_menu_scrim'), behavior: HitTestBehavior.translucent, onTap: () => setState(() => _avatarMenuOpen = false))),
+                  Positioned(right: scale.rem(1.5), top: scale.rem(4.0), child: FocusScope(
+                    node: _s4MenuScope,
+                    child: EvAvatarMenu(
+                      accounts: widget.services.accounts, onSwitchUsers: _openUsers,
+                      onManageZones: () => _openSettings(section: EvSettingsSection.zones),
+                      onOpenSettings: _openSettings, onDismiss: () { if (_avatarMenuOpen) setState(() => _avatarMenuOpen = false); },
+                    ),
+                  )),
+                ],
+              ]),
+            ),
+          ),
+        ),
+      );
+    });
+  }
 }
 
 EvWallDestination _wallDestinationFromRoute(GoRouterState state) {
@@ -261,10 +572,11 @@ EvWallDestination _wallDestinationFromRoute(GoRouterState state) {
   );
 }
 
-class _EmbyViewStageThreeRoute extends StatelessWidget {
-  const _EmbyViewStageThreeRoute({required this.destination});
+class _EmbyViewRouteHost extends StatelessWidget {
+  const _EmbyViewRouteHost({this.destination, this.initialEntry});
 
-  final EvShellDestination destination;
+  final EvShellDestination? destination;
+  final _S4Entry? initialEntry;
 
   @override
   Widget build(BuildContext context) {
@@ -282,6 +594,7 @@ class _EmbyViewStageThreeRoute extends StatelessWidget {
               child: _buildStageThreeShell(
                 services,
                 initialDestination: destination,
+                initialEntry: initialEntry,
               ),
             );
           },
