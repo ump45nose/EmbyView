@@ -646,6 +646,7 @@ class _EvWallPageState extends State<EvWallPage> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final vw = constraints.hasBoundedWidth && constraints.maxWidth > 0 ? constraints.maxWidth : scale.size.width;
+          final vh = constraints.hasBoundedHeight && constraints.maxHeight > 0 ? constraints.maxHeight : scale.size.height;
           if (_lastViewportWidth != vw) { _lastViewportWidth = vw; _measuredHeaderHeight = null; }
           if (_measuredHeaderHeight == null) _captureHeaderHeight();
           final metrics = EvWallGridMetrics.compute(
@@ -661,7 +662,7 @@ class _EvWallPageState extends State<EvWallPage> {
               CustomScrollView(
                 key: const Key('ev_wall_scroll_view'),
                 controller: _scrollController,
-                scrollCacheExtent: const ScrollCacheExtent.viewport(0.75),
+                cacheExtent: vh * 0.75,
                 slivers: [
                   SliverToBoxAdapter(
                     child: Padding(
