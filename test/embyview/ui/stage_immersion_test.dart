@@ -757,9 +757,11 @@ void main() {
         expect(paperSeries.opacity, closeTo(0.64, 1e-6));
         expect(paperSeries.blurSigma, closeTo(22.0, 1e-6));
 
-        // Ambient mode hides scrim and softens frame.
-        stage.setMode(EvStageMode.ambient);
-        await tester.pump();
+        // Ambient mode hides scrim, applies blur + scale + opacity inside RepaintBoundary, and adds 0.35 veil.
+        stage
+          ..setMode(EvStageMode.ambient)
+          ..setScrollProgress(0.0);
+        await tester.pumpAndSettle();
         expect(
           tester.widget<AnimatedOpacity>(find.byKey(const Key('ev_stage_scrim'))).opacity,
           0.0,
@@ -768,7 +770,37 @@ void main() {
           tester.widget<AnimatedOpacity>(find.byKey(const Key('ev_stage_frame'))).opacity,
           closeTo(0.14, 1e-6),
         );
+        expect(
+          tester.widget<AnimatedScale>(find.byKey(const Key('ev_stage_frame_scale'))).scale,
+          closeTo(1.15, 1e-6),
+        );
+        expect(
+          tester.widget<ImageFiltered>(find.byKey(const Key('ev_stage_frame_blur'))).enabled,
+          isTrue,
+        );
         expect(find.byKey(const Key('ev_stage_frame_boundary')), findsOneWidget);
+        final paperVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+        expect(paperVeil.color.a, closeTo(0.35, 0.02));
+        expect(paperVeil.color.toARGB32() & 0x00FFFFFF, EvTheme.paper.bg.toARGB32() & 0x00FFFFFF);
+
+        // Cinema ambient mode applies opacity 0.30, scale 1.15, blur(60), and dark 0.35 veil.
+        await tester.pumpWidget(
+          _stageHarness(controller: stage, themeMode: ThemeMode.cinema, enableMotion: false),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<AnimatedOpacity>(find.byKey(const Key('ev_stage_frame'))).opacity,
+          closeTo(0.30, 1e-6),
+        );
+        expect(
+          tester.widget<AnimatedScale>(find.byKey(const Key('ev_stage_frame_scale'))).scale,
+          closeTo(1.15, 1e-6),
+        );
+        final cinemaBlur = tester.widget<ImageFiltered>(find.byKey(const Key('ev_stage_frame_blur')));
+        expect(cinemaBlur.enabled, isTrue);
+        final cinemaVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+        expect(cinemaVeil.color.a, closeTo(0.35, 0.02));
+        expect(cinemaVeil.color.toARGB32() & 0x00FFFFFF, EvTheme.cinema.bg.toARGB32() & 0x00FFFFFF);
 
         stage.dispose();
       },

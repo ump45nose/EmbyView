@@ -250,6 +250,7 @@ class _EvStageState extends State<EvStage>
                   duration: EvDurations.stage,
                   curve: EvCurves.soft,
                   child: AnimatedScale(
+                    key: const Key('ev_stage_frame_scale'),
                     scale: isAmbient ? 1.15 : 1.0,
                     duration: EvDurations.ambient,
                     curve: EvCurves.out,
@@ -257,9 +258,16 @@ class _EvStageState extends State<EvStage>
                       tween: Tween<double>(end: frameBlur),
                       duration: EvDurations.stage,
                       curve: EvCurves.soft,
-                      builder: (_, sigma, child) => sigma > 0.1
-                          ? ImageFiltered(imageFilter: ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma), child: child)
-                          : child!,
+                      builder: (_, sigma, child) => ImageFiltered(
+                        key: const Key('ev_stage_frame_blur'),
+                        enabled: sigma > 0.1,
+                        imageFilter: ui.ImageFilter.blur(
+                          sigmaX: sigma,
+                          sigmaY: sigma,
+                          tileMode: ui.TileMode.clamp,
+                        ),
+                        child: child,
+                      ),
                       child: frame,
                     ),
                   ),
@@ -566,7 +574,10 @@ class _StageVeil extends StatelessWidget {
       curve: EvCurves.soft,
       builder: (_, sigma, _) {
         if (opacity <= 0.001 && sigma <= 0.1) return const SizedBox.shrink();
-        Widget fill = ColoredBox(color: bg.withValues(alpha: opacity.clamp(0.0, 1.0)));
+        Widget fill = ColoredBox(
+          key: const Key('ev_stage_veil_fill'),
+          color: bg.withValues(alpha: opacity.clamp(0.0, 1.0)),
+        );
         return sigma > 0.1
             ? BackdropFilter(filter: ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma), child: fill)
             : fill;

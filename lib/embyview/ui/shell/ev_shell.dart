@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/material.dart' hide ThemeMode;
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/shell/ev_avatar_menu.dart';
 import 'package:moonfin/embyview/ui/shell/ev_scope.dart';
@@ -76,6 +76,7 @@ class _EvShellState extends State<EvShell> {
     _shell = widget.controller ?? EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
     _lastDestination = _shell.current;
     _lastZones = _shell.zones;
+    _scheduleStageSyncForDestination(_lastDestination, allowSync: _ownsStage);
     _shell.addListener(_onShellChanged);
     _attachServices(widget.services, initial: true);
     if (widget.configureWindow && widget.onConfigureWindow != null) {
@@ -98,6 +99,7 @@ class _EvShellState extends State<EvShell> {
       _shell = widget.controller ?? EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
       _lastDestination = _shell.current;
       _lastZones = _shell.zones;
+      _scheduleStageSyncForDestination(_lastDestination, allowSync: false);
       _shell.addListener(_onShellChanged);
     }
     if (!identical(old.services, widget.services) || old.services.sessionId != widget.services.sessionId) {
@@ -141,6 +143,27 @@ class _EvShellState extends State<EvShell> {
     }
   }
 
+  void _scheduleStageSyncForDestination(EvShellDestination dest, {required bool allowSync}) {
+    if (allowSync) {
+      _syncStageForDestination(dest);
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _shell.current == dest) _syncStageForDestination(dest);
+    });
+  }
+
+  void _syncStageForDestination(EvShellDestination dest) {
+    if (dest is EvWallDestination) {
+      _immersion.onCardHoverEnd();
+      _stage
+        ..setMode(EvStageMode.ambient)
+        ..setScrollProgress(0.0)
+        ..setVeilLifted(false)
+        ..setAmbientColor(null);
+    }
+  }
+
   void _onShellChanged() {
     if (!mounted) return;
     final destChanged = _shell.current != _lastDestination;
@@ -148,7 +171,10 @@ class _EvShellState extends State<EvShell> {
     if (!destChanged && !zonesChanged) return;
     _lastDestination = _shell.current;
     _lastZones = _shell.zones;
-    if (destChanged && _avatarMenuOpen) _avatarMenuOpen = false;
+    if (destChanged) {
+      if (_avatarMenuOpen) _avatarMenuOpen = false;
+      _syncStageForDestination(_lastDestination);
+    }
     setState(() {});
   }
 
@@ -187,9 +213,11 @@ class _EvShellState extends State<EvShell> {
   Widget build(BuildContext context) {
     return EvThemeScope(
       preferences: widget.services.preferences,
-      child: EvScope(
-        services: widget.services, stage: _stage, immersion: _immersion, shell: _shell,
-        child: Builder(
+      child: Material(
+        type: MaterialType.transparency,
+        child: EvScope(
+          services: widget.services, stage: _stage, immersion: _immersion, shell: _shell,
+          child: Builder(
           builder: (context) {
             final theme = EvTheme.of(context), scale = EvScale.of(context), dest = _shell.current;
             return Shortcuts(
@@ -302,6 +330,7 @@ class _EvShellState extends State<EvShell> {
             );
           },
         ),
+      ),
       ),
     );
   }

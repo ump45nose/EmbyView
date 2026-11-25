@@ -618,6 +618,11 @@ void main() {
         expect(find.descendant(of: heroFinder, matching: find.text('继续第 9 集')), findsOneWidget);
         expect(find.descendant(of: heroFinder, matching: find.text('· 剩 9 分钟')), findsOneWidget);
         expect(find.descendant(of: heroFinder, matching: find.text('详情')), findsOneWidget);
+        expect(find.byKey(const Key('ev_hero_favorite_btn')), findsOneWidget);
+        final favRect = tester.getRect(find.byKey(const Key('ev_hero_favorite_btn')));
+        final detailRect = tester.getRect(find.byKey(const Key('ev_hero_detail_btn')));
+        expect(favRect.left, greaterThan(detailRect.right));
+        expect(favRect.width, closeTo(favRect.height, 1.0));
         expect(h.stage.activeBackdropKey, contains('home_test_bg_hero_resume'));
 
         // 9-second auto-rotation switches to recommendation #2 (daily wordmark + 「今日推荐」 + 「立即播放」).
@@ -1139,6 +1144,33 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.text('新会话电影'), findsOneWidget);
+
+        // 7. Standalone EvHero circular '+' button invokes onToggleFavorite callback.
+        var favTaps = 0;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: Size(1440, 900)),
+              child: EvThemeScope(
+                themeMode: ThemeMode.cinema,
+                child: EvHero(
+                  recommendations: [
+                    HomeRecommendation(
+                      card: _makeCard(id: 'fav_test', title: '片单测试'),
+                      reason: RecommendationReason.daily,
+                    ),
+                  ],
+                  enableAutoRotate: false,
+                  onToggleFavorite: () => favTaps++,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('ev_hero_favorite_btn')));
+        await tester.pump();
+        expect(favTaps, 1);
       },
     );
   });

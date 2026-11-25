@@ -23,6 +23,8 @@ class EvCard extends StatefulWidget {
     required this.style,
     this.resume,
     this.width,
+    this.posterHeight,
+    this.animateArtworkFade = true,
     this.showTitle = true,
     this.showSubtitle = true,
     this.subtitle,
@@ -40,6 +42,8 @@ class EvCard extends StatefulWidget {
   final EvCardStyle style;
   final ResumeCard? resume;
   final double? width;
+  final double? posterHeight;
+  final bool animateArtworkFade;
   final bool showTitle;
   final bool showSubtitle;
   final String? subtitle;
@@ -269,66 +273,78 @@ class _EvCardState extends State<EvCard> {
       borderRadius: radius,
       border: Border.all(color: _highlighted ? theme.focusColor : theme.line, width: _highlighted ? 1.5 : 1.0),
     );
-    final artwork = EvArtwork(
-      plan: plan, aspectRatio: aspect, borderRadius: radius,
-      overlay: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (!isPaper && _useAnimations)
-            IgnorePointer(
-              child: AnimatedOpacity(
-                opacity: _highlighted ? 1.0 : 0.0, duration: EvDurations.normal, curve: EvCurves.soft,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      center: _glareAlign, radius: 0.7,
-                      colors: const [Color.fromRGBO(255, 255, 255, 0.24), Color.fromRGBO(255, 255, 255, 0.0)],
+    final hasFixedArtSize = widget.width != null && widget.posterHeight != null;
+    final borderOverlay = IgnorePointer(
+      child: _useAnimations
+          ? AnimatedContainer(key: const ValueKey('ev_card_border'), duration: EvDurations.normal, curve: EvCurves.soft, decoration: borderDec)
+          : DecoratedBox(key: const ValueKey('ev_card_border'), decoration: borderDec),
+    );
+    final needsGlare = !isPaper && _useAnimations;
+    final Widget artOverlay = (!needsGlare && progress == null && !played)
+        ? borderOverlay
+        : Stack(
+            fit: StackFit.expand,
+            children: [
+              if (needsGlare)
+                IgnorePointer(
+                  child: AnimatedOpacity(
+                    opacity: _highlighted ? 1.0 : 0.0, duration: EvDurations.normal, curve: EvCurves.soft,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: _glareAlign, radius: 0.7,
+                          colors: const [Color.fromRGBO(255, 255, 255, 0.24), Color.fromRGBO(255, 255, 255, 0.0)],
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
-          if (progress != null)
-            Positioned(
-              left: scale.rem(0.75), right: scale.rem(0.75), bottom: scale.rem(0.75), height: scale.rem(0.25),
-              child: ClipRRect(
-                key: const ValueKey('ev_card_progress'), borderRadius: BorderRadius.circular(2),
-                child: ColoredBox(
-                  color: isPaper ? const Color.fromRGBO(255, 255, 255, 0.55) : const Color.fromRGBO(255, 255, 255, 0.30),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: FractionallySizedBox(widthFactor: progress.clamp(0.0, 1.0), child: ColoredBox(color: isPaper ? theme.brand : _white)),
+              if (progress != null)
+                Positioned(
+                  left: scale.rem(0.75), right: scale.rem(0.75), bottom: scale.rem(0.75), height: scale.rem(0.25),
+                  child: ClipRRect(
+                    key: const ValueKey('ev_card_progress'), borderRadius: BorderRadius.circular(2),
+                    child: ColoredBox(
+                      color: isPaper ? const Color.fromRGBO(255, 255, 255, 0.55) : const Color.fromRGBO(255, 255, 255, 0.30),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: FractionallySizedBox(widthFactor: progress.clamp(0.0, 1.0), child: ColoredBox(color: isPaper ? theme.brand : _white)),
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-          if (played)
-            Positioned(
-              right: scale.rem(0.5), top: scale.rem(0.5),
-              child: Container(
-                key: const ValueKey('ev_card_played'), width: scale.rem(1.625), height: scale.rem(1.625),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isPaper ? theme.brand : const Color.fromRGBO(0, 0, 0, 0.50),
-                  border: isPaper ? Border.all(color: _paperInk, width: 1.25) : null,
+              if (played)
+                Positioned(
+                  right: scale.rem(0.5), top: scale.rem(0.5),
+                  child: Container(
+                    key: const ValueKey('ev_card_played'), width: scale.rem(1.625), height: scale.rem(1.625),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: isPaper ? theme.brand : const Color.fromRGBO(0, 0, 0, 0.50),
+                      border: isPaper ? Border.all(color: _paperInk, width: 1.25) : null,
+                    ),
+                    alignment: Alignment.center,
+                    child: EvIcon(EvIcons.check, size: scale.rem(isPaper ? 1.0 : 0.875), color: isPaper ? _paperInk : _white),
+                  ),
                 ),
-                alignment: Alignment.center,
-                child: EvIcon(EvIcons.check, size: scale.rem(isPaper ? 1.0 : 0.875), color: isPaper ? _paperInk : _white),
-              ),
-            ),
-          IgnorePointer(
-            child: _useAnimations
-                ? AnimatedContainer(key: const ValueKey('ev_card_border'), duration: EvDurations.normal, curve: EvCurves.soft, decoration: borderDec)
-                : DecoratedBox(key: const ValueKey('ev_card_border'), decoration: borderDec),
-          ),
-        ],
-      ),
+              borderOverlay,
+            ],
+          );
+    final artwork = EvArtwork(
+      plan: plan,
+      width: hasFixedArtSize ? widget.width : null,
+      height: hasFixedArtSize ? widget.posterHeight : null,
+      aspectRatio: hasFixedArtSize ? null : aspect,
+      decodeWidth: hasFixedArtSize ? widget.width : null,
+      animateFade: widget.animateArtworkFade,
+      borderRadius: radius,
+      overlay: artOverlay,
     );
     final cardDec = BoxDecoration(borderRadius: radius, boxShadow: shadows);
     final surface = _useAnimations
         ? AnimatedContainer(key: _artKey, duration: EvDurations.medium, curve: EvCurves.out, decoration: cardDec, child: artwork)
         : DecoratedBox(key: _artKey, decoration: cardDec, child: artwork);
-    if (!_useAnimations) return _artTransform(1.0, Offset.zero, surface);
+    if (!_useAnimations) return surface;
 
     return TweenAnimationBuilder<double>(
       tween: Tween<double>(begin: 1.0, end: targetScale), duration: EvDurations.medium, curve: EvCurves.spring,

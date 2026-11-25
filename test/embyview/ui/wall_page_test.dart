@@ -333,9 +333,15 @@ void main() {
         ));
         await tester.pumpAndSettle();
 
-        // Stage set to ambient, shell shows back button and chrome filter action.
-        final scope = EvScope.of(tester.element(find.byType(EvWallPage)));
+        // Stage set to ambient with blur & veil, transparent Material ancestor present, shell shows back button and chrome filter action.
+        final wallCtx = tester.element(find.byType(EvWallPage));
+        final scope = EvScope.of(wallCtx);
         expect(scope.stage.mode, EvStageMode.ambient);
+        expect(find.byKey(const Key('ev_stage_frame_blur')), findsOneWidget);
+        expect(tester.widget<ImageFiltered>(find.byKey(const Key('ev_stage_frame_blur'))).enabled, isTrue);
+        expect(tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill'))).color.a, closeTo(0.35, 0.02));
+        final scrollView = tester.widget<CustomScrollView>(find.byKey(const Key('ev_wall_scroll_view')));
+        expect(scrollView.cacheExtent, closeTo(900 * 0.18, 1.0));
         expect(shell.showBack, isTrue);
         expect(find.byKey(const Key('ev_topbar_back')), findsOneWidget);
         expect(find.byKey(const Key('ev_wall_chrome_filter_button')), findsOneWidget);

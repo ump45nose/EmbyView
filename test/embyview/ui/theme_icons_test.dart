@@ -373,5 +373,71 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
       expect(hits, 2);
     });
+
+    testWidgets(
+      'EvTheme styles & EvThemeScope enforce TextDecoration.none without Material, and EvQualityBadge shrinks inside Wrap',
+      (tester) async {
+        for (final theme in [EvTheme.cinema, EvTheme.paper]) {
+          expect(theme.displayStyle(32).decoration, TextDecoration.none);
+          expect(theme.shelfStyle(24).decoration, TextDecoration.none);
+          expect(theme.bodyStyle(15).decoration, TextDecoration.none);
+          expect(theme.serifStyle(18).decoration, TextDecoration.none);
+        }
+
+        TextStyle? inheritedStyle;
+        await tester.pumpWidget(
+          MediaQuery(
+            data: const MediaQueryData(size: Size(1440, 900)),
+            child: Directionality(
+              textDirection: TextDirection.ltr,
+              child: EvThemeScope(
+                themeMode: ThemeMode.cinema,
+                child: Builder(
+                  builder: (context) {
+                    inheritedStyle = DefaultTextStyle.of(context).style;
+                    return const Align(
+                      alignment: Alignment.topLeft,
+                      child: SizedBox(
+                        width: 720,
+                        child: Wrap(
+                          spacing: 12,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text('PG-13', key: Key('meta_rating')),
+                            EvQualityBadge(label: '4K', key: Key('badge_4k')),
+                            EvQualityBadge(
+                              label: 'Dolby Vision',
+                              kind: EvQualityBadgeKind.dolbyVision,
+                              key: Key('badge_dv'),
+                            ),
+                            EvQualityBadge(label: '5.1', key: Key('badge_audio')),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(inheritedStyle?.decoration, TextDecoration.none);
+        final ratingRect = tester.getRect(find.byKey(const Key('meta_rating')));
+        final badge4kRect = tester.getRect(find.byKey(const Key('badge_4k')));
+        final badgeDvRect = tester.getRect(find.byKey(const Key('badge_dv')));
+        final badgeAudioRect = tester.getRect(find.byKey(const Key('badge_audio')));
+
+        // Quality badges must stay compact pills on the same row instead of stretching to 720px.
+        expect(badge4kRect.width, lessThan(120));
+        expect(badgeDvRect.width, lessThan(220));
+        expect(badgeAudioRect.width, lessThan(120));
+        expect((badge4kRect.center.dy - ratingRect.center.dy).abs(), lessThan(4.0));
+        expect((badgeDvRect.center.dy - ratingRect.center.dy).abs(), lessThan(4.0));
+        expect((badgeAudioRect.center.dy - ratingRect.center.dy).abs(), lessThan(4.0));
+        expect(badge4kRect.left, greaterThan(ratingRect.right));
+      },
+    );
   });
 }

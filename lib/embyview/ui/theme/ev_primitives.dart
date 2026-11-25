@@ -36,7 +36,7 @@ class EvOnImage extends StatelessWidget {
     return Theme(
       data: t.toThemeData(),
       child: DefaultTextStyle.merge(
-        style: TextStyle(color: t.ink),
+        style: TextStyle(color: t.ink, decoration: TextDecoration.none),
         child: IconTheme.merge(data: IconThemeData(color: t.ink), child: child),
       ),
     );
@@ -324,18 +324,26 @@ class EvQualityBadge extends StatelessWidget {
             ),
           );
     final fontSize = scale.rem(isSrc ? 0.8125 : 0.75);
-    return Container(
-      height: scale.rem(1.5),
-      padding: EdgeInsets.symmetric(horizontal: scale.rem(0.5)),
+    return DecoratedBox(
       decoration: decoration,
-      alignment: Alignment.center,
-      child: Text(
-        isDv ? label.toUpperCase() : label,
-        style: theme.bodyStyle(
-          fontSize,
-          fontWeight: isSrc ? FontWeight.w600 : FontWeight.w700,
-          color: (isDv || isSrc) ? theme.ink : theme.ink2,
-        ).copyWith(letterSpacing: isSrc ? 0 : fontSize * 0.04),
+      child: SizedBox(
+        height: scale.rem(1.5),
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: scale.rem(0.5)),
+          child: Center(
+            widthFactor: 1.0,
+            child: Text(
+              isDv ? label.toUpperCase() : label,
+              maxLines: 1,
+              softWrap: false,
+              style: theme.bodyStyle(
+                fontSize,
+                fontWeight: isSrc ? FontWeight.w600 : FontWeight.w700,
+                color: (isDv || isSrc) ? theme.ink : theme.ink2,
+              ).copyWith(letterSpacing: isSrc ? 0 : fontSize * 0.04, height: 1.0),
+            ),
+          ),
+        ),
       ),
     );
   }

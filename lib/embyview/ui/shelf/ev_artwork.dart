@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart';
@@ -13,17 +14,25 @@ class EvArtwork extends StatefulWidget {
   const EvArtwork({
     super.key,
     required this.plan,
+    this.width,
+    this.height,
     this.aspectRatio,
     this.borderRadius,
     this.overrideFit,
+    this.decodeWidth,
+    this.animateFade = true,
     this.showFallbackTitle = true,
     this.overlay,
   });
 
   final ArtworkPlan plan;
+  final double? width;
+  final double? height;
   final double? aspectRatio;
   final BorderRadius? borderRadius;
   final BoxFit? overrideFit;
+  final double? decodeWidth;
+  final bool animateFade;
   final bool showFallbackTitle;
   final Widget? overlay;
 
@@ -99,6 +108,17 @@ class _EvArtworkState extends State<EvArtwork> {
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context);
     final scale = EvScale.of(context);
+    final dpr = widget.decodeWidth != null ? (MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0) : 1.0;
+
+    if (widget.width != null && widget.height != null) {
+      final w = widget.width!, h = widget.height!;
+      final isPortrait = widget.aspectRatio != null ? widget.aspectRatio! < 1.0 : h > w;
+      Widget content = _buildSurfaceStack(theme, scale, w, h, isPortrait, dpr);
+      if (widget.borderRadius != null) {
+        content = ClipRRect(borderRadius: widget.borderRadius!, child: content);
+      }
+      return SizedBox(width: w, height: h, child: content);
+    }
 
     Widget content = LayoutBuilder(
       builder: (context, constraints) {
@@ -109,19 +129,7 @@ class _EvArtworkState extends State<EvArtwork> {
         final isPortrait = widget.aspectRatio != null
             ? widget.aspectRatio! < 1.0
             : (h > 0 && w > 0 && h > w);
-        final layers = widget.plan.layers;
-
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            ColoredBox(color: theme.cardBg),
-            if (_layerIndex < layers.length)
-              _buildLayer(theme, scale, layers[_layerIndex], _layerIndex, w, h, isPortrait)
-            else
-              _buildFallbackBlock(theme, scale),
-            if (widget.overlay != null) Positioned.fill(child: widget.overlay!),
-          ],
-        );
+        return _buildSurfaceStack(theme, scale, w, h, isPortrait, dpr);
       },
     );
 
@@ -134,9 +142,26 @@ class _EvArtworkState extends State<EvArtwork> {
     return content;
   }
 
+  Widget _buildSurfaceStack(
+    EvTheme theme, EvScale scale, double w, double h, bool isPortrait, double dpr,
+  ) {
+    final layers = widget.plan.layers;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ColoredBox(color: theme.cardBg),
+        if (_layerIndex < layers.length)
+          _buildLayer(theme, scale, layers[_layerIndex], _layerIndex, w, h, isPortrait, dpr)
+        else
+          _buildFallbackBlock(theme, scale),
+        if (widget.overlay != null) Positioned.fill(child: widget.overlay!),
+      ],
+    );
+  }
+
   Widget _buildLayer(
     EvTheme theme, EvScale scale, ArtworkLayer layer, int idx,
-    double w, double h, bool isPortrait,
+    double w, double h, bool isPortrait, double dpr,
   ) {
     final fit = widget.overrideFit ??
         (layer.fit == ArtworkFit.cover ? BoxFit.cover : BoxFit.contain);
@@ -148,25 +173,34 @@ class _EvArtworkState extends State<EvArtwork> {
     final alignment = isPortrait && fit == BoxFit.cover && hasOverlay
         ? const Alignment(-0.4, 0.0)
         : Alignment.center;
+    final ImageProvider<Object> provider = widget.decodeWidth != null && widget.decodeWidth! > 0
+        ? ResizeImage.resizeIfNeeded(
+            math.max(1, (widget.decodeWidth! * dpr).round()),
+            null,
+            layer.source.image,
+          )
+        : layer.source.image;
 
     Widget image = Image(
       key: ValueKey('ev_art_layer_${idx}_${layer.source.cacheKey}'),
-      image: layer.source.image,
+      image: provider,
       fit: fit,
       alignment: alignment,
       gaplessPlayback: true,
       filterQuality: FilterQuality.medium,
-      frameBuilder: (_, child, frame, sync) => sync || _imageSettled
-          ? child
-          : AnimatedOpacity(
-              opacity: frame == null ? 0.0 : 1.0,
-              duration: EvDurations.slow,
-              curve: EvCurves.soft,
-              onEnd: frame != null
-                  ? () { if (mounted && !_imageSettled) setState(() => _imageSettled = true); }
-                  : null,
-              child: child,
-            ),
+      frameBuilder: widget.animateFade
+          ? (_, child, frame, sync) => sync || _imageSettled
+              ? child
+              : AnimatedOpacity(
+                  opacity: frame == null ? 0.0 : 1.0,
+                  duration: EvDurations.slow,
+                  curve: EvCurves.soft,
+                  onEnd: frame != null
+                      ? () { if (mounted && !_imageSettled) setState(() => _imageSettled = true); }
+                      : null,
+                  child: child,
+                )
+          : null,
       errorBuilder: (_, _, _) {
         _advanceLayer(idx);
         return idx + 1 >= widget.plan.layers.length
@@ -186,6 +220,8 @@ class _EvArtworkState extends State<EvArtwork> {
         ),
       );
     }
+
+    if (!hasOverlay) return image;
 
     return Stack(
       fit: StackFit.expand,

@@ -147,12 +147,14 @@ class EvTheme extends ThemeExtension<EvTheme> {
         fontSize: fontSize, fontWeight: displayWeight,
         letterSpacing: fontSize * displayLetterSpacingEm,
         color: color ?? ink, height: height,
+        decoration: TextDecoration.none,
       );
 
   TextStyle shelfStyle(double fontSize, {Color? color}) => TextStyle(
     fontFamily: shelfFamily, fontFamilyFallback: sansFallback,
     fontSize: fontSize, fontWeight: shelfWeight,
     letterSpacing: fontSize * -0.01, color: color ?? ink,
+    decoration: TextDecoration.none,
   );
 
   TextStyle bodyStyle(
@@ -164,6 +166,7 @@ class EvTheme extends ThemeExtension<EvTheme> {
     fontFamily: sansFamily, fontFamilyFallback: sansFallback,
     fontSize: fontSize, fontWeight: fontWeight,
     color: color ?? ink, height: height,
+    decoration: TextDecoration.none,
   );
 
   TextStyle serifStyle(
@@ -176,6 +179,7 @@ class EvTheme extends ThemeExtension<EvTheme> {
     fontFamily: serifFamily, fontFamilyFallback: serifFallback,
     fontSize: fontSize, fontWeight: fontWeight, fontStyle: fontStyle,
     color: color ?? ink, height: height,
+    decoration: TextDecoration.none,
   );
 
   static EvTheme of(BuildContext context) =>
@@ -407,7 +411,7 @@ class _EvThemeScopeState extends State<EvThemeScope> {
     final evTheme = EvThemeScope.resolveTheme(_mode, widget.clock());
     return Theme(
       data: evTheme.toThemeData(),
-      child: DefaultTextStyle.merge(style: evTheme.bodyStyle(15), child: widget.child),
+      child: DefaultTextStyle(style: evTheme.bodyStyle(15), child: widget.child),
     );
   }
 }

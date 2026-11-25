@@ -21,6 +21,7 @@ class EvWallGridMetrics {
   final int crossAxisCount;
   final double itemWidth, itemHeight, crossAxisSpacing, mainAxisSpacing, gridTopOffset;
 
+  double get posterHeight => itemWidth * 1.5;
   double get rowStride => itemHeight + mainAxisSpacing;
 
   /// Scroll offset aligning [itemIndex]'s row [leadOffset] below the viewport top.
@@ -91,6 +92,7 @@ class _EvWallPageState extends State<EvWallPage> {
   final ValueNotifier<String?> _bannerError = ValueNotifier<String?>(null);
 
   EvScope? _scope;
+  EvStageController? _guardedStage;
   String? _boundSessionId;
   EmbyViewData? _boundData;
 
@@ -132,19 +134,39 @@ class _EvWallPageState extends State<EvWallPage> {
     final first = _scope == null;
     final sessionChanged = _boundSessionId != scope.services.sessionId || !identical(_boundData, scope.services.data);
     _scope = scope;
+    if (!identical(_guardedStage, scope.stage)) {
+      _guardedStage?.removeListener(_enforceAmbientStage);
+      _guardedStage = scope.stage;
+      _guardedStage!.addListener(_enforceAmbientStage);
+    }
     _boundSessionId = scope.services.sessionId;
     _boundData = scope.services.data;
     if (first) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         scope.immersion.onCardHoverEnd();
-        scope.stage.setMode(EvStageMode.ambient);
-        scope.stage.setScrollProgress(0.0);
+        scope.stage
+          ..setMode(EvStageMode.ambient)
+          ..setScrollProgress(0.0)
+          ..setVeilLifted(false)
+          ..setAmbientColor(null);
         _syncShellChrome();
       });
       _reloadAll();
     } else if (sessionChanged) {
       _reloadAll();
+    }
+  }
+
+  void _enforceAmbientStage() {
+    if (!mounted) return;
+    final scope = _scope;
+    if (scope == null || scope.shell.current is! EvWallDestination) return;
+    if (scope.stage.mode == EvStageMode.hero) {
+      scope.stage
+        ..setMode(EvStageMode.ambient)
+        ..setScrollProgress(0.0)
+        ..setAmbientColor(null);
     }
   }
 
@@ -167,6 +189,8 @@ class _EvWallPageState extends State<EvWallPage> {
 
   @override
   void dispose() {
+    _guardedStage?.removeListener(_enforceAmbientStage);
+    _guardedStage = null;
     _scrollIdleTimer?.cancel();
     _hoverDwellTimer?.cancel();
     _scrollController.removeListener(_handleScroll);
@@ -438,7 +462,9 @@ class _EvWallPageState extends State<EvWallPage> {
           for (final item in page.items) {
             if (item.art.stage.layers.isNotEmpty) {
               _stageSeeded = true;
-              _scope?.stage.setBaseBackdrop(item.art.stage);
+              _scope?.stage
+                ?..setMode(EvStageMode.ambient)
+                ..setBaseBackdrop(item.art.stage);
               break;
             }
           }
@@ -662,7 +688,7 @@ class _EvWallPageState extends State<EvWallPage> {
               CustomScrollView(
                 key: const Key('ev_wall_scroll_view'),
                 controller: _scrollController,
-                cacheExtent: vh * 0.75,
+                cacheExtent: vh * 0.18,
                 slivers: [
                   SliverToBoxAdapter(
                     child: Padding(
@@ -781,6 +807,22 @@ class _EvWallPageState extends State<EvWallPage> {
     );
   }
 
+  Widget _buildWallCard(MediaCard card, EvWallGridMetrics metrics) => EvCard(
+    key: ValueKey<String>('ev_wall_card_${card.id}'),
+    card: card,
+    style: card.kind == MediaKind.collection ? EvCardStyle.collection : EvCardStyle.poster,
+    width: metrics.itemWidth,
+    posterHeight: metrics.posterHeight,
+    animateArtworkFade: false,
+    alwaysShowLabel: true,
+    subtitle: _cardSubtitle(card),
+    onHoverChanged: (h) => _onCardHover(card, h),
+    onFocusChanged: (f) => _onCardHover(card, f),
+    onTap: () {},
+    onActivateWithOrigin: (origin) => _openCard(card, origin),
+    onPlay: () => _playCard(card),
+  );
+
   Widget _buildGrid(double gutter, EvWallGridMetrics metrics, {int? placeholderCount}) {
     final isPlaceholder = placeholderCount != null;
     return SliverPadding(
@@ -793,7 +835,13 @@ class _EvWallPageState extends State<EvWallPage> {
         ),
         delegate: SliverChildBuilderDelegate(
           (_, index) {
-            if (isPlaceholder) return RepaintBoundary(child: _WallCardPlaceholder(width: metrics.itemWidth));
+            if (isPlaceholder) {
+              return RepaintBoundary(
+                child: _WallCardPlaceholder(width: metrics.itemWidth, posterHeight: metrics.posterHeight),
+              );
+            }
+            final cached = _cardAt(index);
+            if (cached != null) return RepaintBoundary(child: _buildWallCard(cached, metrics));
             final pageIndex = index ~/ widget.pageSize;
             return RepaintBoundary(
               child: ValueListenableBuilder<int>(
@@ -802,25 +850,15 @@ class _EvWallPageState extends State<EvWallPage> {
                   final card = _cardAt(index);
                   if (card == null) {
                     _schedulePageRequest(pageIndex);
-                    return _WallCardPlaceholder(width: metrics.itemWidth);
+                    return _WallCardPlaceholder(width: metrics.itemWidth, posterHeight: metrics.posterHeight);
                   }
-                  return Align(
-                    alignment: Alignment.topCenter,
-                    child: EvCard(
-                      key: ValueKey<String>('ev_wall_card_${card.id}'), card: card,
-                      style: card.kind == MediaKind.collection ? EvCardStyle.collection : EvCardStyle.poster,
-                      width: metrics.itemWidth, alwaysShowLabel: true, subtitle: _cardSubtitle(card),
-                      onHoverChanged: (h) => _onCardHover(card, h), onFocusChanged: (f) => _onCardHover(card, f),
-                      onTap: () {}, onActivateWithOrigin: (origin) => _openCard(card, origin),
-                      onPlay: () => _playCard(card),
-                    ),
-                  );
+                  return _buildWallCard(card, metrics);
                 },
               ),
             );
           },
           childCount: placeholderCount ?? _total,
-          addAutomaticKeepAlives: false, addRepaintBoundaries: false,
+          addAutomaticKeepAlives: false, addRepaintBoundaries: false, addSemanticIndexes: false,
         ),
       ),
     );
@@ -894,8 +932,8 @@ class _PageSignal extends ValueNotifier<int> {
 
 /// Static, zero-ticker placeholder tile for unpaged grid cells during fast scrolling.
 class _WallCardPlaceholder extends StatelessWidget {
-  const _WallCardPlaceholder({required this.width});
-  final double width;
+  const _WallCardPlaceholder({required this.width, required this.posterHeight});
+  final double width, posterHeight;
 
   @override
   Widget build(BuildContext context) {
@@ -903,19 +941,25 @@ class _WallCardPlaceholder extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          width: width, height: width * 1.5,
-          decoration: BoxDecoration(
-            color: theme.fill2, borderRadius: BorderRadius.circular(scale.rem(theme.posterRadius)),
-            border: Border.all(color: theme.line, width: 1),
+        SizedBox(
+          width: width, height: posterHeight,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: theme.fill2, borderRadius: BorderRadius.circular(scale.rem(theme.posterRadius)),
+              border: Border.all(color: theme.line, width: 1),
+            ),
           ),
         ),
         SizedBox(height: scale.rem(0.875)),
-        Container(width: width * 0.72, height: scale.rem(0.875),
-            decoration: BoxDecoration(color: theme.fill2, borderRadius: BorderRadius.circular(scale.rem(0.4375)))),
+        SizedBox(
+          width: width * 0.72, height: scale.rem(0.875),
+          child: DecoratedBox(decoration: BoxDecoration(color: theme.fill2, borderRadius: BorderRadius.circular(scale.rem(0.4375)))),
+        ),
         SizedBox(height: scale.rem(0.375)),
-        Container(width: width * 0.44, height: scale.rem(0.75),
-            decoration: BoxDecoration(color: theme.fill, borderRadius: BorderRadius.circular(scale.rem(0.375)))),
+        SizedBox(
+          width: width * 0.44, height: scale.rem(0.75),
+          child: DecoratedBox(decoration: BoxDecoration(color: theme.fill, borderRadius: BorderRadius.circular(scale.rem(0.375)))),
+        ),
       ],
     );
   }

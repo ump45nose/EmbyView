@@ -17,6 +17,7 @@ class EvHero extends StatefulWidget {
     this.defaultReasonLabel = '今日推荐',
     this.onDetail,
     this.onPlay,
+    this.onToggleFavorite,
     this.onActiveChanged,
     this.enableAutoRotate = true,
     this.pauseAutoRotate,
@@ -27,6 +28,7 @@ class EvHero extends StatefulWidget {
   final String defaultReasonLabel;
   final VoidCallback? onDetail;
   final void Function(HomeRecommendation recommendation, Rect? origin)? onPlay;
+  final VoidCallback? onToggleFavorite;
   final ValueChanged<HomeRecommendation>? onActiveChanged;
   final bool enableAutoRotate;
   final ValueListenable<bool>? pauseAutoRotate;
@@ -414,6 +416,15 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
         ),
         SizedBox(width: scale.rem(0.75)),
         EvButton.ghost(key: const Key('ev_hero_detail_btn'), label: '详情', glass: true, onPressed: () => _handleDetail(rec)),
+        SizedBox(width: scale.rem(0.75)),
+        EvButton.ghost(
+          key: const Key('ev_hero_favorite_btn'),
+          round: true,
+          glass: true,
+          icon: EvIcons.plus,
+          tooltip: '加入片单',
+          onPressed: () => widget.onToggleFavorite?.call(),
+        ),
       ],
     );
   }
