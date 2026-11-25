@@ -110,16 +110,19 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
   }
 
   Widget _island(EvScale s, bool paper, double delay, EdgeInsets pad, Widget child) {
-    final a = CurvedAnimation(parent: _entry, curve: Interval(delay, 1.0, curve: EvCurves.out));
+    final curve = Interval(delay, 1.0, curve: EvCurves.out);
     return AnimatedBuilder(
-      animation: a,
-      builder: (_, c) => Opacity(
-        opacity: a.value.clamp(0.0, 1.0),
-        child: Transform.translate(
-          offset: Offset(0, (1 - a.value) * s.rem(0.75)),
-          child: Transform.scale(scale: 0.96 + 0.04 * a.value, child: c),
-        ),
-      ),
+      animation: _entry,
+      builder: (_, c) {
+        final v = curve.transform(_entry.value).clamp(0.0, 1.0);
+        return Opacity(
+          opacity: v,
+          child: Transform.translate(
+            offset: Offset(0, (1 - v) * s.rem(0.75)),
+            child: Transform.scale(scale: 0.96 + 0.04 * v, child: c),
+          ),
+        );
+      },
       child: _Pill(paper: paper, island: true, height: s.rem(3.375), padding: pad, child: child),
     );
   }
@@ -404,6 +407,7 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
                       EvPlayerScrubBar(
                         position: snap.position, duration: snap.duration, bufferedUntil: snap.bufferedUntil,
                         chapters: snap.chapters, aiRun: widget.aiRun, flashAuroraTip: widget.flashAuroraTip,
+                        visible: widget.visible, generation: snap.generation,
                         onThumbnailAt: widget.onThumbnailAt, onSeek: widget.onSeek,
                         onHoverChanged: widget.onScrubHoverChanged, onScrubbingChanged: widget.onScrubbingChanged,
                         forcedHoverFraction: widget.forcedScrubHoverFraction, clock: widget.clock,
@@ -431,9 +435,9 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
                             Row(
                               mainAxisSize: MainAxisSize.min, spacing: s.rem(0.375),
                               children: [
-                                _tool(s, paper, 'ev_player_back10', '后退 10 秒', EvIcons.back10, () { _spinL.forward(from: 0); widget.onSeekBy?.call(const Duration(seconds: -10)); }, spin: _spinL, dir: -1),
+                                _tool(s, paper, 'ev_player_back10', '后退 10 秒', EvIcons.back10, () => widget.onSeekBy?.call(const Duration(seconds: -10)), spin: _spinL, dir: -1),
                                 _playBtn(s, paper, snap.phase == PlaybackPhase.playing),
-                                _tool(s, paper, 'ev_player_fwd10', '前进 10 秒', EvIcons.fwd10, () { _spinR.forward(from: 0); widget.onSeekBy?.call(const Duration(seconds: 10)); }, spin: _spinR, dir: 1),
+                                _tool(s, paper, 'ev_player_fwd10', '前进 10 秒', EvIcons.fwd10, () => widget.onSeekBy?.call(const Duration(seconds: 10)), spin: _spinR, dir: 1),
                                 if (snap.nextEpisode != null) _tool(s, paper, 'ev_player_next', '下一集', EvIcons.next, widget.onPlayNext),
                               ],
                             ),

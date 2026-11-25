@@ -58,12 +58,14 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   late double _compareSplit = (widget.initialCompareSplit ?? 0.5).clamp(0.04, 0.96);
   bool _subBound = false, _openingDone = false, _controlsVisible = true, _pauseCardVisible = false;
   bool _scrubHovering = false, _scrubbing = false, _bottomBarHover = false, _flashAuroraTip = false, _toastVisible = false;
+  bool _autoCompareSwept = false;
   int _seekLeftNonce = 0, _seekRightNonce = 0, _compareSweepNonce = 0;
   String _toastMessage = '';
   EvIconData? _toastIcon;
   Timer? _idleTimer, _pauseTimer, _toastTimer, _auroraFlashTimer;
 
   bool get _creditsActive => _snap.creditsPrompt == CreditsPromptState.countingDown && _snap.nextEpisode != null;
+  SubtitleSnapshot? get _activeSubSnap => _subSnap?.generation == _snap.generation ? _subSnap : null;
 
   @override
   void initState() {
@@ -72,7 +74,8 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     _openCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 750), value: skip ? 1.0 : 0.0);
     if (!skip) _openCtrl.forward();
     _snap = widget.session.snapshot;
-    _firstFrame = EvFirstFrameTracker(clock: widget.clock);
+    final openedAt = identical(widget.clock, DateTime.now) ? EvPlayer.lastOpenedAt : null;
+    _firstFrame = EvFirstFrameTracker(clock: widget.clock, startedAt: openedAt);
     _observeFirstFrame(_snap);
     _sessionSub = widget.session.changes.listen(_onSessionSnapshot);
     _syncPauseState(_snap);
@@ -118,9 +121,12 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   });
 
   void _resetForGeneration(PlaybackSnapshot next) {
-    _pauseTimer?.cancel(); _pauseTimer = null; _auroraFlashTimer?.cancel(); _auroraFlashTimer = null;
+    _pauseTimer?.cancel(); _pauseTimer = null;
+    _auroraFlashTimer?.cancel(); _auroraFlashTimer = null;
+    _toastTimer?.cancel(); _toastTimer = null;
     _firstFrame.reset(generation: next.generation);
     _openingDone = _pauseCardVisible = _flashAuroraTip = _compareActive = _comparePersistent = false;
+    _toastVisible = _scrubHovering = _scrubbing = _autoCompareSwept = false;
     _compareSplit = 0.5;
     _observeFirstFrame(next);
   }
@@ -128,14 +134,17 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   void _onSessionSnapshot(PlaybackSnapshot next) {
     if (!mounted) return;
     final prev = _snap, genChanged = next.generation != prev.generation;
+    var closedPanel = false;
     setState(() {
       _snap = next;
       genChanged ? _resetForGeneration(next) : _observeFirstFrame(next);
       if (next.creditsPrompt == CreditsPromptState.countingDown && next.nextEpisode != null) {
+        closedPanel = _panelOpen;
         _panelOpen = _pauseCardVisible = _compareActive = false; _pauseTimer?.cancel(); _pauseTimer = null;
       }
       if (next.anime4k.state != Anime4kState.active && _compareActive && widget.initialCompareSplit == null) _compareActive = false;
     });
+    if (closedPanel) _reclaimPlayerFocus();
     if (!genChanged) _handleAnime4kTransition(prev.anime4k, next.anime4k);
     _syncPauseState(next);
     if (next.phase == PlaybackPhase.playing && prev.phase != PlaybackPhase.playing) _pokeControls();
@@ -144,7 +153,16 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   void _handleAnime4kTransition(Anime4kSnapshot prev, Anime4kSnapshot next) {
     if (next.state == Anime4kState.active && prev.state != Anime4kState.active) {
       _showToast('Anime4K 已开启', icon: EvIcons.ok);
-      if (next.comparison == ComparisonState.available) _startCompare(persistent: false);
+      if (next.comparison == ComparisonState.available && !_autoCompareSwept) {
+        _autoCompareSwept = true;
+        _startCompare(persistent: false);
+      }
+    } else if (next.state == Anime4kState.active &&
+        next.comparison == ComparisonState.available &&
+        prev.comparison != ComparisonState.available &&
+        !_autoCompareSwept) {
+      _autoCompareSwept = true;
+      _startCompare(persistent: false);
     } else if (next.requested && next.state != Anime4kState.active && next.state != Anime4kState.pending &&
         (!prev.requested || prev.state != next.state || prev.reason != next.reason)) {
       _showToast(next.reason?.trim().isNotEmpty == true ? next.reason!.trim() : EvVideoTab.stateLabel(next.state), icon: EvIcons.info);
@@ -155,9 +173,9 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
 
   void _onSubtitleSnapshot(SubtitleSnapshot next) {
     if (!mounted) return;
-    final prevAi = _subSnap?.ai?.state;
+    final prevAi = _activeSubSnap?.ai?.state;
     setState(() => _subSnap = next);
-    if (next.ai?.state == AiRunState.generating && prevAi != AiRunState.generating) {
+    if (next.generation == _snap.generation && next.ai?.state == AiRunState.generating && prevAi != AiRunState.generating) {
       _auroraFlashTimer?.cancel(); setState(() => _flashAuroraTip = true);
       _showToast('AI 字幕已开始显示 · 边看边生成', icon: EvIcons.ok);
       _auroraFlashTimer = Timer(const Duration(seconds: 3), () { if (mounted) setState(() => _flashAuroraTip = false); });
@@ -206,9 +224,24 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     _pokeControls();
   }
 
-  void _togglePanelTab(String tab) {
-    setState(() { if (_panelOpen && _panelTab == tab) { _panelOpen = false; } else { _panelOpen = true; _panelTab = tab; } });
+  void _reclaimPlayerFocus() {
+    if (_focusNode.canRequestFocus) _focusNode.requestFocus();
+  }
+
+  void _closePanel() {
+    if (_panelOpen) setState(() => _panelOpen = false);
+    _reclaimPlayerFocus();
     _pokeControls();
+  }
+
+  void _togglePanelTab(String tab) {
+    final closing = _panelOpen && _panelTab == tab;
+    if (closing) {
+      _closePanel();
+    } else {
+      setState(() { _panelOpen = true; _panelTab = tab; });
+      _pokeControls();
+    }
   }
 
   void _startCompare({required bool persistent}) {
@@ -242,7 +275,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     }
     if (key == LogicalKeyboardKey.escape) {
       if (event is KeyRepeatEvent) return KeyEventResult.handled;
-      if (_panelOpen) { setState(() => _panelOpen = false); _pokeControls(); }
+      if (_panelOpen) { _closePanel(); }
       else if (_compareActive) { _endCompare(); }
       else { _handleClose(); }
       return KeyEventResult.handled;
@@ -307,12 +340,12 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
               child: videoFrame,
             )),
             EvLiveSubtitleLayer(
-              snapshot: _snap, subtitleSnapshot: _subSnap, aiRun: _subSnap?.ai, controlsVisible: showControls, panelOpen: _panelOpen,
+              snapshot: _snap, subtitleSnapshot: _activeSubSnap, controlsVisible: showControls, panelOpen: _panelOpen,
               scrubHovering: _scrubHovering || _scrubbing || widget.initialScrubHoverFraction != null, paused: _pauseCardVisible, creditsActive: creditsActive,
             ),
             Positioned.fill(child: EvPauseOverlay(visible: _pauseCardVisible && !creditsActive, snapshot: _snap, art: widget.art, clock: widget.clock, onResume: _togglePlayPause)),
             Positioned.fill(child: EvPlayerControls(
-              snapshot: _snap, art: widget.art, aiRun: _subSnap?.ai, flashAuroraTip: _flashAuroraTip, visible: showControls,
+              snapshot: _snap, art: widget.art, aiRun: _activeSubSnap?.ai, flashAuroraTip: _flashAuroraTip, visible: showControls,
               panelOpen: _panelOpen, activePanelTab: _panelTab, pauseCardVisible: _pauseCardVisible,
               seekLeftNonce: _seekLeftNonce, seekRightNonce: _seekRightNonce, forcedScrubHoverFraction: widget.initialScrubHoverFraction, clock: widget.clock,
               onBack: _handleClose, onTogglePlay: _togglePlayPause, onSeek: (p) { unawaited(widget.session.seek(p)); _pokeControls(); }, onSeekBy: _seekBy,
@@ -328,9 +361,9 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
             Positioned.fill(child: EvSeekFeedbackOverlay(leftNonce: _seekLeftNonce, rightNonce: _seekRightNonce)),
             Positioned.fill(child: EvPlayerToast(visible: _toastVisible, message: _toastMessage, icon: _toastIcon)),
             EvPlayerPanel(
-              open: _panelOpen && !creditsActive, activeTab: _panelTab, snapshot: _snap, subtitleSnapshot: _subSnap,
+              open: _panelOpen && !creditsActive, activeTab: _panelTab, snapshot: _snap, subtitleSnapshot: _activeSubSnap,
               subtitlePanel: _subtitlePanel, subtitles: _resolvedSubtitles, initialLowerTab: widget.initialLowerTab,
-              onSelectTab: (tab) => setState(() => _panelTab = tab), onClose: () { setState(() => _panelOpen = false); _pokeControls(); },
+              onSelectTab: (tab) => setState(() => _panelTab = tab), onClose: _closePanel,
               onSelectSubtitle: (id) => unawaited(widget.session.selectSubtitle(id)), onSelectAudio: (id) => unawaited(widget.session.selectAudio(id)),
               onSeek: (p) => unawaited(widget.session.seek(p)), onToggleAnime4k: () => unawaited(widget.session.setAnime4k(!_snap.anime4k.requested)),
               onStartCompare: () => _startCompare(persistent: true), onToast: _showToast,

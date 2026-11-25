@@ -20,6 +20,8 @@ abstract final class EvPlayer {
   static EvPlayerPageBuilder? pageBuilder;
   static bool _isOpening = false;
   static bool get isOpening => _isOpening;
+  static DateTime? _lastOpenedAt;
+  static DateTime? get lastOpenedAt => _lastOpenedAt;
 
   /// Opens [target], pauses [Immersion], pushes the player route, and guarantees
   /// closing the [PlaybackSession] and resuming immersion when returning or failing.
@@ -36,6 +38,7 @@ abstract final class EvPlayer {
     if (resolvedPlayback == null || navigator == null) return;
 
     _isOpening = true;
+    _lastOpenedAt = DateTime.now();
     PlaybackSession? session;
     var entered = false;
     try {
@@ -47,9 +50,24 @@ abstract final class EvPlayer {
       await navigator.push<void>(PageRouteBuilder<void>(
         opaque: true, barrierColor: const Color(0xFF000000),
         transitionDuration: EvDurations.normal, reverseTransitionDuration: EvDurations.normal,
-        pageBuilder: (ctx, _, _) =>
-            customBuilder?.call(ctx, active, origin: origin, art: art) ??
-            _defaultPage(ctx, active, origin: origin, art: art),
+        pageBuilder: (ctx, _, _) {
+          Widget buildPage(BuildContext innerCtx) =>
+              customBuilder?.call(innerCtx, active, origin: origin, art: art) ??
+              _defaultPage(innerCtx, active, origin: origin, art: art);
+          if (scope != null && EvScope.maybeOf(ctx) == null) {
+            return EvThemeScope(
+              preferences: scope.services.preferences,
+              child: EvScope(
+                services: scope.services,
+                stage: scope.stage,
+                immersion: scope.immersion,
+                shell: scope.shell,
+                child: Builder(builder: buildPage),
+              ),
+            );
+          }
+          return buildPage(ctx);
+        },
         transitionsBuilder: (_, anim, _, child) => FadeTransition(
           opacity: CurvedAnimation(parent: anim, curve: EvCurves.soft), child: child,
         ),
@@ -57,6 +75,7 @@ abstract final class EvPlayer {
     } finally {
       try { await session?.close(); } catch (_) {}
       if (entered) resolvedImmersion?.exitPlayer();
+      _lastOpenedAt = null;
       _isOpening = false;
     }
   }

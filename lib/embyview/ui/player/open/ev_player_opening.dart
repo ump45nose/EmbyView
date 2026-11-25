@@ -11,9 +11,14 @@ const _kBlack = Color(0xFF000000);
 /// callback after [PlaybackSnapshot] enters a renderable video phase, while
 /// logging native [PlaybackSnapshot.firstFrameLatency] separately.
 class EvFirstFrameTracker {
-  EvFirstFrameTracker({DateTime Function()? clock, void Function(String message)? log})
-    : _clock = clock, _log = log ?? debugPrint,
-      _startedAt = clock?.call(), _sw = clock == null ? (Stopwatch()..start()) : null;
+  EvFirstFrameTracker({
+    DateTime Function()? clock,
+    DateTime? startedAt,
+    void Function(String message)? log,
+  }) : _clock = clock ?? (startedAt != null ? DateTime.now : null),
+       _log = log ?? debugPrint,
+       _startedAt = startedAt ?? clock?.call(),
+       _sw = (clock == null && startedAt == null) ? (Stopwatch()..start()) : null;
 
   final DateTime Function()? _clock;
   final void Function(String message) _log;
@@ -37,8 +42,9 @@ class EvFirstFrameTracker {
   }
 
   static bool isVideoReady(PlaybackSnapshot s) =>
-      s.phase == PlaybackPhase.playing || s.phase == PlaybackPhase.paused ||
-      (s.phase == PlaybackPhase.buffering && s.firstFrameLatency != null);
+      s.phase == PlaybackPhase.playing ||
+      ((s.phase == PlaybackPhase.paused || s.phase == PlaybackPhase.buffering) &&
+          s.firstFrameLatency != null);
 
   void observe(PlaybackSnapshot snap, {VoidCallback? onRecorded}) {
     if (_disposed) return;
@@ -58,8 +64,9 @@ class EvFirstFrameTracker {
     _awaiting = true;
     final gen = snap.generation, id = snap.target.itemId;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_disposed || recorded || _gen != gen) { _awaiting = false; return; }
+      if (_disposed || _gen != gen) return;
       _awaiting = false;
+      if (recorded) return;
       final measured = elapsed;
       _uiLatency = measured;
       _sw?.stop();

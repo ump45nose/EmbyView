@@ -9,10 +9,11 @@ import 'package:moonfin/embyview/ui/player/overlays/ev_live_subtitle_layer.dart'
 import 'package:moonfin/embyview/ui/player/panel/ev_player_panel.dart';
 
 class _FakeSubtitlePanel implements SubtitlePanel {
-  _FakeSubtitlePanel(this._snapshot, {this.searchGroups = const []});
+  _FakeSubtitlePanel(this._snapshot, {this.searchGroups = const [], this.actionError});
 
   SubtitleSnapshot _snapshot;
   final List<SubtitleSearchGroup> searchGroups;
+  final Object? actionError;
   final _ctrl = StreamController<SubtitleSnapshot>.broadcast();
 
   final List<String?> searchQueries = [];
@@ -36,12 +37,24 @@ class _FakeSubtitlePanel implements SubtitlePanel {
     return searchGroups;
   }
 
-  @override Future<void> useCandidate(SubtitleCandidate candidate) async => usedCandidates.add(candidate);
-  @override Future<void> startAi() async => startAiCalls++;
-  @override Future<void> cancelAi() async => cancelAiCalls++;
+  @override Future<void> useCandidate(SubtitleCandidate candidate) async {
+    if (actionError != null) throw actionError!;
+    usedCandidates.add(candidate);
+  }
+  @override Future<void> startAi() async {
+    if (actionError != null) throw actionError!;
+    startAiCalls++;
+  }
+  @override Future<void> cancelAi() async {
+    if (actionError != null) throw actionError!;
+    cancelAiCalls++;
+  }
   @override Future<void> translate(String trackId) async => translatedTracks.add(trackId);
   @override Future<void> align(String trackId) async => alignedTracks.add(trackId);
-  @override Future<void> retrySave(String trackId) async => retriedTracks.add(trackId);
+  @override Future<void> retrySave(String trackId) async {
+    if (actionError != null) throw actionError!;
+    retriedTracks.add(trackId);
+  }
   @override Future<void> close() async { closeCalls++; await _ctrl.close(); }
 }
 
@@ -322,7 +335,7 @@ void main() {
       );
 
       await tester.pumpWidget(_wrap(
-        child: EvLiveSubtitleLayer(snapshot: snap, aiRun: run, controlsVisible: true, panelOpen: false),
+        child: EvLiveSubtitleLayer(snapshot: snap, subtitleSnapshot: SubtitleSnapshot(generation: 1, ai: run), controlsVisible: true, panelOpen: false),
       ));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('ev_player_live_subtitle')), findsOneWidget);
@@ -332,7 +345,7 @@ void main() {
       await tester.pumpWidget(_wrap(
         child: EvLiveSubtitleLayer(
           snapshot: _snap(position: const Duration(seconds: 7), selectedSubtitleId: 'ai_1', subtitleTracks: snap.subtitleTracks),
-          aiRun: run, controlsVisible: false, panelOpen: true, paused: true,
+          subtitleSnapshot: SubtitleSnapshot(generation: 1, ai: run), controlsVisible: false, panelOpen: true, paused: true,
         ),
       ));
       await tester.pumpAndSettle();
@@ -542,7 +555,7 @@ void main() {
               size: size, mode: mode,
               child: Stack(fit: StackFit.expand, children: [
                 EvAnime4kCompareOverlay(active: true, anime4k: activeA4k, onSplitChanged: (_) {}, onEnd: () {}),
-                EvLiveSubtitleLayer(snapshot: _snap(position: const Duration(seconds: 2), selectedSubtitleId: null, subtitleTracks: const []), aiRun: subSnap.ai, controlsVisible: true, panelOpen: true),
+                EvLiveSubtitleLayer(snapshot: _snap(position: const Duration(seconds: 2), selectedSubtitleId: null, subtitleTracks: const []), subtitleSnapshot: subSnap, controlsVisible: true, panelOpen: true),
                 EvPlayerPanel(
                   open: true, activeTab: tab, snapshot: snap, subtitleSnapshot: subSnap, subtitlePanel: panel,
                   onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},
@@ -570,6 +583,59 @@ void main() {
       await tester.pump();
       expect(pickedAudio, 'en');
     });
+  });
+
+  testWidgets('EvSubtitleTab catches async failures in startAi, cancelAi, useCandidate & retrySave and shows toast', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    const cand = SubtitleCandidate(id: 'c_err', source: SubtitleSource.xunlei, name: '测试候选字幕', language: 'zh', format: 'SRT');
+    final toasts = <String>[];
+    final panel = _FakeSubtitlePanel(
+      const SubtitleSnapshot(
+        generation: 1,
+        tracks: [SubtitleTrackState(trackId: 't_fail', origin: SubtitleOrigin.online, save: SubtitleSaveState.failed, candidateId: 'c_err')],
+        cues: null,
+      ),
+      searchGroups: const [SubtitleSearchGroup(source: SubtitleSource.xunlei, candidates: [cand])],
+      actionError: const EmbyViewFailure('后端操作失败'),
+    );
+
+    Widget buildTab(SubtitleSnapshot sub) => _wrap(
+      child: EvPlayerPanel(
+        open: true, activeTab: 'subs',
+        snapshot: _snap(subtitleTracks: const [PlaybackTrack(id: 't_fail', name: '外挂', language: 'zh', source: PlaybackTrackSource.online)]),
+        subtitleSnapshot: sub, subtitlePanel: panel,
+        onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},
+        onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
+        onToast: (msg, {icon}) => toasts.add(msg),
+      ),
+    );
+
+    await tester.pumpWidget(buildTab(panel.snapshot));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('ev_ai_start')));
+    await tester.pump();
+    await tester.ensureVisible(find.byKey(const Key('ev_sub_use_c_err')));
+    await tester.tap(find.byKey(const Key('ev_sub_use_c_err')));
+    await tester.pump();
+    await tester.ensureVisible(find.byKey(const Key('ev_sub_retry_t_fail')));
+    await tester.tap(find.byKey(const Key('ev_sub_retry_t_fail')));
+    await tester.pump();
+
+    // Generating state -> cancelAi throws
+    await tester.pumpWidget(buildTab(const SubtitleSnapshot(
+      generation: 1,
+      ai: AiRun(generation: 1, state: AiRunState.generating, startedAt: Duration.zero, coverageEnd: Duration(minutes: 5)),
+    )));
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.ensureVisible(find.byKey(const Key('ev_ai_cancel')));
+    await tester.tap(find.byKey(const Key('ev_ai_cancel')));
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(toasts, ['后端操作失败', '后端操作失败', '后端操作失败', '后端操作失败']);
   });
 
   test('evAnime4kSweepSplit hits expected keyframes', () {

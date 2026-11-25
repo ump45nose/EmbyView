@@ -100,17 +100,17 @@ class EvButton extends StatefulWidget {
   const EvButton({
     super.key, this.variant = EvButtonVariant.primary, this.small = false,
     this.round = false, this.glass = true, this.icon, this.label,
-    this.secondaryLabel, this.progress, this.tooltip, this.child, this.onPressed,
+    this.secondaryLabel, this.progress, this.tooltip, this.focusNode, this.child, this.onPressed,
   });
 
   const EvButton.primary({
     super.key, this.small = false, this.round = false, this.icon, this.label,
-    this.secondaryLabel, this.progress, this.tooltip, this.child, this.onPressed,
+    this.secondaryLabel, this.progress, this.tooltip, this.focusNode, this.child, this.onPressed,
   }) : variant = EvButtonVariant.primary, glass = false;
 
   const EvButton.ghost({
     super.key, this.small = false, this.round = false, this.glass = true,
-    this.icon, this.label, this.secondaryLabel, this.tooltip, this.child, this.onPressed,
+    this.icon, this.label, this.secondaryLabel, this.tooltip, this.focusNode, this.child, this.onPressed,
   }) : variant = EvButtonVariant.ghost, progress = null;
 
   final EvButtonVariant variant;
@@ -118,6 +118,7 @@ class EvButton extends StatefulWidget {
   final EvIconData? icon;
   final String? label, secondaryLabel, tooltip;
   final double? progress;
+  final FocusNode? focusNode;
   final Widget? child;
   final VoidCallback? onPressed;
 
@@ -126,9 +127,26 @@ class EvButton extends StatefulWidget {
 }
 
 class _EvButtonState extends State<EvButton> {
+  FocusNode? _ownedFocusNode;
   bool _hovered = false, _focused = false, _pressed = false;
   bool get _enabled => widget.onPressed != null;
   bool get _highlighted => _hovered || _focused;
+  FocusNode get _focusNode => widget.focusNode ?? (_ownedFocusNode ??= FocusNode(debugLabel: 'ev_button'));
+
+  @override
+  void didUpdateWidget(EvButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusNode == null && widget.focusNode != null) {
+      _ownedFocusNode?.dispose();
+      _ownedFocusNode = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _ownedFocusNode?.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -225,6 +243,7 @@ class _EvButtonState extends State<EvButton> {
           );
 
     Widget button = Focus(
+      focusNode: _focusNode,
       canRequestFocus: _enabled,
       onFocusChange: (v) => setState(() => _focused = v),
       onKeyEvent: (_, event) {
@@ -241,7 +260,12 @@ class _EvButtonState extends State<EvButton> {
           onTapDown: _enabled ? (_) => setState(() => _pressed = true) : null,
           onTapUp: _enabled ? (_) => setState(() => _pressed = false) : null,
           onTapCancel: _enabled ? () => setState(() => _pressed = false) : null,
-          onTap: widget.onPressed,
+          onTap: _enabled
+              ? () {
+                  if (_focusNode.canRequestFocus) _focusNode.requestFocus();
+                  widget.onPressed?.call();
+                }
+              : null,
           child: AnimatedScale(
             scale: !_enabled ? 1.0 : _pressed ? 0.96 : _highlighted ? 1.04 : 1.0,
             duration: EvDurations.normal, curve: EvCurves.spring,

@@ -17,6 +17,7 @@ class EvPlayerScrubBar extends StatefulWidget {
   const EvPlayerScrubBar({
     super.key, required this.position, required this.duration, required this.bufferedUntil,
     this.chapters = const [], this.aiRun, this.flashAuroraTip = false,
+    this.visible = true, this.generation = 0,
     this.onThumbnailAt, required this.onSeek, this.onHoverChanged, this.onScrubbingChanged,
     this.forcedHoverFraction, this.clock = DateTime.now,
   });
@@ -25,7 +26,8 @@ class EvPlayerScrubBar extends StatefulWidget {
   final Duration? duration;
   final List<ChapterMark> chapters;
   final AiRun? aiRun;
-  final bool flashAuroraTip;
+  final bool flashAuroraTip, visible;
+  final int generation;
   final Future<ThumbnailFrame?> Function(Duration position)? onThumbnailAt;
   final ValueChanged<Duration> onSeek;
   final ValueChanged<bool>? onHoverChanged, onScrubbingChanged;
@@ -56,7 +58,7 @@ class EvPlayerScrubBar extends StatefulWidget {
 class _EvPlayerScrubBarState extends State<EvPlayerScrubBar> with SingleTickerProviderStateMixin {
   late final AnimationController _auroraCtrl;
   bool _hovered = false, _scrubbing = false;
-  double? _hoverFrac, _scrubFrac;
+  double? _hoverFrac, _scrubFrac, _lastHoverFrac;
   Timer? _debounce;
   int _reqId = 0;
   ThumbnailFrame? _thumb;
@@ -66,28 +68,47 @@ class _EvPlayerScrubBarState extends State<EvPlayerScrubBar> with SingleTickerPr
     final s = widget.aiRun?.state;
     return _hasDur && (s == AiRunState.generating || s == AiRunState.catchingUp || s == AiRunState.completed);
   }
+  bool get _auroraAnimating {
+    final s = widget.aiRun?.state;
+    return widget.visible && _hasDur && (s == AiRunState.generating || s == AiRunState.catchingUp);
+  }
 
   @override
   void initState() {
     super.initState();
     _auroraCtrl = AnimationController(vsync: this, duration: const Duration(seconds: 3));
     _syncAurora();
-    if (widget.forcedHoverFraction != null && _hasDur) _requestThumb(widget.forcedHoverFraction!, immediate: true);
+    if (widget.forcedHoverFraction != null && _hasDur) {
+      _lastHoverFrac = widget.forcedHoverFraction!.clamp(0.0, 1.0);
+      _requestThumb(widget.forcedHoverFraction!, immediate: true);
+    }
   }
 
   @override
   void didUpdateWidget(EvPlayerScrubBar old) {
     super.didUpdateWidget(old);
+    final genChanged = old.generation != widget.generation;
+    if (genChanged || old.duration != widget.duration) {
+      _debounce?.cancel();
+      _debounce = null;
+      _reqId++;
+      _thumb = null;
+      if (genChanged) {
+        _scrubbing = false;
+        _scrubFrac = null;
+        _lastHoverFrac = null;
+      }
+    }
     _syncAurora();
-    if (old.duration != widget.duration) _thumb = null;
     if (widget.forcedHoverFraction != null && _hasDur &&
-        (widget.forcedHoverFraction != old.forcedHoverFraction || widget.onThumbnailAt != old.onThumbnailAt)) {
+        (genChanged || widget.forcedHoverFraction != old.forcedHoverFraction || widget.onThumbnailAt != old.onThumbnailAt)) {
+      _lastHoverFrac = widget.forcedHoverFraction!.clamp(0.0, 1.0);
       _requestThumb(widget.forcedHoverFraction!, immediate: true);
     }
   }
 
   void _syncAurora() {
-    if (_auroraOn) {
+    if (_auroraAnimating) {
       if (!_auroraCtrl.isAnimating) _auroraCtrl.repeat();
     } else if (_auroraCtrl.isAnimating) {
       _auroraCtrl.stop();
@@ -122,13 +143,13 @@ class _EvPlayerScrubBarState extends State<EvPlayerScrubBar> with SingleTickerPr
     final f = _frac(dx, w);
     final moved = !_hovered || _hoverFrac == null || (_hoverFrac! - f).abs() > 0.002;
     if (!_hovered) { _hovered = true; widget.onHoverChanged?.call(true); }
-    if (moved) { setState(() => _hoverFrac = f); _requestThumb(f, immediate: _thumb == null); }
+    if (moved) { setState(() { _hoverFrac = f; _lastHoverFrac = f; }); _requestThumb(f, immediate: _thumb == null); }
   }
 
   void _onScrub(double dx, double w, {bool start = false}) {
     if (!_hasDur || (!start && !_scrubbing)) return;
     final f = _frac(dx, w);
-    setState(() { _scrubbing = true; _scrubFrac = f; });
+    setState(() { _scrubbing = true; _scrubFrac = f; _lastHoverFrac = f; });
     if (start) widget.onScrubbingChanged?.call(true);
     _requestThumb(f, immediate: start && _thumb == null);
   }
@@ -260,8 +281,9 @@ class _EvPlayerScrubBarState extends State<EvPlayerScrubBar> with SingleTickerPr
           builder: (_, c) {
             final w = c.maxWidth.isFinite ? c.maxWidth : 0.0, barTop = (trackH - barH) / 2;
             final pvW = math.min(scale.rem(15.0), w);
-            final pvPos = hover != null ? _posFor(hover) : Duration.zero;
-            final pvLeft = hover != null ? (hover * w - pvW / 2).clamp(0.0, math.max(0.0, w - pvW)).toDouble() : 0.0;
+            final displayHover = hover ?? _lastHoverFrac;
+            final pvPos = displayHover != null ? _posFor(displayHover) : Duration.zero;
+            final pvLeft = displayHover != null ? (displayHover * w - pvW / 2).clamp(0.0, math.max(0.0, w - pvW)).toDouble() : 0.0;
             final anchor = segs.isNotEmpty
                 ? segs.last.$2
                 : (widget.aiRun?.coverageEnd != null && hasDur
@@ -325,17 +347,27 @@ class _EvPlayerScrubBarState extends State<EvPlayerScrubBar> with SingleTickerPr
                     ),
                   ),
                 ),
-                if (tip != null && (expanded || widget.flashAuroraTip))
+                if (tip != null)
                   Positioned(
                     bottom: trackH - barTop + 6 + scale.rem(0.875), left: 0, right: 0,
                     child: IgnorePointer(
-                      child: Align(alignment: Alignment((anchor * 2 - 1).clamp(-1.0, 1.0), 1.0), child: _tipPill(theme, scale, tip)),
+                      child: AnimatedOpacity(
+                        opacity: (expanded || widget.flashAuroraTip) ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 250), curve: EvCurves.soft,
+                        child: Align(alignment: Alignment((anchor * 2 - 1).clamp(-1.0, 1.0), 1.0), child: _tipPill(theme, scale, tip)),
+                      ),
                     ),
                   ),
-                if (hover != null && hasDur && pvW > 0)
+                if (displayHover != null && hasDur && pvW > 0)
                   Positioned(
                     key: const Key('ev_player_trick_preview'), left: pvLeft, bottom: scale.rem(2.25), width: pvW,
-                    child: IgnorePointer(child: _previewCard(theme, scale, pvPos, _chapterLabel(pvPos))),
+                    child: IgnorePointer(
+                      child: AnimatedOpacity(
+                        opacity: hover != null ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 200), curve: EvCurves.soft,
+                        child: _previewCard(theme, scale, pvPos, _chapterLabel(pvPos)),
+                      ),
+                    ),
                   ),
               ],
             );
@@ -376,8 +408,13 @@ class _ScrubTrackPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_ScrubTrackPainter o) =>
-      o.progress != progress || o.buffered != buffered || o.chapters.length != chapters.length;
+  bool shouldRepaint(_ScrubTrackPainter o) {
+    if (o.progress != progress || o.buffered != buffered || o.chapters.length != chapters.length) return true;
+    for (var i = 0; i < chapters.length; i++) {
+      if (o.chapters[i] != chapters[i]) return true;
+    }
+    return false;
+  }
 }
 
 class _AuroraPainter extends CustomPainter {
@@ -409,7 +446,11 @@ class _AuroraPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_AuroraPainter o) =>
-      o.phase != phase || o.isPaper != isPaper || o.segments.length != segments.length ||
-      List.generate(segments.length, (i) => o.segments[i] != segments[i]).any((v) => v);
+  bool shouldRepaint(_AuroraPainter o) {
+    if (o.phase != phase || o.isPaper != isPaper || o.segments.length != segments.length) return true;
+    for (var i = 0; i < segments.length; i++) {
+      if (o.segments[i] != segments[i]) return true;
+    }
+    return false;
+  }
 }

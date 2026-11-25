@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
+import 'package:moonfin/embyview/ui/player/controls/ev_player_format.dart';
 
 /// Darkened pause info overlay mirroring `.pausecard` and `.player.paused`.
 class EvPauseOverlay extends StatelessWidget {
@@ -17,18 +18,10 @@ class EvPauseOverlay extends StatelessWidget {
   final VoidCallback? onResume;
   final DateTime Function() clock;
 
-  static final _genericZhEp = RegExp(r'^第\s*\d+\s*集$');
-  static final _genericEnEp = RegExp(r'^Episode\b', caseSensitive: false);
-
   String? _resolveTitle(ArtworkRef? logo) {
-    final item = snapshot.item;
-    final epNum = item?.episodeNumber ?? snapshot.target.episodeNumber;
-    final raw = item?.title.trim() ?? '';
-    if (item?.kind == MediaKind.episode || epNum != null) {
-      if (epNum == null) return raw.isNotEmpty ? raw : null;
-      final distinct = raw.isNotEmpty && !_genericZhEp.hasMatch(raw) && !_genericEnEp.hasMatch(raw);
-      return distinct ? '第 $epNum 集 · $raw' : '第 $epNum 集';
-    }
+    final epTitle = evFormatPauseEpisodeTitle(snapshot.item, snapshot.target);
+    if (epTitle != null) return epTitle;
+    final raw = snapshot.item?.title.trim() ?? '';
     return logo == null && raw.isNotEmpty ? raw : null;
   }
 
@@ -36,10 +29,7 @@ class EvPauseOverlay extends StatelessWidget {
     final dur = snapshot.duration ?? snapshot.item?.duration;
     if (dur == null || dur <= Duration.zero) return null;
     final rem = dur > snapshot.position ? dur - snapshot.position : Duration.zero;
-    final end = clock().add(rem);
-    final hh = end.hour.toString().padLeft(2, '0');
-    final mm = end.minute.toString().padLeft(2, '0');
-    return '剩 ${(rem.inSeconds / 60).ceil()} 分钟 · $hh:$mm 结束';
+    return evFormatPauseRemainingLine(rem, clock());
   }
 
   @override

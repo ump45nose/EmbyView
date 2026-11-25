@@ -158,8 +158,8 @@ class _EvAnime4kCompareOverlayState extends State<EvAnime4kCompareOverlay> with 
                         scale: _pressed ? 0.95 : (_hovered ? 1.1 : 1.0), duration: const Duration(milliseconds: 300), curve: EvCurves.spring,
                         child: Container(
                           width: handleSz, height: handleSz,
-                          decoration: BoxDecoration(shape: BoxShape.circle, color: t.isPaper ? const Color(0xFFD97757) : const Color(0xFFF5F5F7), boxShadow: [BoxShadow(offset: Offset(0, s.rem(0.5)), blurRadius: s.rem(1.5), color: const Color.fromRGBO(0, 0, 0, 0.4))]),
-                          child: Center(child: EvIcon(EvIcons.cmp, size: s.rem(1.25), color: t.isPaper ? const Color(0xFF141413) : const Color(0xFF111111))),
+                          decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFFF5F5F7), boxShadow: [BoxShadow(offset: Offset(0, s.rem(0.5)), blurRadius: s.rem(1.5), color: const Color.fromRGBO(0, 0, 0, 0.4))]),
+                          child: Center(child: EvIcon(EvIcons.cmp, size: s.rem(1.25), color: const Color(0xFF111111))),
                         ),
                       ),
                     ),

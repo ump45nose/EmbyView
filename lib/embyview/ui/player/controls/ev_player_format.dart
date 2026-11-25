@@ -53,6 +53,23 @@ String evPlayerTechSummary(MediaQuality? quality) {
   return parts.join(' · ');
 }
 
+/// Returns `true` when [title] is a generic placeholder such as `第 9 集` or `Episode 9`.
+bool evIsGenericEpisodeTitle(String title) =>
+    _kGenericEpisodeTitleRe.hasMatch(title.trim());
+
+/// Formats a concise episode heading for pause overlays (`第 N 集 · 集名` or `第 N 集`),
+/// or returns `null` for non-episodes.
+String? evFormatPauseEpisodeTitle(MediaCard? item, PlayTarget target) {
+  final epNum = item?.episodeNumber ?? target.episodeNumber;
+  final raw = item?.title.trim() ?? '';
+  if (item?.kind == MediaKind.episode || epNum != null) {
+    if (epNum == null) return raw.isNotEmpty ? raw : null;
+    final distinct = raw.isNotEmpty && !evIsGenericEpisodeTitle(raw);
+    return distinct ? '第 $epNum 集 · $raw' : '第 $epNum 集';
+  }
+  return null;
+}
+
 /// Formats episode (`第 X 季 · 第 Y 集` + episode title) or movie (`年份` + `时长`) meta.
 ({String primary, String secondary}) evPlayerEpisodeMeta(
   MediaCard? item,
@@ -63,7 +80,7 @@ String evPlayerTechSummary(MediaQuality? quality) {
     final seasonNum = _parseSeasonNumber(item?.seasonId ?? target.seasonId);
     final primary = seasonNum != null ? '第 $seasonNum 季 · 第 $epNum 集' : '第 $epNum 集';
     final raw = item?.title.trim() ?? '';
-    final secondary = raw.isNotEmpty && !_kGenericEpisodeTitleRe.hasMatch(raw) ? raw : '';
+    final secondary = raw.isNotEmpty && !evIsGenericEpisodeTitle(raw) ? raw : '';
     return (primary: primary, secondary: secondary);
   }
   final primary = item?.year != null ? '${item!.year}' : '';

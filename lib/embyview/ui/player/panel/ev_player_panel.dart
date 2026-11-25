@@ -295,38 +295,44 @@ class _EvPlayerPanelState extends State<EvPlayerPanel> {
 
     return Positioned(
       top: s.rem(1.0), right: s.rem(1.0), bottom: s.rem(1.0), width: panelW,
-      child: IgnorePointer(
-        ignoring: !widget.open,
-        child: AnimatedContainer(
-          key: const Key('ev_player_panel'), duration: const Duration(milliseconds: 700), curve: EvCurves.spring, transformAlignment: Alignment.center,
-          transform: widget.open ? Matrix4.identity() : (Matrix4.translationValues(panelW + s.rem(2.0), 0, 0)..multiply(Matrix4.diagonal3Values(0.98, 0.98, 1.0))),
-          decoration: BoxDecoration(
-            borderRadius: radius,
-            boxShadow: [BoxShadow(offset: Offset(0, s.rem(pal.isPaper ? 0.5 : 1.0)), blurRadius: s.rem(pal.isPaper ? 2.0 : 3.0), color: Color.fromRGBO(0, 0, 0, pal.isPaper ? 0.25 : 0.40))],
-          ),
-          child: ClipRRect(
-            borderRadius: radius,
-            child: BackdropFilter(
-              filter: ui.ImageFilter.blur(sigmaX: pal.isPaper ? 30 : 40, sigmaY: pal.isPaper ? 30 : 40),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: pal.isPaper ? const Color.fromRGBO(250, 249, 245, 0.92) : const Color.fromRGBO(26, 26, 31, 0.74),
-                  borderRadius: radius,
-                  border: Border.all(color: pal.isPaper ? const Color.fromRGBO(20, 20, 19, 0.08) : const Color.fromRGBO(255, 255, 255, 0.07)),
-                ),
-                child: Stack(children: [
-                  if (!pal.isPaper)
-                    const Positioned(left: 1, right: 1, top: 0, height: 1, child: IgnorePointer(child: ColoredBox(color: Color.fromRGBO(255, 255, 255, 0.14)))),
-                  Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                    _header(t, s, pal),
-                    Expanded(
-                      child: ScrollConfiguration(
-                        behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-                        child: SingleChildScrollView(padding: EdgeInsets.fromLTRB(s.rem(1.125), s.rem(0.25), s.rem(1.125), s.rem(1.5)), child: body),
-                      ),
+      child: ExcludeFocus(
+        excluding: !widget.open,
+        child: IgnorePointer(
+          ignoring: !widget.open,
+          child: AnimatedContainer(
+            key: const Key('ev_player_panel'), duration: const Duration(milliseconds: 700), curve: EvCurves.spring, transformAlignment: Alignment.center,
+            transform: widget.open ? Matrix4.identity() : (Matrix4.translationValues(panelW + s.rem(2.0), 0, 0)..multiply(Matrix4.diagonal3Values(0.98, 0.98, 1.0))),
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              boxShadow: [BoxShadow(offset: Offset(0, s.rem(pal.isPaper ? 0.5 : 1.0)), blurRadius: s.rem(pal.isPaper ? 2.0 : 3.0), color: Color.fromRGBO(0, 0, 0, pal.isPaper ? 0.25 : 0.40))],
+            ),
+            child: TickerMode(
+              enabled: widget.open,
+              child: ClipRRect(
+                borderRadius: radius,
+                child: BackdropFilter(
+                  filter: ui.ImageFilter.blur(sigmaX: pal.isPaper ? 30 : 40, sigmaY: pal.isPaper ? 30 : 40),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: pal.isPaper ? const Color.fromRGBO(250, 249, 245, 0.92) : const Color.fromRGBO(26, 26, 31, 0.74),
+                      borderRadius: radius,
+                      border: Border.all(color: pal.isPaper ? const Color.fromRGBO(20, 20, 19, 0.08) : const Color.fromRGBO(255, 255, 255, 0.07)),
                     ),
-                  ]),
-                ]),
+                    child: Stack(children: [
+                      if (!pal.isPaper)
+                        const Positioned(left: 1, right: 1, top: 0, height: 1, child: IgnorePointer(child: ColoredBox(color: Color.fromRGBO(255, 255, 255, 0.14)))),
+                      Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        _header(t, s, pal),
+                        Expanded(
+                          child: ScrollConfiguration(
+                            behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+                            child: SingleChildScrollView(padding: EdgeInsets.fromLTRB(s.rem(1.125), s.rem(0.25), s.rem(1.125), s.rem(1.5)), child: body),
+                          ),
+                        ),
+                      ]),
+                    ]),
+                  ),
+                ),
               ),
             ),
           ),

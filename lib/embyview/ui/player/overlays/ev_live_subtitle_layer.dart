@@ -8,14 +8,13 @@ const _kWhite = Color(0xFFFFFFFF);
 /// while [AiRun] is in `generating` or `catchingUp` state (`.sub` in `proto.css`).
 class EvLiveSubtitleLayer extends StatelessWidget {
   const EvLiveSubtitleLayer({
-    super.key, required this.snapshot, this.subtitleSnapshot, this.aiRun,
+    super.key, required this.snapshot, this.subtitleSnapshot,
     required this.controlsVisible, required this.panelOpen,
     this.scrubHovering = false, this.paused = false, this.creditsActive = false,
   });
 
   final PlaybackSnapshot snapshot;
   final SubtitleSnapshot? subtitleSnapshot;
-  final AiRun? aiRun;
   final bool controlsVisible, panelOpen, scrubHovering, paused, creditsActive;
 
   /// Resolves the active cue matching [position], or `null` when none matches.
@@ -27,7 +26,7 @@ class EvLiveSubtitleLayer extends StatelessWidget {
   }
 
   bool _shouldRenderAiTrack() {
-    final run = aiRun ?? subtitleSnapshot?.ai;
+    final run = subtitleSnapshot?.ai;
     if (run == null || (run.state != AiRunState.generating && run.state != AiRunState.catchingUp)) return false;
     final selId = snapshot.selectedSubtitleId ?? subtitleSnapshot?.selectedTrackId;
     if (selId != null) {
@@ -46,7 +45,7 @@ class EvLiveSubtitleLayer extends StatelessWidget {
 
   SubtitleCue? _resolveCue() {
     if (!_shouldRenderAiTrack()) return null;
-    final run = aiRun ?? subtitleSnapshot?.ai;
+    final run = subtitleSnapshot?.ai;
     final cues = (run != null && run.cues.isNotEmpty) ? run.cues : (subtitleSnapshot?.cues ?? const <SubtitleCue>[]);
     return cues.isEmpty ? null : activeCueAt(cues, snapshot.position);
   }

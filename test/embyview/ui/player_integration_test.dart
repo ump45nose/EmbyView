@@ -1,18 +1,35 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/entry.dart';
+import 'package:moonfin/embyview/ui/detail/ev_detail_page.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
 import 'package:moonfin/embyview/ui/player/ev_player_page.dart';
 import 'package:moonfin/embyview/ui/player/overlays/ev_credits_overlay.dart';
 
+final Uint8List _kPngBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+);
+
+class _FakeArt implements ArtworkRef {
+  _FakeArt(this.id) : cacheKey = 'p5_$id', image = MemoryImage(_kPngBytes);
+  @override final String id, cacheKey;
+  @override final ImageProvider<Object> image;
+  @override double? get aspectRatio => 16 / 9;
+  @override int? get width => 1;
+  @override int? get height => 1;
+}
+
 class _TestSession implements PlaybackSession {
-  _TestSession(this._snapshot);
+  _TestSession(this._snapshot, {this.onThumbnail});
 
   PlaybackSnapshot _snapshot;
+  final Future<ThumbnailFrame?> Function(Duration position)? onThumbnail;
   final _ctrl = StreamController<PlaybackSnapshot>.broadcast();
 
   final List<Duration> seekByCalls = [];
@@ -48,7 +65,7 @@ class _TestSession implements PlaybackSession {
   @override Future<void> setFullscreen(bool enabled) async { fullscreenCalls.add(enabled); emit(_copy(fullscreen: enabled)); }
   @override Future<void> playNext({bool finishCurrent = false}) async => playNextFinish.add(finishCurrent);
   @override Future<void> dismissCreditsPrompt() async { dismissCreditsCalls++; emit(_copy(creditsPrompt: CreditsPromptState.dismissed)); }
-  @override Future<ThumbnailFrame?> thumbnailAt(Duration position) async => null;
+  @override Future<ThumbnailFrame?> thumbnailAt(Duration position) async => onThumbnail != null ? onThumbnail!(position) : null;
   @override Future<void> close() async { closeCalls++; await _ctrl.close(); }
 
   PlaybackSnapshot _copy({
@@ -99,8 +116,9 @@ class _TestPlayback implements EmbyViewPlayback {
 }
 
 class _TestSubtitlePanel implements SubtitlePanel {
-  _TestSubtitlePanel(this._snap);
+  _TestSubtitlePanel(this._snap, {this.onSearch});
   SubtitleSnapshot _snap;
+  final Future<List<SubtitleSearchGroup>> Function(String? text)? onSearch;
   final _ctrl = StreamController<SubtitleSnapshot>.broadcast();
   int closeCalls = 0;
 
@@ -108,7 +126,7 @@ class _TestSubtitlePanel implements SubtitlePanel {
   @override Stream<SubtitleSnapshot> get changes => _ctrl.stream;
   void emit(SubtitleSnapshot next) { _snap = next; _ctrl.add(next); }
 
-  @override Future<List<SubtitleSearchGroup>> search(String? text) async => const [];
+  @override Future<List<SubtitleSearchGroup>> search(String? text) async => onSearch != null ? onSearch!(text) : const [];
   @override Future<void> useCandidate(SubtitleCandidate candidate) async {}
   @override Future<void> startAi() async {}
   @override Future<void> cancelAi() async {}
@@ -119,12 +137,14 @@ class _TestSubtitlePanel implements SubtitlePanel {
 }
 
 class _TestSubtitles implements EmbyViewSubtitles {
-  _TestSubtitles(this.panel);
+  _TestSubtitles(this.panel, {this.onQuoteSeason});
   final _TestSubtitlePanel panel;
+  final Future<SeasonQuote> Function(String seriesId, String seasonId)? onQuoteSeason;
   int bindCalls = 0;
   @override SubtitlePanel bind(PlaybackSession session) { bindCalls++; return panel; }
   @override Future<SubtitleAvailability> availability(String itemId) async => const SubtitleAvailability();
-  @override Future<SeasonQuote> quoteSeason(String seriesId, String seasonId) async => throw UnimplementedError();
+  @override Future<SeasonQuote> quoteSeason(String seriesId, String seasonId) async =>
+      onQuoteSeason != null ? onQuoteSeason!(seriesId, seasonId) : throw UnimplementedError();
   @override Future<String> queueSeason(SeasonQuote quote) async => throw UnimplementedError();
   @override Future<AiUsage> usage() async => const AiUsage(month: '2026-11');
   @override Stream<List<SeasonJob>> get jobs => const Stream.empty();
@@ -132,14 +152,41 @@ class _TestSubtitles implements EmbyViewSubtitles {
 }
 
 class _StubPrefs implements EmbyViewPreferences {
-  @override LocalPreferences get current => const LocalPreferences();
+  _StubPrefs([this._current = const LocalPreferences()]);
+  final LocalPreferences _current;
+  @override LocalPreferences get current => _current;
   @override Stream<LocalPreferences> get changes => const Stream.empty();
   @override dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
 }
 
 class _StubAccounts implements EmbyViewAccounts {
-  @override AccountSnapshot get snapshot => const AccountSnapshot(phase: AccountPhase.signedIn);
+  @override AccountSnapshot get snapshot => const AccountSnapshot(
+    phase: AccountPhase.signedIn,
+    current: AccountProfile(id: 'alice', displayName: 'Alice'),
+    profiles: [AccountProfile(id: 'alice', displayName: 'Alice')],
+  );
   @override Stream<AccountSnapshot> get changes => const Stream.empty();
+  @override dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
+}
+
+class _StubDetailData implements EmbyViewData {
+  _StubDetailData(this.itemDetail);
+  final MediaDetail itemDetail;
+
+  @override Future<List<ZoneTile>> zones() async => const [];
+  @override Future<MediaDetail> detail(String itemId) async => itemDetail;
+  @override Future<List<PersonCredit>> people(String itemId) async => const [];
+  @override Future<List<MediaCard>> similar(String itemId, {int limit = 16}) async => const [];
+  @override Future<ThemeMedia> themeMedia(String itemId) async => const ThemeMedia();
+  @override Future<MediaQuality?> quality(String itemId) async => itemDetail.card.quality;
+  @override Future<List<SeasonSummary>> seasons(String seriesId) async => const [];
+  @override Future<List<SafeEpisodeStill>> safeEpisodeStills(String seriesId) async => const [];
+  @override Future<SeasonEpisodes> episodes(String seriesId, String seasonId) async => const SeasonEpisodes(
+    season: SeasonSummary(id: 'sea1', number: 1, name: '第 1 季', total: 0),
+    episodes: [],
+    playedCount: 0,
+  );
+  @override Future<void> setFavorite(String itemId, bool favorite) async {}
   @override dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
 }
 
@@ -343,4 +390,291 @@ void main() {
     expect(subPanel.closeCalls, 1);
     expect(playBtnFocus.hasFocus, isTrue);
   });
+
+  testWidgets('P0 regression: buildStageFourTestShell detail mouse click inherits paper theme & subtitles in root Navigator and restores play button focus on Esc', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final bg = _FakeArt('detail_bg');
+    final movieCard = MediaCard(
+      id: 'm1', kind: MediaKind.movie, title: '纸面影院测试片', year: 2026,
+      duration: const Duration(minutes: 120), overview: '测试从详情页点击播放按钮进入播放器。',
+      quality: const MediaQuality(origin: MediaOrigin.nasLocal, resolution: '4K'),
+      art: CardArtwork(
+        stage: ArtworkPlan(layers: [ArtworkLayer(source: bg, fit: ArtworkFit.cover)], fallbackTitle: '纸面影院测试片'),
+        backdrops: [bg],
+      ),
+    );
+    final detail = MediaDetail(card: movieCard, playTarget: const PlayTarget(itemId: 'm1'));
+    final session = _TestSession(_initialSnap()._withPhase(PlaybackPhase.playing));
+    final subPanel = _TestSubtitlePanel(const SubtitleSnapshot(generation: 1, cues: null));
+    final subtitles = _TestSubtitles(subPanel);
+    final services = EmbyViewServices(
+      sessionId: 'sess-p0-paper',
+      preferences: _StubPrefs(const LocalPreferences(theme: ThemeMode.paper, detailTrailerDelay: null, themeMusic: false)),
+      accounts: _StubAccounts(),
+      data: _StubDetailData(detail),
+      playback: _TestPlayback(session),
+      subtitles: subtitles,
+    );
+
+    // Mount buildStageFourTestShell UNDER root Navigator (matching real app router topology).
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(size: Size(1440, 900), devicePixelRatio: 1.0),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Navigator(
+            onGenerateRoute: (_) => PageRouteBuilder<void>(
+              pageBuilder: (_, _, _) => buildStageFourTestShell(services: services, initialDetailId: 'm1'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byType(EvDetailPage), findsOneWidget);
+    expect(find.byKey(const Key('ev_detail_play_btn')), findsOneWidget);
+
+    // Ensure play button is NOT focused before mouse tap.
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump();
+    bool isPlayBtnFocused() {
+      final ctx = FocusManager.instance.primaryFocus?.context;
+      if (ctx == null) return false;
+      var matched = false;
+      if (ctx.widget.key == const Key('ev_detail_play_btn')) return true;
+      ctx.visitAncestorElements((el) {
+        if (el.widget.key == const Key('ev_detail_play_btn')) {
+          matched = true;
+          return false;
+        }
+        return true;
+      });
+      return matched;
+    }
+    expect(isPlayBtnFocused(), isFalse);
+
+    // Mouse tap directly on unfocused ev_detail_play_btn -> EvPlayer.open on root Navigator.
+    await tester.tap(find.byKey(const Key('ev_detail_play_btn')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 800));
+
+    expect(find.byType(EvPlayerPage), findsOneWidget);
+    expect(subtitles.bindCalls, 1);
+    final playerEl = tester.element(find.byType(EvPlayerPage));
+    expect(EvTheme.of(playerEl).isPaper, isTrue);
+
+    // Verify terracotta play button (paper theme) and full subtitle panel (AI card + online search).
+    final playBox = tester.widget<AnimatedContainer>(
+      find.descendant(of: find.byKey(const Key('ev_player_play_pause')), matching: find.byType(AnimatedContainer)),
+    );
+    expect((playBox.decoration as BoxDecoration).color, const Color(0xFFB5532F));
+
+    await tester.tap(find.byKey(const Key('ev_player_tab_subs')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 800));
+    expect(find.byKey(const Key('ev_ai_card')), findsOneWidget);
+    expect(find.byKey(const Key('ev_sub_online_search')), findsOneWidget);
+
+    // Esc closes panel, second Esc exits player -> focus returns precisely to ev_detail_play_btn.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.byType(EvPlayerPage), findsNothing);
+    expect(find.byType(EvDetailPage), findsOneWidget);
+    expect(isPlayBtnFocused(), isTrue);
+  });
+
+  testWidgets('P0/P1 regression: closing panel with mouse while search input focused immediately restores Space & Esc player shortcuts', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final session = _TestSession(_initialSnap()._withPhase(PlaybackPhase.playing));
+    final subPanel = _TestSubtitlePanel(const SubtitleSnapshot(generation: 1, cues: null));
+    final subtitles = _TestSubtitles(subPanel);
+    var closed = 0;
+
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(size: Size(1440, 900), devicePixelRatio: 1.0),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: EvThemeScope(
+            themeMode: ThemeMode.cinema,
+            child: EvPlayerPage(
+              session: session,
+              subtitles: subtitles,
+              initialPanelOpen: true,
+              initialPanelTab: 'subs',
+              onClose: () => closed++,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 800));
+
+    // Focus the search box inside the panel.
+    await tester.ensureVisible(find.byKey(const Key('ev_sub_search_input')));
+    await tester.tap(find.byKey(const Key('ev_sub_search_input')));
+    await tester.pump();
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'ev_sub_search_focus');
+
+    // Close panel via mouse click on ev_panel_close (not Esc).
+    await tester.tap(find.byKey(const Key('ev_panel_close')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 800));
+
+    // Space and Esc must work immediately on the main player.
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(session.pauseCalls, 1);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(closed, 1);
+  });
+
+  testWidgets('P1 regression: generation switch with same duration clears thumbnail, filters stale subtitle/AI snapshot, cancels in-flight requests, and triggers compare sweep when comparison becomes available', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final thumbCompleters = <Completer<ThumbnailFrame?>>[];
+    final searchCompleters = <Completer<List<SubtitleSearchGroup>>>[];
+    final quoteCompleters = <Completer<SeasonQuote>>[];
+
+    final session = _TestSession(
+      _initialSnap()._withPhase(PlaybackPhase.playing),
+      onThumbnail: (_) {
+        final c = Completer<ThumbnailFrame?>();
+        thumbCompleters.add(c);
+        return c.future;
+      },
+    );
+    const gen1Cue = SubtitleCue(
+      id: 'g1c1', start: Duration(minutes: 4), end: Duration(minutes: 6),
+      text: 'Old line', translation: '旧集对白不应残留',
+    );
+    final subPanel = _TestSubtitlePanel(
+      const SubtitleSnapshot(
+        generation: 1,
+        selectedTrackId: 'ai_1',
+        tracks: [SubtitleTrackState(trackId: 'ai_1', origin: SubtitleOrigin.ai, active: true)],
+        ai: AiRun(
+          generation: 1, state: AiRunState.generating, startedAt: Duration(minutes: 4),
+          coverageEnd: Duration(minutes: 10), cues: [gen1Cue],
+        ),
+        cues: null,
+      ),
+      onSearch: (_) {
+        final c = Completer<List<SubtitleSearchGroup>>();
+        searchCompleters.add(c);
+        return c.future;
+      },
+    );
+    final subtitles = _TestSubtitles(
+      subPanel,
+      onQuoteSeason: (_, _) {
+        final c = Completer<SeasonQuote>();
+        quoteCompleters.add(c);
+        return c.future;
+      },
+    );
+
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(size: Size(1440, 900), devicePixelRatio: 1.0),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: EvThemeScope(
+            themeMode: ThemeMode.cinema,
+            child: EvPlayerPage(session: session, subtitles: subtitles, initialPanelOpen: true),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    // Trigger scrub bar hover thumbnail and resolve it on gen 1.
+    final scrubRect = tester.getRect(find.byKey(const Key('ev_player_scrub_bar')));
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    await mouse.moveTo(Offset(scrubRect.left + scrubRect.width * 0.4, scrubRect.top + 8));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(thumbCompleters, isNotEmpty);
+    thumbCompleters.first.complete(ThumbnailFrame(image: _FakeArt('gen1_thumb'), position: const Duration(minutes: 9)));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('ev_trick_img_p5_gen1_thumb')), findsOneWidget);
+
+    // Start in-flight season quote on gen 1 (and auto-search is also pending on gen 1).
+    await tester.ensureVisible(find.byKey(const Key('ev_ai_season')));
+    await tester.tap(find.byKey(const Key('ev_ai_season')));
+    await tester.pump();
+    expect(quoteCompleters.length, 1);
+    expect(searchCompleters.length, 1);
+    expect(find.byKey(const Key('ev_player_aurora')), findsOneWidget);
+
+    // Advance to generation 2 with the EXACT SAME 24m duration (no gen-2 subtitle snapshot emitted yet).
+    session.emit(session._copy(generation: 2, phase: PlaybackPhase.playing));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+
+    // Gen-1 thumbnail cleared, gen-1 aurora & AI generating state filtered out, quoting indicator reset.
+    expect(find.byKey(const ValueKey('ev_trick_img_p5_gen1_thumb')), findsNothing);
+    expect(find.byKey(const Key('ev_player_aurora')), findsNothing);
+    expect(find.text('未开启'), findsOneWidget);
+    expect(find.text('正在估算整季费用…'), findsNothing);
+
+    // Completing stale gen-1 search & quoteSeason futures MUST NOT pollute gen-2 UI.
+    searchCompleters.first.complete(const [
+      SubtitleSearchGroup(
+        source: SubtitleSource.xunlei,
+        candidates: [SubtitleCandidate(id: 'stale1', source: SubtitleSource.xunlei, name: '旧集幽灵字幕')],
+      ),
+    ]);
+    quoteCompleters.first.complete(const SeasonQuote(
+      id: 'stale_q', seriesId: 's1', seasonId: 'sea1', seasonName: '旧季报价',
+      episodeIds: ['ep1'], completedCount: 0, pendingCount: 1, estimatedCostMicros: 100000, budget: BudgetState.available,
+    ));
+    await tester.pump();
+    expect(find.text('旧集幽灵字幕'), findsNothing);
+    expect(find.byKey(const Key('ev_ai_season_quote')), findsNothing);
+
+    // Anime4K active with unavailable comparison first, then comparison becomes available -> triggers auto-sweep once.
+    session.emit(session._copy(
+      generation: 2,
+      anime4k: const Anime4kSnapshot(supported: true, requested: true, state: Anime4kState.active, comparison: ComparisonState.unavailable),
+    ));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(tester.widget<IgnorePointer>(find.byKey(const Key('ev_anime4k_compare_overlay'))).ignoring, isTrue);
+
+    session.emit(session._copy(
+      generation: 2,
+      anime4k: const Anime4kSnapshot(supported: true, requested: true, state: Anime4kState.active, comparison: ComparisonState.available),
+    ));
+    await tester.pump(const Duration(milliseconds: 450));
+    expect(tester.widget<IgnorePointer>(find.byKey(const Key('ev_anime4k_compare_overlay'))).ignoring, isFalse);
+  });
+}
+
+extension on PlaybackSnapshot {
+  PlaybackSnapshot _withPhase(PlaybackPhase nextPhase) => PlaybackSnapshot(
+    generation: generation, target: target, item: item, phase: nextPhase,
+    firstFrameLatency: firstFrameLatency, position: position, duration: duration,
+    bufferedUntil: bufferedUntil, quality: quality, chapters: chapters,
+    audioTracks: audioTracks, subtitleTracks: subtitleTracks,
+    selectedAudioId: selectedAudioId, selectedSubtitleId: selectedSubtitleId,
+    volume: volume, muted: muted, nextEpisode: nextEpisode, creditsPrompt: creditsPrompt,
+    fullscreenSupported: fullscreenSupported, fullscreen: fullscreen,
+    pictureInPictureSupported: pictureInPictureSupported, pictureInPicture: pictureInPicture,
+    anime4k: anime4k,
+  );
 }

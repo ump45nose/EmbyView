@@ -192,7 +192,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('星际穿越'), findsOneWidget);
-      expect(find.text('剩 100 分钟 · 09:45 结束'), findsOneWidget);
+      expect(find.text('剩 100 分钟 · 9:45 结束'), findsOneWidget);
 
       // Movie with logo via art override -> logo shown, duplicate movie title omitted
       await tester.pumpWidget(

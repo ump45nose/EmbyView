@@ -33,7 +33,7 @@ class EvSubtitleTab extends StatefulWidget {
 }
 
 class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateMixin {
-  late final AnimationController _borderCtrl, _waveCtrl;
+  late final AnimationController _borderCtrl, _waveCtrl, _pulseCtrl;
   late final TextEditingController _searchCtrl;
   final _searchFocus = FocusNode(debugLabel: 'ev_sub_search_focus');
   final _dlgScroll = ScrollController();
@@ -44,7 +44,7 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
   bool _searching = false, _autoSearched = false, _quotingSeason = false, _queuingSeason = false;
   String? _searchError, _seasonError;
   SeasonQuote? _seasonQuote;
-  int _searchGen = -1, _searchToken = 0, _lastCueIdx = -1;
+  int _searchGen = -1, _searchToken = 0, _seasonToken = 0, _lastCueIdx = -1;
 
   bool get _hasCues => widget.subtitleSnapshot?.cues != null;
   String get _effectiveLowerTab => _hasCues ? _lowerTab : 'search';
@@ -59,6 +59,7 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     _lowerTab = widget.initialLowerTab == 'search' ? 'search' : 'dlg';
     _borderCtrl = AnimationController(vsync: this, duration: const Duration(seconds: 4));
     _waveCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 1100));
+    _pulseCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 1600));
     _searchCtrl = TextEditingController(text: _defaultQuery());
     _searchGen = widget.snapshot.generation;
     _syncAnimations();
@@ -70,11 +71,18 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     super.didUpdateWidget(old);
     if (widget.snapshot.generation != _searchGen) {
       _searchGen = widget.snapshot.generation;
+      _searchToken++;
+      _seasonToken++;
+      _quotingSeason = false;
+      _queuingSeason = false;
       _searchGroups = const []; _sourceFilter = null; _searching = false; _autoSearched = false;
       _searchError = null; _seasonQuote = null; _seasonError = null; _lastCueIdx = -1;
       _searchCtrl.text = _defaultQuery();
     }
-    if (widget.initialLowerTab != old.initialLowerTab && widget.initialLowerTab != null) _lowerTab = widget.initialLowerTab!;
+    if (widget.initialLowerTab != old.initialLowerTab && widget.initialLowerTab != null) {
+      _lowerTab = widget.initialLowerTab!;
+      if (_lowerTab == 'dlg') _lastCueIdx = -1;
+    }
     _syncAnimations();
     if (widget.subtitlePanel != null && _effectiveLowerTab == 'search' && !_autoSearched) _ensureAutoSearch();
   }
@@ -83,15 +91,18 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     if (_aiAnimating) {
       if (!_borderCtrl.isAnimating) _borderCtrl.repeat();
       if (!_waveCtrl.isAnimating) _waveCtrl.repeat(reverse: true);
+      if (!_pulseCtrl.isAnimating) _pulseCtrl.repeat();
     } else {
       if (_borderCtrl.isAnimating) _borderCtrl.stop();
       if (_waveCtrl.isAnimating) _waveCtrl.stop();
+      if (_pulseCtrl.isAnimating) _pulseCtrl.stop();
     }
   }
 
   @override
   void dispose() {
-    _borderCtrl.dispose(); _waveCtrl.dispose(); _searchCtrl.dispose(); _searchFocus.dispose(); _dlgScroll.dispose();
+    _borderCtrl.dispose(); _waveCtrl.dispose(); _pulseCtrl.dispose();
+    _searchCtrl.dispose(); _searchFocus.dispose(); _dlgScroll.dispose();
     super.dispose();
   }
 
@@ -150,19 +161,29 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     }
   }
 
+  Future<void> _runPanelAction(Future<void> Function() action, String fallbackError) async {
+    try {
+      await action();
+    } catch (e) {
+      if (!mounted) return;
+      widget.onToast?.call(e is EmbyViewFailure ? e.reason : fallbackError, icon: EvIcons.info);
+    }
+  }
+
   Future<void> _runSeasonAction({required bool confirm}) async {
     final subs = widget.subtitles;
     if (confirm) {
       final quote = _seasonQuote;
       if (subs == null || quote == null || _queuingSeason) return;
+      final token = ++_seasonToken, gen = widget.snapshot.generation;
       setState(() => _queuingSeason = true);
       try {
         await subs.queueSeason(quote);
-        if (!mounted) return;
+        if (!mounted || token != _seasonToken || widget.snapshot.generation != gen) return;
         setState(() { _queuingSeason = false; _seasonQuote = null; });
         widget.onToast?.call('已加入整季队列 · ${quote.seasonName}', icon: EvIcons.ok);
       } catch (e) {
-        if (!mounted) return;
+        if (!mounted || token != _seasonToken || widget.snapshot.generation != gen) return;
         final msg = e is EmbyViewFailure ? e.reason : '加入队列失败';
         setState(() { _queuingSeason = false; _seasonError = msg; });
         widget.onToast?.call(msg, icon: EvIcons.info);
@@ -175,17 +196,27 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
       widget.onToast?.call('仅剧集支持整季批量生成', icon: EvIcons.info);
       return;
     }
+    final token = ++_seasonToken, gen = widget.snapshot.generation;
     setState(() { _quotingSeason = true; _seasonError = null; });
     try {
       final quote = await subs.quoteSeason(seriesId!, seasonId!);
-      if (mounted) setState(() { _seasonQuote = quote; _quotingSeason = false; });
+      if (!mounted || token != _seasonToken || widget.snapshot.generation != gen) return;
+      setState(() { _seasonQuote = quote; _quotingSeason = false; });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || token != _seasonToken || widget.snapshot.generation != gen) return;
       final msg = e is EmbyViewFailure ? e.reason : '获取整季估算失败';
       setState(() { _quotingSeason = false; _seasonError = msg; });
       widget.onToast?.call(msg, icon: EvIcons.info);
     }
   }
+
+  static PlaybackTrackSource _trackSourceFromOrigin(SubtitleOrigin origin) => switch (origin) {
+    SubtitleOrigin.embedded => PlaybackTrackSource.embedded,
+    SubtitleOrigin.embyExternal => PlaybackTrackSource.embyExternal,
+    SubtitleOrigin.nas => PlaybackTrackSource.nas,
+    SubtitleOrigin.online => PlaybackTrackSource.online,
+    SubtitleOrigin.ai => PlaybackTrackSource.ai,
+  };
 
   static String _saveLabel(SubtitleSaveState s) => const {SubtitleSaveState.saved: '已存 NAS', SubtitleSaveState.saving: '保存中…', SubtitleSaveState.failed: '保存失败'}[s] ?? '';
   static String _indexLabel(SubtitleIndexState s) => const {SubtitleIndexState.recognized: 'Emby 已识别', SubtitleIndexState.unrecognized: 'Emby 未识别', SubtitleIndexState.checking: 'Emby 识别中…'}[s] ?? '';
@@ -198,7 +229,11 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
   }
 
   Widget _retryChip(EvTheme t, EvScale s, EvPanelPalette pal, Key key, String trackId) => evPanelTap(
-    key: key, onTap: () => unawaited(widget.subtitlePanel?.retrySave(trackId)),
+    key: key,
+    onTap: () {
+      final panel = widget.subtitlePanel;
+      if (panel != null) unawaited(_runPanelAction(() => panel.retrySave(trackId), '重试保存失败'));
+    },
     child: Container(
       padding: EdgeInsets.symmetric(horizontal: s.rem(0.55), vertical: s.rem(0.2)),
       decoration: BoxDecoration(color: pal.isPaper ? const Color.fromRGBO(181, 83, 47, 0.14) : const Color.fromRGBO(255, 110, 110, 0.2), borderRadius: BorderRadius.circular(999)),
@@ -247,7 +282,7 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     for (final tr in widget.snapshot.subtitleTracks) { addTrack(tr.id, tr.name, tr.source, tr.language, tr.format, stateById[tr.id]); }
     for (final st in widget.subtitleSnapshot?.tracks ?? const <SubtitleTrackState>[]) {
       if (seen.contains(st.trackId)) continue;
-      final src = PlaybackTrackSource.values[st.origin.index];
+      final src = _trackSourceFromOrigin(st.origin);
       addTrack(st.trackId, st.origin == SubtitleOrigin.ai ? '简体中文 · AI 生成' : '外挂字幕', src, 'zh', null, st);
     }
 
@@ -275,7 +310,7 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     };
 
     final posF = durMs > 0 ? (pos.inMilliseconds / durMs).clamp(0.0, 1.0) : 0.0;
-    final genF = durMs > 0 && ai?.coverageEnd != null ? (ai!.coverageEnd!.inMilliseconds / durMs).clamp(0.0, 1.0) : (state == AiRunState.preparing ? (posF + 0.02).clamp(0.0, 1.0) : posF);
+    final laneSegments = _computeLaneSegments(ai, durMs);
     final radius = s.rem(1.25);
 
     return AnimatedBuilder(
@@ -302,7 +337,7 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
             key: const Key('ev_ai_status_badge'), height: s.rem(1.625), padding: EdgeInsets.symmetric(horizontal: s.rem(0.625)),
             decoration: BoxDecoration(borderRadius: BorderRadius.circular(999), color: badgeOn ? (pal.isPaper ? const Color.fromRGBO(95, 115, 70, 0.16) : const Color.fromRGBO(95, 224, 192, 0.18)) : (pal.isPaper ? const Color(0xFFF0EEE6) : const Color.fromRGBO(255, 255, 255, 0.10))),
             child: Row(mainAxisSize: MainAxisSize.min, spacing: s.rem(0.375), children: [
-              if (pulse) Container(width: s.rem(0.45), height: s.rem(0.45), decoration: BoxDecoration(shape: BoxShape.circle, color: pal.isPaper ? _kTerracotta : const Color(0xFFB28CFF))),
+              if (pulse) _buildPulseDot(s, pal),
               Text(badge, style: t.bodyStyle(s.rem(0.8125), fontWeight: FontWeight.w600, color: badgeOn ? (pal.isPaper ? _kOlive : const Color(0xFF8FF0D2)) : (pal.isPaper ? const Color(0xFF66655F) : const Color.fromRGBO(255, 255, 255, 0.78))).copyWith(fontFeatures: _kTabular)),
             ]),
           ),
@@ -311,26 +346,44 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
           SizedBox(height: s.rem(0.75)),
           Text('把外语对白听写成文字，再译成简体中文。约 40 秒后开始出字，之后一直领先播放进度。', style: t.bodyStyle(s.rem(0.875), color: pal.isPaper ? pal.subInk : const Color.fromRGBO(255, 255, 255, 0.72), height: 1.55)),
           SizedBox(height: s.rem(1.0)),
-          EvPanelButton(key: const Key('ev_ai_start'), primary: true, icon: EvIcons.aisub, label: '开始生成', onPressed: () => unawaited(widget.subtitlePanel?.startAi())),
+          EvPanelButton(
+            key: const Key('ev_ai_start'), primary: true, icon: EvIcons.aisub, label: '开始生成',
+            onPressed: () {
+              final panel = widget.subtitlePanel;
+              if (panel != null) unawaited(_runPanelAction(panel.startAi, '启动 AI 字幕失败'));
+            },
+          ),
         ] else if (state == AiRunState.preparing || state == AiRunState.generating || state == AiRunState.catchingUp) ...[
           SizedBox(height: s.rem(1.0)),
           SizedBox(height: s.rem(2.25), child: AnimatedBuilder(animation: _waveCtrl, builder: (_, _) => Row(crossAxisAlignment: CrossAxisAlignment.center, spacing: 3, children: [
             for (var k = 0; k < 28; k++) Expanded(child: FractionallySizedBox(heightFactor: 0.2 + 0.8 * (0.5 + 0.5 * math.sin((_waveCtrl.value * 2 * math.pi) - k * 0.45)), child: DecoratedBox(decoration: BoxDecoration(borderRadius: BorderRadius.circular(2), color: pal.isPaper ? _kTerracotta : null, gradient: pal.isPaper ? null : const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xFFB9A0FF), Color(0xFF6FB8FF)]))))),
           ]))),
           SizedBox(height: s.rem(1.0)),
-          _buildLane(s, pal, posF, genF),
+          _buildLane(s, pal, posF, laneSegments),
           SizedBox(height: s.rem(0.5)),
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
             Text('播放到 ${evFormatPlayerTime(pos)}', style: t.bodyStyle(s.rem(0.8125), color: pal.subInk).copyWith(fontFeatures: _kTabular)),
             Text(state == AiRunState.preparing ? '约 40 秒后出字' : state == AiRunState.catchingUp ? '正在追赶进度' : '字幕已到 ${ai?.coverageEnd != null ? evFormatPlayerTime(ai!.coverageEnd!) : '--:--'}', style: t.bodyStyle(s.rem(0.8125), color: pal.subInk).copyWith(fontFeatures: _kTabular)),
           ]),
           SizedBox(height: s.rem(0.875)),
-          EvPanelButton(key: const Key('ev_ai_cancel'), label: '取消生成', onPressed: () => unawaited(widget.subtitlePanel?.cancelAi())),
+          EvPanelButton(
+            key: const Key('ev_ai_cancel'), label: '取消生成',
+            onPressed: () {
+              final panel = widget.subtitlePanel;
+              if (panel != null) unawaited(_runPanelAction(panel.cancelAi, '取消 AI 字幕失败'));
+            },
+          ),
         ] else if (state == AiRunState.failed) ...[
           SizedBox(height: s.rem(0.75)),
           Text(ai?.failure?.reason.trim().isNotEmpty == true ? ai!.failure!.reason : 'AI 字幕生成失败，请稍后重试。', style: t.bodyStyle(s.rem(0.875), color: pal.isPaper ? _kTerracottaDark : const Color(0xFFFFB4B4), height: 1.5)),
           SizedBox(height: s.rem(0.875)),
-          EvPanelButton(key: const Key('ev_ai_start'), primary: true, icon: EvIcons.aisub, label: '重新生成', onPressed: () => unawaited(widget.subtitlePanel?.startAi())),
+          EvPanelButton(
+            key: const Key('ev_ai_start'), primary: true, icon: EvIcons.aisub, label: '重新生成',
+            onPressed: () {
+              final panel = widget.subtitlePanel;
+              if (panel != null) unawaited(_runPanelAction(panel.startAi, '重新生成 AI 字幕失败'));
+            },
+          ),
         ] else if (state == AiRunState.completed) ...[
           SizedBox(height: s.rem(0.625)),
           Text(subline, style: t.bodyStyle(s.rem(0.875), color: pal.subInk)),
@@ -340,46 +393,82 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     );
   }
 
-  Widget _buildLane(EvScale s, EvPanelPalette pal, double posF, double genF) {
-    final h = s.rem(0.375), dot = s.rem(0.75);
-    return LayoutBuilder(builder: (_, c) => SizedBox(
-      height: dot,
-      child: Stack(clipBehavior: Clip.none, alignment: Alignment.centerLeft, children: [
-        Container(
-          height: h, width: c.maxWidth,
-          decoration: BoxDecoration(color: pal.isPaper ? const Color(0xFFE8E6DC) : const Color.fromRGBO(255, 255, 255, 0.10), borderRadius: BorderRadius.circular(3)),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: FractionallySizedBox(widthFactor: genF.clamp(0.0, 1.0), child: DecoratedBox(decoration: BoxDecoration(borderRadius: BorderRadius.circular(3), color: pal.isPaper ? _kTerracotta : null, gradient: pal.isPaper ? null : const LinearGradient(colors: [Color(0xFF9F7BFF), Color(0xFF5FE0C0)])))),
+  Widget _buildPulseDot(EvScale s, EvPanelPalette pal) {
+    final base = pal.isPaper ? _kTerracotta : const Color(0xFFB28CFF);
+    final sz = s.rem(0.5);
+    return AnimatedBuilder(
+      animation: _pulseCtrl,
+      builder: (_, _) {
+        final t = (_pulseCtrl.value / 0.7).clamp(0.0, 1.0);
+        final alpha = _pulseCtrl.value <= 0.7 ? 0.6 * (1.0 - t) : 0.0;
+        final spread = _pulseCtrl.value <= 0.7 ? t * s.rem(0.5) : 0.0;
+        return Container(
+          width: sz, height: sz,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle, color: base,
+            boxShadow: [BoxShadow(color: base.withValues(alpha: alpha), spreadRadius: spread)],
           ),
-        ),
-        Positioned(
-          left: (c.maxWidth * posF - dot / 2).clamp(0.0, math.max(0.0, c.maxWidth - dot)),
-          child: Container(width: dot, height: dot, decoration: BoxDecoration(shape: BoxShape.circle, color: pal.isPaper ? _kPaperInk : _kWhite, border: Border.all(color: pal.isPaper ? _kWhite : const Color.fromRGBO(0, 0, 0, 0.35), width: 2))),
-        ),
-      ]),
-    ));
+        );
+      },
+    );
+  }
+
+  static List<(double, double)> _computeLaneSegments(AiRun? ai, int durMs) {
+    if (ai == null || durMs <= 0) return const [];
+    if (ai.coverage.isNotEmpty) {
+      return [
+        for (final r in ai.coverage)
+          if (r.end > r.start)
+            ((r.start.inMilliseconds / durMs).clamp(0.0, 1.0), (r.end.inMilliseconds / durMs).clamp(0.0, 1.0)),
+      ];
+    }
+    final end = ai.coverageEnd;
+    if (end == null) return const [];
+    final startMs = (ai.coverageStart?.inMilliseconds ?? 0).clamp(0, durMs);
+    final endMs = end.inMilliseconds.clamp(0, durMs);
+    return endMs > startMs ? [(startMs / durMs, endMs / durMs)] : const [];
+  }
+
+  Widget _buildLane(EvScale s, EvPanelPalette pal, double posF, List<(double, double)> segments) {
+    final h = s.rem(0.375), dot = s.rem(0.75);
+    return LayoutBuilder(builder: (_, c) {
+      final w = c.maxWidth;
+      return SizedBox(
+        height: dot,
+        child: Stack(clipBehavior: Clip.none, alignment: Alignment.centerLeft, children: [
+          Container(
+            height: h, width: w,
+            decoration: BoxDecoration(color: pal.isPaper ? const Color(0xFFE8E6DC) : const Color.fromRGBO(255, 255, 255, 0.10), borderRadius: BorderRadius.circular(3)),
+          ),
+          for (final (segS, segE) in segments)
+            if (w > 0 && segE > segS)
+              Positioned(
+                left: w * segS,
+                width: math.min(w - w * segS, math.max(2.0, w * (segE - segS))),
+                top: (dot - h) / 2,
+                height: h,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(3),
+                    color: pal.isPaper ? _kTerracotta : null,
+                    gradient: pal.isPaper ? null : const LinearGradient(colors: [Color(0xFF9F7BFF), Color(0xFF5FE0C0)]),
+                  ),
+                ),
+              ),
+          Positioned(
+            left: (w * posF - dot / 2).clamp(0.0, math.max(0.0, w - dot)),
+            child: Container(width: dot, height: dot, decoration: BoxDecoration(shape: BoxShape.circle, color: pal.isPaper ? _kPaperInk : _kWhite, border: Border.all(color: pal.isPaper ? _kWhite : const Color.fromRGBO(0, 0, 0, 0.35), width: 2))),
+          ),
+        ]),
+      );
+    });
   }
 
   Widget _buildQuickActions(EvTheme t, EvScale s, EvPanelPalette pal) {
     final hasSeries = (widget.snapshot.item?.seriesId ?? widget.snapshot.target.seriesId)?.isNotEmpty == true;
     Widget tile(Key key, EvIconData icon, String title, String sub, VoidCallback onTap) => Expanded(
-      child: Semantics(
-        button: true, label: title,
-        child: evPanelTap(
-          key: key, onTap: onTap,
-          child: Container(
-            padding: EdgeInsets.fromLTRB(s.rem(0.5), s.rem(0.875), s.rem(0.5), s.rem(0.75)),
-            decoration: BoxDecoration(color: pal.isPaper ? const Color(0xFFF0EEE6) : const Color.fromRGBO(255, 255, 255, 0.06), borderRadius: BorderRadius.circular(s.rem(1.0))),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Container(width: s.rem(2.25), height: s.rem(2.25), padding: EdgeInsets.all(s.rem(0.4375)), decoration: BoxDecoration(color: pal.isPaper ? _kWhite : const Color.fromRGBO(255, 255, 255, 0.08), borderRadius: BorderRadius.circular(s.rem(0.75))), child: EvIcon(icon, size: s.rem(1.375), color: pal.ink)),
-              SizedBox(height: s.rem(0.5)),
-              Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.9375), fontWeight: FontWeight.w600, color: pal.ink)),
-              SizedBox(height: s.rem(0.2)),
-              Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: t.bodyStyle(s.rem(0.75), color: pal.subInk)),
-            ]),
-          ),
-        ),
+      child: _QuickActionTile(
+        key: key, icon: icon, title: title, subtitle: sub, pal: pal, onTap: onTap,
       ),
     );
 
@@ -426,7 +515,14 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
             for (final (id, label, icon, key) in const [('dlg', '对白', EvIcons.cc, Key('ev_sub_lower_dlg')), ('search', '在线搜索', EvIcons.search, Key('ev_sub_lower_search'))])
               Expanded(
                 child: evPanelTap(
-                  key: key, onTap: () { setState(() => _lowerTab = id); if (id == 'search') _ensureAutoSearch(); },
+                  key: key,
+                  onTap: () {
+                    setState(() {
+                      if (id == 'dlg' && _lowerTab != 'dlg') _lastCueIdx = -1;
+                      _lowerTab = id;
+                    });
+                    if (id == 'search') _ensureAutoSearch();
+                  },
                   child: Container(
                     height: s.rem(2.125),
                     decoration: BoxDecoration(color: tab == id ? pal.segActiveBg : const Color(0x00000000), borderRadius: BorderRadius.circular(s.rem(0.55))),
@@ -466,29 +562,37 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
       Container(
         key: const Key('ev_sub_dialogue_list'), height: s.rem(19.0), padding: EdgeInsets.all(s.rem(0.375)),
         decoration: BoxDecoration(color: pal.isPaper ? _kWhite : const Color.fromRGBO(255, 255, 255, 0.04), borderRadius: BorderRadius.circular(s.rem(1.0)), border: pal.isPaper ? Border.all(color: const Color(0xFFE8E6DC)) : null),
-        child: ScrollConfiguration(
-          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-          child: ListView.builder(
-            controller: _dlgScroll, itemCount: window.length,
-            itemBuilder: (_, i) {
-              final cue = window[i], isOn = i == localCur;
-              final line = cue.translation?.trim().isNotEmpty == true ? cue.translation!.trim() : cue.text.trim();
-              final tCol = isOn ? (pal.isPaper ? _kTerracottaDark : const Color.fromRGBO(255, 255, 255, 0.85)) : (pal.isPaper ? const Color(0xFF87867F) : const Color.fromRGBO(255, 255, 255, 0.4));
-              final xCol = isOn ? pal.ink : (pal.isPaper ? const Color(0xFF87867F) : const Color.fromRGBO(255, 255, 255, 0.55));
-              return evPanelTap(
-                key: Key('ev_dlg_cue_${cue.id}'),
-                onTap: () { widget.onSeek(cue.start); widget.onToast?.call('跳到 ${evFormatPlayerTime(cue.start)} · $line', icon: EvIcons.back10); },
-                child: Container(
-                  padding: EdgeInsets.symmetric(horizontal: s.rem(0.75), vertical: s.rem(0.5)),
-                  decoration: BoxDecoration(color: isOn ? pal.rowSelected : const Color(0x00000000), borderRadius: BorderRadius.circular(s.rem(0.75))),
-                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    SizedBox(width: s.rem(3.25), child: Text(evFormatPlayerTime(cue.start), style: t.bodyStyle(s.rem(0.8125), color: tCol).copyWith(fontFeatures: _kTabular))),
-                    SizedBox(width: s.rem(0.5)),
-                    Expanded(child: Text(line, maxLines: 2, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.9375), fontWeight: isOn ? FontWeight.w600 : FontWeight.w400, color: xCol, height: 1.45))),
-                  ]),
-                ),
-              );
-            },
+        child: ShaderMask(
+          blendMode: BlendMode.dstIn,
+          shaderCallback: (bounds) => const LinearGradient(
+            begin: Alignment.topCenter, end: Alignment.bottomCenter,
+            stops: [0.0, 0.18, 0.82, 1.0],
+            colors: [Color(0x00000000), Color(0xFF000000), Color(0xFF000000), Color(0x00000000)],
+          ).createShader(bounds),
+          child: ScrollConfiguration(
+            behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+            child: ListView.builder(
+              controller: _dlgScroll, itemCount: window.length,
+              itemBuilder: (_, i) {
+                final cue = window[i], isOn = i == localCur;
+                final line = cue.translation?.trim().isNotEmpty == true ? cue.translation!.trim() : cue.text.trim();
+                final tCol = isOn ? (pal.isPaper ? _kTerracottaDark : const Color.fromRGBO(255, 255, 255, 0.85)) : (pal.isPaper ? const Color(0xFF87867F) : const Color.fromRGBO(255, 255, 255, 0.4));
+                final xCol = isOn ? pal.ink : (pal.isPaper ? const Color(0xFF87867F) : const Color.fromRGBO(255, 255, 255, 0.55));
+                return evPanelTap(
+                  key: Key('ev_dlg_cue_${cue.id}'),
+                  onTap: () { widget.onSeek(cue.start); widget.onToast?.call('跳到 ${evFormatPlayerTime(cue.start)} · $line', icon: EvIcons.back10); },
+                  child: Container(
+                    padding: EdgeInsets.symmetric(horizontal: s.rem(0.75), vertical: s.rem(0.5)),
+                    decoration: BoxDecoration(color: isOn ? pal.rowSelected : const Color(0x00000000), borderRadius: BorderRadius.circular(s.rem(0.75))),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      SizedBox(width: s.rem(3.25), child: Text(evFormatPlayerTime(cue.start), style: t.bodyStyle(s.rem(0.8125), color: tCol).copyWith(fontFeatures: _kTabular))),
+                      SizedBox(width: s.rem(0.5)),
+                      Expanded(child: Text(line, maxLines: 2, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.9375), fontWeight: isOn ? FontWeight.w600 : FontWeight.w400, color: xCol, height: 1.45))),
+                    ]),
+                  ),
+                );
+              },
+            ),
           ),
         ),
       ),
@@ -564,34 +668,20 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     final isUsed = st != null && (st.active || st.trackId == widget.snapshot.selectedSubtitleId);
     final saveText = st != null ? _saveLabel(st.save) : '';
     final sub = [srcName, if (cand.language?.trim().isNotEmpty == true) cand.language!.trim(), if (cand.format?.trim().isNotEmpty == true) cand.format!.trim(), if (cand.releaseGroup?.trim().isNotEmpty == true) cand.releaseGroup!.trim(), if (saveText.isNotEmpty) saveText].join(' · ');
-    return Padding(
-      padding: EdgeInsets.symmetric(vertical: s.rem(0.375), horizontal: s.rem(0.25)),
-      child: Row(children: [
-        Container(width: s.rem(2.25), height: s.rem(2.25), alignment: Alignment.center, decoration: BoxDecoration(shape: BoxShape.circle, color: pal.isPaper ? pBg : bg), child: Text(letter, style: t.bodyStyle(s.rem(0.875), fontWeight: FontWeight.w700, color: pal.isPaper ? pFg : fg))),
-        SizedBox(width: s.rem(0.75)),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(cand.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.9375), fontWeight: FontWeight.w500, color: pal.ink)),
-            SizedBox(height: s.rem(0.15)),
-            Row(children: [
-              Flexible(child: Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.8125), color: pal.subInk))),
-              if (st?.save == SubtitleSaveState.failed) ...[SizedBox(width: s.rem(0.375)), _retryChip(t, s, pal, Key('ev_sub_cand_retry_${cand.id}'), st!.trackId)],
-            ]),
-          ]),
-        ),
-        SizedBox(width: s.rem(0.5)),
-        evPanelTap(
-          key: Key('ev_sub_use_${cand.id}'), onTap: () => unawaited(widget.subtitlePanel?.useCandidate(cand)),
-          child: Container(
-            height: s.rem(2.125), padding: EdgeInsets.symmetric(horizontal: s.rem(0.875)),
-            decoration: BoxDecoration(borderRadius: BorderRadius.circular(999), color: isUsed ? (pal.isPaper ? _kOlive : const Color(0xFF34C759)) : (pal.isPaper ? const Color(0xFFF0EEE6) : const Color.fromRGBO(255, 255, 255, 0.12))),
-            child: Row(mainAxisSize: MainAxisSize.min, spacing: s.rem(0.25), children: [
-              if (isUsed) EvIcon(EvIcons.check, size: s.rem(0.9375), color: pal.isPaper ? _kWhite : const Color(0xFF06210F)),
-              Text(isUsed ? '使用中' : '使用', style: t.bodyStyle(s.rem(0.875), fontWeight: FontWeight.w600, color: isUsed ? (pal.isPaper ? _kWhite : const Color(0xFF06210F)) : pal.ink)),
-            ]),
-          ),
-        ),
-      ]),
+    return _CandidateHitRow(
+      pal: pal,
+      badgeBg: pal.isPaper ? pBg : bg,
+      badgeFg: pal.isPaper ? pFg : fg,
+      letter: letter,
+      name: cand.name,
+      sub: sub,
+      isUsed: isUsed,
+      useKey: Key('ev_sub_use_${cand.id}'),
+      retryChip: st?.save == SubtitleSaveState.failed ? _retryChip(t, s, pal, Key('ev_sub_cand_retry_${cand.id}'), st!.trackId) : null,
+      onUse: () {
+        final panel = widget.subtitlePanel;
+        if (panel != null) unawaited(_runPanelAction(() => panel.useCandidate(cand), '应用字幕失败'));
+      },
     );
   }
 
@@ -611,6 +701,148 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
           _buildLowerSection(t, s, pal),
         ],
       ],
+    );
+  }
+}
+
+class _QuickActionTile extends StatefulWidget {
+  const _QuickActionTile({
+    super.key, required this.icon, required this.title, required this.subtitle,
+    required this.pal, required this.onTap,
+  });
+  final EvIconData icon;
+  final String title, subtitle;
+  final EvPanelPalette pal;
+  final VoidCallback onTap;
+  @override State<_QuickActionTile> createState() => _QuickActionTileState();
+}
+
+class _QuickActionTileState extends State<_QuickActionTile> {
+  bool _hov = false, _down = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context), pal = widget.pal;
+    final bg = _hov
+        ? (pal.isPaper ? const Color(0xFFE8E6DC) : const Color.fromRGBO(255, 255, 255, 0.11))
+        : (pal.isPaper ? const Color(0xFFF0EEE6) : const Color.fromRGBO(255, 255, 255, 0.06));
+    return Semantics(
+      button: true, label: widget.title,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hov = true),
+        onExit: (_) => setState(() { _hov = false; _down = false; }),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (_) => setState(() => _down = true),
+          onTapUp: (_) => setState(() => _down = false),
+          onTapCancel: () => setState(() => _down = false),
+          onTap: widget.onTap,
+          child: AnimatedScale(
+            scale: _down ? 0.95 : 1.0, duration: const Duration(milliseconds: 250), curve: EvCurves.spring,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200), curve: EvCurves.out,
+              transform: Matrix4.translationValues(0, _hov ? -2.0 : 0.0, 0),
+              padding: EdgeInsets.fromLTRB(s.rem(0.5), s.rem(0.875), s.rem(0.5), s.rem(0.75)),
+              decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(s.rem(1.0))),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Container(width: s.rem(2.25), height: s.rem(2.25), padding: EdgeInsets.all(s.rem(0.4375)), decoration: BoxDecoration(color: pal.isPaper ? _kWhite : const Color.fromRGBO(255, 255, 255, 0.08), borderRadius: BorderRadius.circular(s.rem(0.75))), child: EvIcon(widget.icon, size: s.rem(1.375), color: pal.ink)),
+                SizedBox(height: s.rem(0.5)),
+                Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.9375), fontWeight: FontWeight.w600, color: pal.ink)),
+                SizedBox(height: s.rem(0.2)),
+                Text(widget.subtitle, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: t.bodyStyle(s.rem(0.75), color: pal.subInk)),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CandidateHitRow extends StatefulWidget {
+  const _CandidateHitRow({
+    required this.pal, required this.badgeBg, required this.badgeFg,
+    required this.letter, required this.name, required this.sub,
+    required this.isUsed, required this.useKey, this.retryChip, required this.onUse,
+  });
+  final EvPanelPalette pal;
+  final Color badgeBg, badgeFg;
+  final String letter, name, sub;
+  final bool isUsed;
+  final Key useKey;
+  final Widget? retryChip;
+  final VoidCallback onUse;
+  @override State<_CandidateHitRow> createState() => _CandidateHitRowState();
+}
+
+class _CandidateHitRowState extends State<_CandidateHitRow> {
+  bool _rowHov = false, _useHov = false, _useDown = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context), pal = widget.pal;
+    final useBg = widget.isUsed
+        ? (pal.isPaper ? _kOlive : const Color(0xFF34C759))
+        : _useHov
+            ? (pal.isPaper ? _kPaperInk : const Color(0xFFF5F5F7))
+            : (pal.isPaper ? const Color(0xFFF0EEE6) : const Color.fromRGBO(255, 255, 255, 0.12));
+    final useFg = widget.isUsed
+        ? (pal.isPaper ? _kWhite : const Color(0xFF06210F))
+        : _useHov
+            ? (pal.isPaper ? const Color(0xFFFAF9F5) : const Color(0xFF111111))
+            : pal.ink;
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _rowHov = true),
+      onExit: (_) => setState(() => _rowHov = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: EdgeInsets.symmetric(vertical: s.rem(0.375), horizontal: s.rem(0.375)),
+        decoration: BoxDecoration(
+          color: _rowHov ? pal.rowHover : const Color(0x00000000),
+          borderRadius: BorderRadius.circular(s.rem(0.875)),
+        ),
+        child: Row(children: [
+          Container(width: s.rem(2.25), height: s.rem(2.25), alignment: Alignment.center, decoration: BoxDecoration(shape: BoxShape.circle, color: widget.badgeBg), child: Text(widget.letter, style: t.bodyStyle(s.rem(0.875), fontWeight: FontWeight.w700, color: widget.badgeFg))),
+          SizedBox(width: s.rem(0.75)),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(widget.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.9375), fontWeight: FontWeight.w500, color: pal.ink)),
+              SizedBox(height: s.rem(0.15)),
+              Row(children: [
+                Flexible(child: Text(widget.sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.8125), color: pal.subInk))),
+                if (widget.retryChip != null) ...[SizedBox(width: s.rem(0.375)), widget.retryChip!],
+              ]),
+            ]),
+          ),
+          SizedBox(width: s.rem(0.5)),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            onEnter: (_) => setState(() => _useHov = true),
+            onExit: (_) => setState(() { _useHov = false; _useDown = false; }),
+            child: GestureDetector(
+              key: widget.useKey, behavior: HitTestBehavior.opaque,
+              onTapDown: (_) => setState(() => _useDown = true),
+              onTapUp: (_) => setState(() => _useDown = false),
+              onTapCancel: () => setState(() => _useDown = false),
+              onTap: widget.onUse,
+              child: AnimatedScale(
+                scale: _useDown ? 0.92 : 1.0, duration: const Duration(milliseconds: 250), curve: EvCurves.spring,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 220),
+                  height: s.rem(2.125), padding: EdgeInsets.symmetric(horizontal: s.rem(0.875)),
+                  decoration: BoxDecoration(borderRadius: BorderRadius.circular(999), color: useBg),
+                  child: Row(mainAxisSize: MainAxisSize.min, spacing: s.rem(0.25), children: [
+                    if (widget.isUsed) EvIcon(EvIcons.check, size: s.rem(0.9375), color: useFg),
+                    Text(widget.isUsed ? '使用中' : '使用', style: t.bodyStyle(s.rem(0.875), fontWeight: FontWeight.w600, color: useFg)),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+        ]),
+      ),
     );
   }
 }

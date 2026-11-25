@@ -1,7 +1,6 @@
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
-import 'package:moonfin/embyview/ui/player/overlays/ev_anime4k_compare.dart';
 import 'package:moonfin/embyview/ui/player/panel/ev_player_panel.dart';
 
 /// Audio track selection tab inside [EvPlayerPanel].
@@ -85,9 +84,7 @@ class EvVideoTab extends StatelessWidget {
             a4k.reason?.trim().isNotEmpty == true);
     final reasonText = a4k.reason?.trim().isNotEmpty == true ? a4k.reason!.trim() : stateLabel(a4k.state);
     final inputText = _sizeText(a4k.originalSize, snapshot.quality?.resolution ?? snapshot.item?.quality?.resolution);
-    final outputText = a4k.state == Anime4kState.active
-        ? _sizeText(a4k.enhancedSize, evFormatVideoHeight(a4k.enhancedSize, fallback: '2160p'))
-        : _sizeText(a4k.enhancedSize, '—');
+    final outputText = _sizeText(a4k.enhancedSize, '—');
 
     Widget stat(String label, String val) => Expanded(
       child: Container(
