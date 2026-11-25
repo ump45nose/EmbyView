@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:playback_core/playback_core.dart';
@@ -6,16 +8,25 @@ import 'package:server_core/server_core.dart';
 import 'package:moonfin/playback/aether_backend.dart';
 import 'package:moonfin/embyview/contracts/media.dart';
 import 'package:moonfin/embyview/contracts/playback.dart';
+import 'package:moonfin/embyview/contracts/preferences.dart';
+import 'package:moonfin/embyview/contracts/subtitles.dart';
 import 'package:moonfin/embyview/playback/moonfin_playback.dart';
 import 'package:moonfin/embyview/playback/native_playback.dart';
 import 'package:moonfin/embyview/playback/playback_subtitle_input.dart';
 import 'package:moonfin/embyview/playback/source_resolution.dart';
+import 'package:moonfin/embyview/subtitles/ai/subtitle_ai.dart';
+import 'package:moonfin/embyview/subtitles/model/subtitle_document.dart';
+import 'package:moonfin/embyview/subtitles/sources/subtitle_sources.dart';
+import 'package:moonfin/embyview/subtitles/store/subtitle_store.dart';
+import 'package:moonfin/embyview/subtitles/subtitle_panel.dart';
 
 class _Backend extends PlayerBackend implements AetherBackend {
   final errors = StreamController<Map<String, dynamic>>.broadcast();
   final urls = <String>[];
   final starts = <Duration>[];
   bool failOpen = false, playing = false;
+  bool failDisableSubtitle = false, failSelectSubtitle = false;
+  Completer<void>? subtitleDisableGate, subtitleSelectGate;
   int asyncFailureOpens = 0;
   Duration at = Duration.zero;
   @override
@@ -32,23 +43,37 @@ class _Backend extends PlayerBackend implements AetherBackend {
     #isPlaying || #playWhenReady => playing,
     #isBuffering || #isSubtitleLoading => false,
     #playbackSpeed => 1.0,
-    #supportsRuntimeTrackSelection => true,
+    #supportsRuntimeTrackSelection || #canRenderBitmapSubtitles => true,
     #positionStream || #durationStream || #bufferStream => const Stream<Duration>.empty(),
-    #playingStream ||
-    #bufferingStream ||
-    #completedStream ||
-    #subtitleLoadingStream => const Stream<bool>.empty(),
+    #playingStream || #bufferingStream || #completedStream || #subtitleLoadingStream => const Stream<bool>.empty(),
     #remoteCommandStream => const Stream<Map<String, dynamic>>.empty(),
     #getDeviceProfile => <String, dynamic>{},
     #waitForTracksReady ||
+    #waitForEmbeddedSubtitleCount ||
+    #addExternalSubtitle ||
     #setAudioTrack ||
     #setSubtitleRendererMode ||
-    #setSubtitleTrack ||
     #setVolume ||
-    #disableSubtitleTrack ||
     #setRepeatMode => Future<void>.value(),
     _ => throw UnimplementedError('${call.memberName}'),
   };
+  @override
+  Future<void> disableSubtitleTrack() async {
+    await subtitleDisableGate?.future;
+    if (failDisableSubtitle) throw StateError('disable failed');
+  }
+
+  @override
+  Future<void> setSubtitleTrack(
+    int index, {
+    bool isBitmapSubtitle = false,
+    String? subtitleCodec,
+    bool isExternalSubtitle = false,
+    String? externalSubtitleUrl,
+  }) async {
+    await subtitleSelectGate?.future;
+    if (failSelectSubtitle) throw StateError('select failed');
+  }
   @override
   Future<void> play(dynamic item, {Duration startPosition = Duration.zero}) async {
     urls.add(item['url'] as String);
@@ -90,7 +115,8 @@ class _Native extends Fake implements EmbyViewNativePlayback {
   final events = StreamController<NativePlaybackSnapshot>.broadcast();
   int generation = 0;
   final animeOptions = <bool>[];
-  final externalLoads = <int>[];
+  final externalLoads = <(int, String, bool)>[];
+  Completer<void>? selecting, selectGate;
   @override
   Future<void> loadExternalSubtitle(
     String url, {
@@ -98,19 +124,20 @@ class _Native extends Fake implements EmbyViewNativePlayback {
     String? language,
     String? codec,
     int? sourceGeneration,
+    bool select = true,
   }) async {
     expect(sourceGeneration, generation);
-    externalLoads.add(sourceGeneration!);
+    externalLoads.add((sourceGeneration!, url, select));
+    if (select) {
+      if (selecting?.isCompleted == false) selecting!.complete();
+      await selectGate?.future;
+    }
   }
 
   @override
   Stream<NativePlaybackSnapshot> get changes => events.stream;
   @override
-  void configureNextSource({
-    required int sourceGeneration,
-    int? sessionCacheByteBudget,
-    bool anime4k = false,
-  }) {
+  void configureNextSource({required int sourceGeneration, int? sessionCacheByteBudget, bool anime4k = false}) {
     generation = sourceGeneration;
     animeOptions.add(anime4k);
   }
@@ -156,6 +183,7 @@ class _PlaybackApi extends Fake implements PlaybackApi {
   int? compensationStopNumber;
   String? Function()? currentUser;
   final stopUsers = <String?>[];
+  List<Map<String, dynamic>> subtitles = [];
   @override
   Future<Map<String, dynamic>> getPlaybackInfo(
     String itemId, {
@@ -175,6 +203,7 @@ class _PlaybackApi extends Fake implements PlaybackApi {
         'MediaStreams': [
           {'Type': 'Video', 'Index': 0, 'Width': 1920},
           {'Type': 'Audio', 'Index': 1, 'Language': 'jpn'},
+          ...subtitles,
         ],
       },
     ],
@@ -237,6 +266,260 @@ class _OriginalResolver extends MediaStreamResolver {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  for (final (autoSelect, indexed) in [(true, false), (false, false), (false, true)]) {
+    test('real playback registers all NAS sidecars, auto-select=$autoSelect, indexed=$indexed', () async {
+      final directory = await Directory.current.createTemp('.subtitle-playback-');
+      final first = '1\n00:00:01,000 --> 00:00:03,000\n第一条\n';
+      final second = first.replaceFirst('第一条', '第二条');
+      final firstFile = File('${directory.path}/movie.zh.srt');
+      final secondFile = File('${directory.path}/movie.zh-cn.srt');
+      await File('${directory.path}/movie.strm').writeAsString('https://example.test/movie');
+      await firstFile.writeAsString(first);
+      await secondFile.writeAsString(second);
+      final backend = _Backend();
+      final manager = PlaybackManager()..setBackend(backend);
+      final native = _Native(backend);
+      final client = _Client();
+      client.itemsApi.metadata['movie'] = {'Path': '/mnt/media/movie.strm'};
+      if (indexed) {
+        // Emby already indexes the first NAS file; keep its original ID
+        // rather than adding a second copy of the same subtitle.
+        client.playbackApi.subtitles.add({
+          'Type': 'Subtitle',
+          'Index': 3,
+          'Language': 'zho',
+          'Codec': 'srt',
+          'IsExternal': true,
+          'IsTextSubtitleStream': true,
+          'DeliveryUrl': '/Videos/movie/source/Subtitles/3/Stream.srt',
+          'Path': '/mnt/media/indexed-other-name.srt',
+        });
+      }
+      final adapter = MoonfinPlaybackAdapter(
+        manager: manager,
+        client: client,
+        native: native,
+        audioInput: _Audio(),
+        redirectCache: PlaybackRedirectCache(
+          request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.test/movie')),
+        ),
+      );
+      var session = adapter.open(const PlayTarget(itemId: 'movie'));
+      final store = SubtitleStore(
+        folderStatus: () async =>
+            MediaFolderStatus(state: MediaFolderState.authorized, localRoot: directory.path, writable: true),
+        localDirectory: () async => Directory('${directory.path}/cache'),
+      );
+      final sources = SubtitleSources(readSecret: (_) async => null);
+      BoundSubtitlePanel bind(PlaybackSession session) => BoundSubtitlePanel(
+        session: session,
+        input: session as PlaybackSubtitleInput,
+        store: store,
+        loadItem: (id, _) async => (
+          item: {'Name': id},
+          source: (session as PlaybackSubtitleInput).subtitleSource!,
+          streams: client.playbackApi.subtitles,
+          duration: session.snapshot.duration,
+          audioIndex: null,
+        ),
+        loadDocument: (_, _) async => SubtitleDocument.parse(utf8.encode(first), format: 'srt', language: 'zh'),
+        sources: sources,
+        processor: SubtitleAiProcessor(
+          readSecret: (_) async => null,
+          translationProvider: () => TranslationProvider.openAi,
+          meter: <T>(_, invoke) async => (await invoke()).value,
+        ),
+        preferences: () => LocalPreferences(autoSelectChineseSubtitle: autoSelect),
+        onClosed: () {},
+        boundaries: const Stream.empty(),
+      );
+      var panel = bind(session);
+      addTearDown(() async {
+        if (native.selectGate?.isCompleted == false) native.selectGate!.complete();
+        await panel.close();
+        sources.close();
+        await adapter.dispose();
+        await native.events.close();
+        manager.dispose();
+        await directory.delete(recursive: true);
+      });
+      await panel.changes
+          .firstWhere(
+            (state) =>
+                state.tracks.length == 2 &&
+                state.tracks.every((track) => track.save == SubtitleSaveState.saved) &&
+                (autoSelect ? state.selectedTrackId != null : true),
+          )
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => throw StateError(
+              'phase=${session.snapshot.phase}, failure=${session.snapshot.failure?.reason}, '
+              'tracks=${session.snapshot.subtitleTracks.map((t) => (t.id, t.name, t.source))}, '
+              'panel=${panel.snapshot.tracks.map((t) => (t.trackId, t.save, t.origin))}, '
+              'nativeLoads=${native.externalLoads}',
+            ),
+          );
+      final tracks = session.snapshot.subtitleTracks;
+      expect(tracks, hasLength(2));
+      expect(tracks.map((track) => track.id).toSet(), hasLength(2));
+      expect(panel.snapshot.tracks.map((track) => track.trackId), tracks.map((track) => track.id));
+      expect(native.externalLoads.where((call) => !call.$3), hasLength(indexed ? 1 : 2));
+      if (autoSelect) {
+        expect(panel.snapshot.tracks.where((track) => track.active), hasLength(1));
+        expect(native.externalLoads.where((call) => call.$3), hasLength(1));
+        final firstId = session.snapshot.selectedSubtitleId!;
+        final otherId = tracks.singleWhere((track) => track.id != firstId).id;
+        final firstCue = panel.snapshot.cues!.single.text;
+        expect(await File.fromUri(Uri.parse(native.externalLoads.last.$2)).readAsString(), contains(firstCue));
+        await session.selectSubtitle(otherId);
+        await pumpEventQueue();
+        expect(panel.snapshot.selectedTrackId, otherId);
+        expect(panel.snapshot.tracks.where((track) => track.active), hasLength(1));
+        expect(panel.snapshot.cues!.single.text, isNot(firstCue));
+        expect(
+          await File.fromUri(Uri.parse(native.externalLoads.last.$2)).readAsString(),
+          contains(panel.snapshot.cues!.single.text),
+        );
+        await session.selectSubtitle(firstId);
+        await pumpEventQueue();
+        expect(panel.snapshot.selectedTrackId, firstId);
+        expect(panel.snapshot.cues!.single.text, firstCue);
+        expect(await File.fromUri(Uri.parse(native.externalLoads.last.$2)).readAsString(), contains(firstCue));
+        final retained = tracks.singleWhere((track) => track.name == 'movie.zh.srt');
+        await session.selectSubtitle(retained.id);
+        final oldGeneration = session.snapshot.generation;
+        // Emby indexes an existing local sidecar between two resolutions.
+        client.playbackApi.subtitles.add({
+          'Type': 'Subtitle',
+          'Index': 3,
+          'Language': 'zho',
+          'Codec': 'srt',
+          'IsExternal': true,
+          'IsTextSubtitleStream': true,
+          'DeliveryUrl': '/Videos/movie/source/Subtitles/3/Stream.srt',
+          'Path': '/mnt/media/indexed-other-name.srt',
+        });
+        native.selecting = Completer<void>();
+        native.selectGate = Completer<void>();
+        backend.errors.add({'event': 'error', 'status': 403});
+        await native.selecting!.future.timeout(const Duration(seconds: 5));
+        expect(session.snapshot.generation, greaterThan(oldGeneration));
+        expect(session.snapshot.selectedSubtitleId, isNull, reason: 'native restoration has not succeeded yet');
+        if (panel.snapshot.tracks.length != 2) {
+          await panel.changes.firstWhere((state) => state.tracks.length == 2).timeout(const Duration(seconds: 5));
+        }
+        expect(panel.snapshot.selectedTrackId, isNull);
+        expect(session.snapshot.subtitleTracks, hasLength(2));
+        final indexedId = '${session.snapshot.generation}:3';
+        final reconciled = panel.changes.firstWhere((state) =>
+          state.tracks.length == 2 &&
+          state.tracks.every((track) => track.save == SubtitleSaveState.saved) &&
+          state.selectedTrackId == indexedId
+        );
+        native.selectGate!.complete();
+        await reconciled.timeout(const Duration(seconds: 5));
+        expect(session.snapshot.subtitleTracks.map((track) => track.source), [
+          PlaybackTrackSource.embyExternal, PlaybackTrackSource.nas,
+        ]);
+        expect(panel.snapshot.cues!.single.text, '第一条');
+        expect(panel.snapshot.tracks.where((track) => track.active).single.trackId, indexedId);
+        expect(session.snapshot.selectedSubtitleId, indexedId);
+        final other = session.snapshot.subtitleTracks.singleWhere((track) => track.id != indexedId).id;
+        await session.selectSubtitle(other);
+        await session.selectSubtitle(indexedId);
+        await pumpEventQueue();
+        expect(panel.snapshot.selectedTrackId, indexedId);
+        expect(await File.fromUri(Uri.parse(native.externalLoads.last.$2)).readAsString(), contains('第一条'));
+        client.playbackApi.subtitles.clear();
+        // Open the same episode again through the real adapter, not through
+        // a synthetic snapshot. The persisted files must all be listed anew.
+        await panel.close();
+        await session.close();
+        native.externalLoads.clear();
+        session = adapter.open(const PlayTarget(itemId: 'movie'));
+        panel = bind(session);
+        await panel.changes.firstWhere((state) =>
+          state.tracks.length == 2 &&
+          state.tracks.every((track) => track.save == SubtitleSaveState.saved) &&
+          state.selectedTrackId != null
+        ).timeout(const Duration(seconds: 5));
+        expect(session.snapshot.subtitleTracks.map((track) => track.id), isNot(contains(firstId)));
+        expect(panel.snapshot.tracks.where((track) => track.active), hasLength(1));
+        expect(native.externalLoads.where((call) => call.$3), hasLength(1));
+        await expectLater(session.selectSubtitle(firstId), throwsA(isA<Exception>()));
+      } else {
+        expect(native.externalLoads.where((call) => call.$3), isEmpty);
+        expect(tracks.where((track) => track.source == PlaybackTrackSource.embyExternal), hasLength(indexed ? 1 : 0));
+        expect(tracks.where((track) => track.source == PlaybackTrackSource.nas), hasLength(indexed ? 1 : 2));
+        if (!indexed) expect(panel.snapshot.selectedTrackId, isNull);
+        final nas = tracks.singleWhere((track) => track.name == 'movie.zh-cn.srt');
+        await session.selectSubtitle(nas.id);
+        await pumpEventQueue();
+        expect(panel.snapshot.cues!.single.text, '第二条');
+        await session.selectSubtitle(null);
+        await pumpEventQueue();
+        expect(panel.snapshot.selectedTrackId, isNull);
+      }
+    });
+  }
+  test('failed embedded or off selection keeps the original active sidecar', () async {
+    final backend = _Backend();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final client = _Client();
+    client.playbackApi.subtitles.add({
+      'Type': 'Subtitle',
+      'Index': 3,
+      'Language': 'jpn',
+      'Codec': 'srt',
+      'IsTextSubtitleStream': true,
+    });
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(
+        request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.test/movie')),
+      ),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+    final session = adapter.open(const PlayTarget(itemId: 'movie'));
+    await pumpEventQueue(times: 30);
+    expect(session.snapshot.phase, anyOf(PlaybackPhase.playing, PlaybackPhase.paused));
+    final embedded = session.snapshot.subtitleTracks.single.id;
+    final local = await (session as PlaybackSubtitleInput).registerExternalSubtitle(
+      'file:///subtitles/active.srt',
+      generation: session.snapshot.generation,
+    );
+    await session.selectSubtitle(local);
+    for (final disable in [false, true]) {
+      final gate = Completer<void>();
+      if (disable) {
+        backend.subtitleDisableGate = gate;
+        backend.failDisableSubtitle = true;
+      } else {
+        backend.subtitleSelectGate = gate;
+        backend.failSelectSubtitle = true;
+      }
+      final failure = expectLater(session.selectSubtitle(disable ? null : embedded), throwsStateError);
+      await pumpEventQueue();
+      expect(session.snapshot.selectedSubtitleId, local);
+      gate.complete();
+      await failure;
+      expect(session.snapshot.selectedSubtitleId, local);
+      backend.failDisableSubtitle = false;
+      backend.failSelectSubtitle = false;
+    }
+    await session.selectSubtitle(embedded);
+    expect(session.snapshot.selectedSubtitleId, embedded);
+    await session.selectSubtitle(null);
+    expect(session.snapshot.selectedSubtitleId, isNull);
+  });
   test(
     'Anime4K defaults follow known anime library and latest preferences without extra item reads',
     () async {
@@ -313,18 +596,28 @@ void main() {
     final source = input.subtitleSource!;
     expect(source.itemFilePath, '/library/movie.strm');
     expect(source.userAgent, embyViewPlaybackUserAgent);
-    final externalId = await input.loadExternalSubtitle(
+    final externalId = await input.registerExternalSubtitle(
       'file:///subtitles/chinese.srt',
       generation: source.generation,
       title: '中文',
       source: PlaybackTrackSource.ai,
     );
-    expect(session.snapshot.selectedSubtitleId, externalId);
+    expect(session.snapshot.selectedSubtitleId, isNull);
+    expect(native.externalLoads.single.$3, isFalse);
+    final repeated = await input.registerExternalSubtitle(
+      'file:///subtitles/chinese.srt',
+      generation: source.generation,
+      title: '中文',
+      source: PlaybackTrackSource.ai,
+    );
+    expect(repeated, externalId);
+    expect(session.snapshot.subtitleTracks, hasLength(1));
     expect(session.snapshot.subtitleTracks.last.source, PlaybackTrackSource.ai);
     await session.selectSubtitle(null);
     expect(session.snapshot.selectedSubtitleId, isNull);
     await session.selectSubtitle(externalId);
     expect(session.snapshot.selectedSubtitleId, externalId);
+    expect(native.externalLoads.last.$3, isTrue);
     expect(session.snapshot.firstFrameLatency, isNull);
     native.events.add(NativePlaybackSnapshot(sourceGeneration: native.generation - 1, firstFrame: true));
     await pumpEventQueue(times: 3);
@@ -382,52 +675,71 @@ void main() {
     manager.dispose();
   });
 
-  test(
-    'real 115 session refreshes once at position, retires old tracks and refuses the next failure',
-    () async {
-      final backend = _Backend();
-      final manager = PlaybackManager()..setBackend(backend);
-      final native = _Native(backend);
-      final client = _Client();
-      var redirects = 0;
-      final adapter = MoonfinPlaybackAdapter(
-        manager: manager,
-        client: client,
-        native: native,
-        audioInput: _Audio(),
-        redirectCache: PlaybackRedirectCache(
-          request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.test/${++redirects}')),
-        ),
-      );
-      final session = adapter.open(const PlayTarget(itemId: 'movie'));
-      await pumpEventQueue(times: 30);
-      final generation = session.snapshot.generation;
-      final oldTrack = session.snapshot.audioTracks.single.id;
-      final externalId = await (session as PlaybackSubtitleInput).loadExternalSubtitle(
-        'file:///subtitles/retained.srt',
-        generation: generation,
-      );
-      backend.at = const Duration(minutes: 10);
-      await session.pause();
-      backend.errors.add({'event': 'error', 'status': 403});
-      await pumpEventQueue(times: 40);
-      expect(redirects, 2);
-      expect(backend.starts.last, const Duration(minutes: 10));
-      expect(backend.playing, isFalse);
-      expect(session.snapshot.generation, greaterThan(generation));
-      expect(native.externalLoads, hasLength(2));
-      expect(session.snapshot.selectedSubtitleId, isNot(externalId));
-      await expectLater(session.selectAudio(oldTrack), throwsA(isA<Exception>()));
-      backend.errors.add({'event': 'error', 'status': 403});
-      await pumpEventQueue(times: 40);
-      expect(redirects, 2);
-      expect(session.snapshot.phase, PlaybackPhase.failed);
-      await session.close();
-      await adapter.dispose();
-      await native.events.close();
-      manager.dispose();
-    },
-  );
+  test('real 115 session refreshes once at position, retires old tracks and refuses the next failure', () async {
+    final backend = _Backend();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final client = _Client();
+    var redirects = 0;
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(
+        request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.test/${++redirects}')),
+      ),
+    );
+    final session = adapter.open(const PlayTarget(itemId: 'movie'));
+    await pumpEventQueue(times: 30);
+    final generation = session.snapshot.generation;
+    final oldTrack = session.snapshot.audioTracks.single.id;
+    final externalId = await (session as PlaybackSubtitleInput).registerExternalSubtitle(
+      'file:///subtitles/retained.srt',
+      generation: generation,
+    );
+    await (session as PlaybackSubtitleInput).registerExternalSubtitle(
+      'file:///subtitles/unselected.srt',
+      generation: generation,
+    );
+    await session.selectSubtitle(externalId);
+    backend.at = const Duration(minutes: 10);
+    await session.pause();
+    native.selecting = Completer<void>();
+    native.selectGate = Completer<void>();
+    addTearDown(() {
+      if (!native.selectGate!.isCompleted) native.selectGate!.complete();
+    });
+    backend.errors.add({'event': 'error', 'status': 403});
+    await native.selecting!.future.timeout(const Duration(seconds: 5));
+    expect(redirects, 2);
+    expect(backend.starts.last, const Duration(minutes: 10));
+    expect(backend.playing, isFalse);
+    expect(session.snapshot.generation, greaterThan(generation));
+    expect(session.snapshot.selectedSubtitleId, isNull);
+    final nextChoice = session.snapshot.subtitleTracks.last.id;
+    final chooseOther = session.selectSubtitle(nextChoice);
+    native.selectGate!.complete();
+    await chooseOther;
+    expect(native.externalLoads.where((load) => load.$1 == native.generation).map((load) => (load.$2, load.$3)), [
+      ('file:///subtitles/retained.srt', false),
+      ('file:///subtitles/unselected.srt', false),
+      ('file:///subtitles/retained.srt', true),
+      ('file:///subtitles/unselected.srt', true),
+    ]);
+    expect(session.snapshot.selectedSubtitleId, nextChoice);
+    expect(session.snapshot.subtitleTracks, hasLength(2));
+    await expectLater(session.selectSubtitle(externalId), throwsA(isA<Exception>()));
+    await expectLater(session.selectAudio(oldTrack), throwsA(isA<Exception>()));
+    backend.errors.add({'event': 'error', 'status': 403});
+    await pumpEventQueue(times: 40);
+    expect(redirects, 2);
+    expect(session.snapshot.phase, PlaybackPhase.failed);
+    await session.close();
+    await adapter.dispose();
+    await native.events.close();
+    manager.dispose();
+  });
 
   test('opening timeout spends exactly one retry without nested transcode recovery', () async {
     final backend = _Backend()..failOpen = true;

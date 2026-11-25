@@ -27,12 +27,13 @@ final class _Input implements PlaybackSubtitleInput {
   String? text;
 
   @override
-  Future<String> loadExternalSubtitle(
+  Future<String> registerExternalSubtitle(
     String url, {
     required int generation,
     String? title,
     String? language,
     String? codec,
+    String? contentKey,
     PlaybackTrackSource source = PlaybackTrackSource.online,
   }) async {
     expect(generation, subtitleSource.generation);
@@ -140,9 +141,9 @@ void main() {
     final media = SubtitleMedia.fromPlayback(input.subtitleSource, duration: _duration);
     status = const MediaFolderStatus(state: MediaFolderState.unmounted);
     final track = await retain('中文字幕', media: media, language: 'zho', candidateId: 'candidate');
-    expect(await store.apply(track, input, generation: 9), 'external');
+    expect(await store.register(track, input, generation: 9), 'external');
     expect(input.text, contains('中文字幕'));
-    await expectLater(store.apply(track, input, generation: 8), throwsA(isA<EmbyViewFailure>()));
+    await expectLater(store.register(track, input, generation: 8), throwsA(isA<EmbyViewFailure>()));
     expect((await store.save(track)).state, SubtitleSaveState.failed);
     expect(await track.localFile!.exists(), isTrue);
     final offline = (await store.scan(strm)).availability();
@@ -194,14 +195,14 @@ void main() {
     final document = SubtitleDocument.parse(utf8.encode(ass), format: 'ass');
     final track = await store.retain(regular, document, language: 'zh', origin: SubtitleOrigin.online);
     final input = inputFor(regular);
-    expect(await store.apply(track, input, generation: 9), 'external');
+    expect(await store.register(track, input, generation: 9), 'external');
     expect(input.text, ass);
     final saved = await store.save(track);
     expect(p.basename(saved.path!), 'E1.4k.zh.ass');
     expect(await File(saved.path!).readAsString(), ass);
     final reopened = (await store.scan(regular)).nasTracks.single;
     expect(reopened.document.cues!.single.start, const Duration(milliseconds: 3450));
-    expect(await store.apply(reopened, input, generation: 9), 'external');
+    expect(await store.register(reopened, input, generation: 9), 'external');
     expect(input.text, ass);
   });
 

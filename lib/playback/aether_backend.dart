@@ -86,20 +86,22 @@ class AetherBackend
     String? language,
     String? codec,
     int? sourceGeneration,
+    bool select = true,
   }) async {
     final expected = sourceGeneration ?? _nativeSourceGeneration;
-    _pendingEmbeddedSubtitle = null;
+    if (select) _pendingEmbeddedSubtitle = null;
     await invokeNativeControl<void>('loadExternalSubtitle', {
       'url': url,
       'title': title,
       'language': language,
       'codec': codec,
       'sourceGeneration': expected,
+      'select': select,
     });
     if (expected != _nativeSourceGeneration) {
       throw PlatformException(code: 'stale_source', message: '播放源已变更');
     }
-    _activeSubtitleTrackIndex = 0;
+    if (select) _activeSubtitleTrackIndex = 0;
   }
 
   void configureNextNativeSource({

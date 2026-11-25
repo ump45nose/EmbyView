@@ -32,13 +32,25 @@ abstract interface class PlaybackSubtitleInput {
   PlaybackSubtitleSource? get subtitleSource;
   Stream<PlaybackSubtitleSource?> get subtitleSources;
   NativePlaybackAudioInput get audioInput;
-  Future<String> loadExternalSubtitle(
+  /// Register a playable sidecar without changing the selected subtitle.
+  /// The returned ID is immediately available in the session snapshot.
+  Future<String> registerExternalSubtitle(
     String url, {
     required int generation,
     String? title,
     String? language,
     String? codec,
+    String? contentKey,
     PlaybackTrackSource source = PlaybackTrackSource.online,
+  });
+
+  /// The library has identified a retained sidecar as the same subtitle now
+  /// indexed by Emby. Publish one logical track under the server's ID, even
+  /// if its current playback delivery is the already loaded local file.
+  Future<void> reconcileIndexedSubtitle({
+    required int generation,
+    required String indexedTrackId,
+    required String contentKey,
   });
 }
 

@@ -86,7 +86,8 @@ final class AetherVideoChannel: NSObject, FlutterStreamHandler {
                                     userInfo: [NSLocalizedDescriptionKey: "播放源已变更或尚未就绪"])
                             }
                             try self.player.loadExternalSubtitle(url: url, title: args["title"] as? String,
-                                language: args["language"] as? String, codec: args["codec"] as? String)
+                                language: args["language"] as? String, codec: args["codec"] as? String,
+                                select: args["select"] as? Bool ?? true)
                         default: try self.player.setPictureInPicture(args["enabled"] as? Bool == true)
                         }
                         result(nil)

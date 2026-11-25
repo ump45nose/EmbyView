@@ -3,11 +3,58 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:jellyfin_preference/jellyfin_preference.dart';
 import 'package:moonfin/embyview/playback/native_playback.dart';
 import 'package:moonfin/embyview/contracts/playback.dart';
+import 'package:moonfin/playback/aether_backend.dart';
+import 'package:moonfin/preference/user_preferences.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('native sidecar registration preserves pending embedded choice', () async {
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const control = MethodChannel('moonfin/ios_aether_control');
+    const events = MethodChannel('moonfin/ios_aether_events');
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(control, (call) async {
+      calls.add(call);
+      return null;
+    });
+    messenger.setMockMethodCallHandler(events, (_) async => null);
+    SharedPreferences.setMockInitialValues({});
+    final store = PreferenceStore();
+    await store.init();
+    final prefs = UserPreferences(store);
+    final backend = AetherBackend(prefs);
+    final native = EmbyViewNativePlayback(backend);
+    try {
+      await Future<void>.delayed(Duration.zero);
+      await backend.setSubtitleTrack(2);
+      expect(backend.activeSubtitleTrackIndex, 2);
+      await native.loadExternalSubtitle('file:///subtitle.srt', select: false);
+      expect(calls.last.arguments['select'], isFalse);
+      expect(backend.activeSubtitleTrackIndex, 2);
+      // The previously requested embedded subtitle must still be selected
+      // when its tracks arrive.
+      await messenger.handlePlatformMessage(
+        events.name,
+        const StandardMethodCodec().encodeSuccessEnvelope({'event': 'tracksChanged', 'textTrackCount': 2}),
+        (_) {},
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(calls.where((call) => call.method == 'setSubtitleTrack').single.arguments['index'], 2);
+      await native.loadExternalSubtitle('file:///subtitle.srt');
+      expect(calls.last.arguments['select'], isTrue);
+      expect(backend.activeSubtitleTrackIndex, 0);
+    } finally {
+      await native.dispose();
+      backend.dispose();
+      prefs.dispose();
+      messenger.setMockMethodCallHandler(control, null);
+      messenger.setMockMethodCallHandler(events, null);
+    }
+  });
   test(
     'native presentation preserves missing first frame and measured state',
     () {

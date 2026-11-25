@@ -81,10 +81,16 @@ class BoundSubtitlePanel implements SubtitlePanel {
         play.phase != PlaybackPhase.ended &&
         play.phase != PlaybackPhase.failed;
     if (!identical(_scope?.source, valid ? source : null)) {
+      final previous = _scope?.source;
+      final restoring = valid &&
+          (_scope?.autoSelectionSettled == true || _scope?.userApplied == true) &&
+          previous?.target.itemId == source.target.itemId &&
+          previous?.mediaSourceId == source.mediaSourceId;
       _scope?.close();
       _resetAudio();
       _resumeAfterBoundary = false;
       _scope = !valid ? null : _PanelScope(source, sources.openScope());
+      if (restoring) _scope!.userApplied = true;
       _audioId = play.selectedAudioId;
       _expectedAudioId = null;
     }
@@ -196,12 +202,53 @@ class BoundSubtitlePanel implements SubtitlePanel {
     try {
       final scan = await _scan(scope);
       _check(scope);
-      if (scan.nasTracks.isEmpty) return;
-      scope.hasNas = true;
-      await Future.wait([
-        for (final track in session.snapshot.subtitleTracks)
-          if (track.source == PlaybackTrackSource.embyExternal) _document(scope, track.id),
-      ]);
+      scope.hasNas = scan.nasTracks.isNotEmpty;
+      if (scope.hasNas) {
+        await Future.wait([
+          for (final track in session.snapshot.subtitleTracks)
+            if (track.source == PlaybackTrackSource.embyExternal) _document(scope, track.id),
+        ]);
+      }
+      _check(scope);
+      final indexedIds = session.snapshot.subtitleTracks
+          .where((track) => track.source == PlaybackTrackSource.embyExternal)
+          .map((track) => track.id)
+          .toSet();
+      final indexed = <String, String>{
+        for (final entry in scope.retained.entries)
+          if (indexedIds.contains(entry.key)) entry.value.id: entry.key,
+      };
+      final available = <(StoredSubtitle, String)>[];
+      // Keep Emby's playback ID for already indexed files. Register every
+      // other sidecar independently of the automatic selection preference.
+      // Reconcile before any native registration which may be waiting on a
+      // source restoration; no duplicate logical track needs that RPC.
+      for (final track in scan.nasTracks) {
+        if (indexed[track.id] case final id?) {
+          _check(scope);
+          await input.reconcileIndexedSubtitle(
+            generation: scope.source.generation,
+            indexedTrackId: id,
+            contentKey: track.registrationKey,
+          );
+        }
+      }
+      for (final track in scan.nasTracks) {
+        _check(scope);
+        if (indexed[track.id] case final id?) {
+          available.add((track, id));
+          continue;
+        }
+        try {
+          final id = await _register(scope, track, cues: scan.dialogue(track));
+          scope.saves[id] = const SubtitleSaveResult(state: SubtitleSaveState.saved);
+          available.add((track, id));
+          _emit();
+        } catch (_) {
+          _check(scope);
+          // A single unreadable sidecar must not hide the remaining tracks.
+        }
+      }
       _check(scope);
       final play = session.snapshot;
       if (!preferences().autoSelectChineseSubtitle ||
@@ -210,19 +257,26 @@ class BoundSubtitlePanel implements SubtitlePanel {
           scope.userApplied) {
         return;
       }
-      final available = scan.nasTracks.where((track) => isChineseSubtitle(track.language) && !track.isForced);
-      final preferred = available.where((track) => track.isComplete).firstOrNull ?? available.firstOrNull;
-      if (preferred == null) return;
-      final indexed = play.subtitleTracks.where((track) => scope.retained[track.id]?.id == preferred.id).firstOrNull;
-      if (indexed != null) {
-        await session.selectSubtitle(indexed.id);
-        return;
-      }
-      final id = await _apply(scope, preferred, cues: scan.dialogue(preferred));
-      scope.saves[id] = const SubtitleSaveResult(state: SubtitleSaveState.saved);
-      _emit();
+      final chinese = available.where((entry) => isChineseSubtitle(entry.$1.language) && !entry.$1.isForced);
+      final preferred =
+          chinese.where((entry) => entry.$1.isComplete).firstOrNull?.$2 ??
+          play.subtitleTracks
+              .where(
+                (track) =>
+                    !track.isForced &&
+                    isChineseSubtitle(track.language) &&
+                    (track.source == PlaybackTrackSource.embedded ||
+                        track.source == PlaybackTrackSource.embyExternal) &&
+                    (scope.retained[track.id]?.isComplete ?? true),
+              )
+              .firstOrNull
+              ?.id ??
+          chinese.firstOrNull?.$2;
+      if (preferred != null) await session.selectSubtitle(preferred);
     } catch (_) {
       // Missing NAS or a source change leaves the playback engine's track selected.
+    } finally {
+      scope.autoSelectionSettled = true;
     }
   }
 
@@ -302,12 +356,20 @@ class BoundSubtitlePanel implements SubtitlePanel {
     await _use(scope, document, language, SubtitleOrigin.online, candidateId: candidate.id);
   }
 
-  Future<String> _apply(_PanelScope scope, StoredSubtitle track, {List<SubtitleCue>? cues}) async {
+  Future<String> _register(_PanelScope scope, StoredSubtitle track, {List<SubtitleCue>? cues}) async {
     _check(scope);
-    final id = await store.apply(track, input, generation: scope.source.generation);
+    final id = await store.register(track, input, generation: scope.source.generation);
     _check(scope);
     scope.retained[id] = track;
     scope.dialogue[id] = cues ?? track.document.cues;
+    return id;
+  }
+
+  Future<String> _apply(_PanelScope scope, StoredSubtitle track, {List<SubtitleCue>? cues}) async {
+    final id = await _register(scope, track, cues: cues);
+    _check(scope);
+    await session.selectSubtitle(id);
+    _check(scope);
     return id;
   }
 
@@ -622,7 +684,7 @@ class _PanelScope {
   final edits = <SubtitleAiCancellation>{};
   Future<SubtitleItem>? item;
   Future<SubtitleScan>? scan;
-  var scanning = false, userApplied = false, hasNas = false;
+  var scanning = false, userApplied = false, hasNas = false, autoSelectionSettled = false;
 
   Future<T> guard<T>(Future<T> work) => Future.any([work, _closed.future.then<T>((_) => throw _expired)]);
   void close() {

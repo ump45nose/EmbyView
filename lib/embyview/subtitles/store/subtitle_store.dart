@@ -52,6 +52,7 @@ final class StoredSubtitle {
   final String? _owningSourceId;
 
   late final String contentId = _hash(document.playbackBytes);
+  String get registrationKey => '$language:$contentId';
   late final String id = _key([media.itemId, media.mediaSourceId, filename, contentId]);
 
   bool get isComplete => _complete(coverage, media.duration);
@@ -209,7 +210,7 @@ final class SubtitleStore {
     );
   }
 
-  Future<String> apply(StoredSubtitle track, PlaybackSubtitleInput input, {required int generation}) async {
+  Future<String> register(StoredSubtitle track, PlaybackSubtitleInput input, {required int generation}) async {
     final current = input.subtitleSource;
     if (current == null ||
         current.generation != generation ||
@@ -219,12 +220,13 @@ final class SubtitleStore {
     }
     final local = track.localFile ?? await _localCopy(track.media, track.document, track.filename);
     final origin = PlaybackTrackSource.values.byName(track.origin.name);
-    return input.loadExternalSubtitle(
+    return input.registerExternalSubtitle(
       local.uri.toString(),
       generation: generation,
       language: track.language == 'und' ? null : track.language,
       title: track.filename,
       codec: track.document.format,
+      contentKey: track.registrationKey,
       source: origin,
     );
   }

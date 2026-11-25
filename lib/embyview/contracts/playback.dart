@@ -31,6 +31,7 @@ class PlaybackTrack {
     required this.source,
     this.format,
     this.layout,
+    this.isForced = false,
   });
 
   final String id;
@@ -39,6 +40,7 @@ class PlaybackTrack {
   final PlaybackTrackSource source;
   final String? format;
   final String? layout;
+  final bool isForced;
 }
 
 class VideoSize {
@@ -112,6 +114,8 @@ class PlaybackSnapshot {
   final MediaQuality? quality;
   final List<ChapterMark> chapters;
   final List<PlaybackTrack> audioTracks;
+  /// All available tracks, including registered (but not necessarily selected)
+  /// sidecars. Track IDs belong to this source generation.
   final List<PlaybackTrack> subtitleTracks;
   final String? selectedAudioId;
   final String? selectedSubtitleId;
@@ -169,6 +173,7 @@ abstract interface class PlaybackSession {
   Future<void> setVolume(double fraction);
   Future<void> setMuted(bool muted);
   Future<void> selectAudio(String trackId);
+  /// Select an available subtitle track, or turn subtitles off with null.
   Future<void> selectSubtitle(String? trackId);
   Future<void> setAnime4k(bool enabled);
   Future<void> setAnime4kComparison(double? split);

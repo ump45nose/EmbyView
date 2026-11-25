@@ -1971,13 +1971,18 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     }
 
     #if os(macOS)
-    func loadExternalSubtitle(url: URL, title: String?, language: String?, codec: String?) throws {
+    func loadExternalSubtitle(url: URL, title: String?, language: String?, codec: String?, select: Bool = true) throws {
         guard let engine = Self.sharedEngine(), engine.isSessionReady else {
             throw NSError(domain: "EmbyView", code: 5,
                 userInfo: [NSLocalizedDescriptionKey: "播放源尚未就绪"])
         }
         if externalSubIDsByURL[url.absoluteString] == nil {
-            seatDeclaredSubtitles(engine)
+            // Runtime sidecars are not part of the original declaration.
+            // Seating the declaration again after adding one would count
+            // the runtime tracks as declared and lose their URL mapping.
+            if declaredSubtitleURLs.contains(url.absoluteString) {
+                seatDeclaredSubtitles(engine)
+            }
             if externalSubIDsByURL[url.absoluteString] == nil {
                 addSubtitle(url: url, title: title, language: language, codec: codec)
             }
@@ -1986,7 +1991,9 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             throw NSError(domain: "EmbyView", code: 6,
                 userInfo: [NSLocalizedDescriptionKey: "外挂字幕未能登记"])
         }
-        selectSubtitleTrack(1, externalUrl: url.absoluteString)
+        if select {
+            selectSubtitleTrack(1, externalUrl: url.absoluteString)
+        }
     }
 
     #endif

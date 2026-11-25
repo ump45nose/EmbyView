@@ -94,7 +94,7 @@ void main() {
     ];
     fixture.documents[3] = chinese;
     final matched = fixture.panel.changes.firstWhere(
-      (snapshot) => snapshot.tracks.any((track) => track.origin == SubtitleOrigin.ai),
+      (snapshot) => snapshot.tracks.length == 2 && snapshot.tracks.every((track) => track.origin == SubtitleOrigin.ai),
     );
     fixture.playback.open(
       _movie,
@@ -110,8 +110,8 @@ void main() {
       ],
     );
     final state = await matched;
-    expect(state.tracks.single.trackId, '2:3');
-    expect(state.tracks.single.index, SubtitleIndexState.recognized);
+    final indexed = state.tracks.singleWhere((track) => track.trackId == '2:3');
+    expect(indexed.index, SubtitleIndexState.recognized);
     expect(state.selectedTrackId, isNull);
     expect(fixture.playback.rendered, isNull);
 
@@ -332,6 +332,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
   @override
   final _Audio audioInput = _Audio();
   String? rendered;
+  final registered = <String, String>{};
 
   void open(
     PlayTarget target,
@@ -351,6 +352,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
       userAgent: 'Mozilla/5.0',
     );
     rendered = null;
+    registered.clear();
     snapshot = PlaybackSnapshot(
       generation: generation,
       target: target,
@@ -365,6 +367,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
 
   @override
   Future<void> selectSubtitle(String? trackId) async {
+    rendered = registered[trackId];
     snapshot = PlaybackSnapshot(
       generation: snapshot.generation,
       target: snapshot.target,
@@ -372,6 +375,8 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
       duration: snapshot.duration,
       subtitleTracks: snapshot.subtitleTracks,
       selectedSubtitleId: trackId,
+      audioTracks: snapshot.audioTracks,
+      selectedAudioId: snapshot.selectedAudioId,
     );
     events.add(snapshot);
   }
@@ -382,30 +387,42 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
   }
 
   @override
-  Future<String> loadExternalSubtitle(
+  Future<String> registerExternalSubtitle(
     String url, {
     required int generation,
     String? title,
     String? language,
     String? codec,
+    String? contentKey,
     PlaybackTrackSource source = PlaybackTrackSource.online,
   }) async {
-    final id = '$generation:external';
-    rendered = await File.fromUri(Uri.parse(url)).readAsString();
+    final id = '$generation:external${registered.length}';
+    final text = await File.fromUri(Uri.parse(url)).readAsString();
     expect(generation, snapshot.generation);
+    registered[id] = text;
     snapshot = PlaybackSnapshot(
       generation: generation,
       target: snapshot.target,
       phase: PlaybackPhase.playing,
       duration: snapshot.duration,
-      selectedSubtitleId: id,
+      selectedSubtitleId: snapshot.selectedSubtitleId,
+      audioTracks: snapshot.audioTracks,
+      selectedAudioId: snapshot.selectedAudioId,
       subtitleTracks: [
+        ...snapshot.subtitleTracks,
         PlaybackTrack(id: id, name: title ?? 'subtitle', language: language, source: source, format: codec),
       ],
     );
     events.add(snapshot);
     return id;
   }
+
+  @override
+  Future<void> reconcileIndexedSubtitle({
+    required int generation,
+    required String indexedTrackId,
+    required String contentKey,
+  }) async {}
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

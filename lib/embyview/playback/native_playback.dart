@@ -102,12 +102,14 @@ class EmbyViewNativePlayback {
     String? language,
     String? codec,
     int? sourceGeneration,
+    bool select = true,
   }) => backend.loadExternalSubtitle(
     url,
     title: title,
     language: language,
     codec: codec,
     sourceGeneration: sourceGeneration ?? _snapshot.sourceGeneration,
+    select: select,
   );
 
   Future<void> dispose() async {
