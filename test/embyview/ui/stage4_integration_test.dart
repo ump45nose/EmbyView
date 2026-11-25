@@ -573,8 +573,8 @@ void main() {
       await _pumpFrames(tester, 200);
       expect(playback.openedTargets.last.itemId, 'm1');
       expect(find.byKey(const Key('ev_player_page')), findsOneWidget);
-      await tester.tap(find.byKey(const Key('ev_player_back')));
-      await _pumpFrames(tester, 350);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _pumpFrames(tester, 450);
 
       // 3b. Zone EvCard
       await tester.tap(find.byKey(const Key('ev_topbar_tab_movie')));
@@ -605,8 +605,8 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await _pumpFrames(tester, 200);
       expect(playback.openedTargets.last.itemId, 'ep1');
-      await tester.tap(find.byKey(const Key('ev_player_back')));
-      await _pumpFrames(tester, 350);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _pumpFrames(tester, 450);
 
       final simCard = find.descendant(
         of: find.byKey(const Key('ev_detail_similar_shelf')),

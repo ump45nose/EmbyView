@@ -302,19 +302,13 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   @override
   Widget build(BuildContext context) {
     final scale = EvScale.of(context), creditsActive = _creditsActive;
-    final showControls = _controlsVisible && !creditsActive, openingDone = _openingDone && !widget.holdOpening;
+    final openingDone = _openingDone && !widget.holdOpening;
+    final showControls = _controlsVisible && openingDone && !creditsActive;
 
     final videoFrame = EvCreditsVideoFrame(
       creditsActive: creditsActive, panelOpen: _panelOpen, onTapMiniVideo: () => unawaited(widget.session.dismissCreditsPrompt()),
       child: Stack(fit: StackFit.expand, children: [
         Positioned.fill(child: widget.session.videoSurface(key: ValueKey('ev_video_${_snap.generation}'))),
-        Positioned.fill(child: EvAnime4kCompareOverlay(
-          active: _compareActive && !creditsActive, anime4k: _snap.anime4k, split: _compareSplit,
-          sweepNonce: _compareSweepNonce, persistent: _comparePersistent,
-          onManualDrag: () => setState(() => _comparePersistent = true),
-          onSplitChanged: (s) { if (!_compareActive) return; _compareSplit = s; unawaited(widget.session.setAnime4kComparison(s)); },
-          onEnd: _endCompare,
-        )),
         Positioned.fill(child: EvPlayerOpeningOverlay(
           snapshot: _snap, art: widget.art, uiFirstFrameLatency: _firstFrame.uiFirstFrameLatency,
           done: openingDone, holdVisible: widget.holdOpening, onBack: _handleClose, onRetry: () => unawaited(widget.session.resume()),
@@ -357,6 +351,17 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
               onThumbnailAt: widget.session.thumbnailAt, onScrubHoverChanged: (h) => setState(() => _scrubHovering = h),
               onScrubbingChanged: (s) { setState(() => _scrubbing = s); if (!s) _scheduleIdleHide(); },
               onBottomBarHoverChanged: (h) { _bottomBarHover = h; if (!h) _scheduleIdleHide(); }, onBackdropTap: _togglePlayPause,
+            )),
+            Positioned.fill(child: AnimatedPadding(
+              duration: const Duration(milliseconds: 600), curve: EvCurves.out,
+              padding: _panelOpen && !creditsActive ? EdgeInsets.fromLTRB(scale.rem(1), scale.rem(1), scale.rem(30), scale.rem(1)) : EdgeInsets.zero,
+              child: EvAnime4kCompareOverlay(
+                active: _compareActive && !creditsActive, anime4k: _snap.anime4k, split: _compareSplit,
+                sweepNonce: _compareSweepNonce, persistent: _comparePersistent,
+                onManualDrag: () => setState(() => _comparePersistent = true),
+                onSplitChanged: (s) { if (!_compareActive) return; _compareSplit = s; unawaited(widget.session.setAnime4kComparison(s)); },
+                onEnd: _endCompare,
+              ),
             )),
             Positioned.fill(child: EvSeekFeedbackOverlay(leftNonce: _seekLeftNonce, rightNonce: _seekRightNonce)),
             Positioned.fill(child: EvPlayerToast(visible: _toastVisible, message: _toastMessage, icon: _toastIcon)),

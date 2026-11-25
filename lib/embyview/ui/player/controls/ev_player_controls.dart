@@ -74,8 +74,7 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
     }
     if (widget.seekLeftNonce != old.seekLeftNonce) _spinL.forward(from: 0);
     if (widget.seekRightNonce != old.seekRightNonce) _spinR.forward(from: 0);
-    if (widget.visible && !old.visible) { _entry.forward(from: 0); }
-    else if (!widget.visible && old.visible) { _entry.value = 0; }
+    if (widget.visible && !old.visible) _entry.forward(from: 0);
     _syncGlow();
   }
 
