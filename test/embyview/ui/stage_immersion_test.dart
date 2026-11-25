@@ -8,6 +8,7 @@ import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/stage/ev_stage.dart';
 import 'package:moonfin/embyview/ui/stage/ev_stage_controller.dart';
 import 'package:moonfin/embyview/ui/stage/immersion.dart';
+import 'package:moonfin/embyview/ui/theme/ev_motion.dart';
 import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
 import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
 
@@ -880,7 +881,7 @@ void main() {
         expect(positioned.top, closeTo(scale.rem(4.75), 1e-6));
 
         // 2. Paper detail scrolled down: lifting veil + setting episode preview animates smoothly
-        //    over 900ms (not 0ms snap) and settles to soft warm-white alpha = 0.30 * p, blur = 0.
+        //    over 260ms (not 0ms snap) and settles to soft warm-white alpha = 0.30 * p, blur = 0.
         stage
           ..setVideoState(visible: false)
           ..setVeilLifted(true)
@@ -892,7 +893,8 @@ void main() {
         final midVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
         expect(midVeil.color.a, greaterThan(0.35));
 
-        await tester.pumpAndSettle();
+        // By 260ms total (50ms + 210ms), veil lift has finished smoothly.
+        await tester.pump(const Duration(milliseconds: 220));
         final settledPaperSpec = EvStage.computeVeil(
           mode: EvStageMode.detail,
           scrollProgress: 0.8,
@@ -949,6 +951,122 @@ void main() {
           ),
           findsNothing,
         );
+
+        stage.dispose();
+      },
+    );
+
+    testWidgets(
+      'active backdrop slot renders on top across 0->1->0 transitions, preview fades in fast (240ms), base backdrop keeps EvDurations.crossfade, and veil lift (260ms) vs lower (900ms)',
+      (tester) async {
+        final stage = EvStageController()
+          ..setBaseBackdrop(_card('base-0').art.stage)
+          ..setMode(EvStageMode.detail, detailNoBlur: true)
+          ..setScrollProgress(1.0);
+
+        await tester.pumpWidget(
+          _stageHarness(
+            controller: stage,
+            themeMode: ThemeMode.paper,
+            enableMotion: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        Stack backdropStack() => tester.widget<Stack>(
+          find.ancestor(
+            of: find.byKey(const ValueKey<String>('ev_stage_slot_0')),
+            matching: find.byType(Stack),
+          ).first,
+        );
+
+        AnimatedOpacity slotAnimatedOpacity(int slot) => tester.widget<AnimatedOpacity>(
+          find.descendant(
+            of: find.byKey(ValueKey<String>('ev_stage_slot_$slot')),
+            matching: find.byType(AnimatedOpacity),
+          ),
+        );
+
+        double slotRenderedOpacity(int slot) => tester.widget<FadeTransition>(
+          find.descendant(
+            of: find.byKey(ValueKey<String>('ev_stage_slot_$slot')),
+            matching: find.byType(FadeTransition),
+          ),
+        ).opacity.value;
+
+        // Initial: slot 0 active on top (index 1), slot 1 inactive on bottom (index 0).
+        expect(backdropStack().children[0].key, const ValueKey<String>('ev_stage_slot_1'));
+        expect(backdropStack().children[1].key, const ValueKey<String>('ev_stage_slot_0'));
+        expect(slotAnimatedOpacity(0).duration, EvDurations.crossfade);
+        expect(slotAnimatedOpacity(0).curve, EvCurves.soft);
+        expect(slotRenderedOpacity(0), 1.0);
+
+        // 1. Normal setBaseBackdrop switches 0 -> 1 and keeps EvDurations.crossfade (1100ms).
+        stage.setBaseBackdrop(_card('base-1').art.stage);
+        await tester.pump();
+        expect(backdropStack().children[0].key, const ValueKey<String>('ev_stage_slot_0'));
+        expect(backdropStack().children[1].key, const ValueKey<String>('ev_stage_slot_1'));
+        expect(slotAnimatedOpacity(1).duration, EvDurations.crossfade);
+        expect(slotAnimatedOpacity(1).curve, EvCurves.soft);
+        await tester.pump(const Duration(milliseconds: 260));
+        expect(slotRenderedOpacity(1), lessThan(0.8));
+        await tester.pumpAndSettle();
+        expect(slotRenderedOpacity(1), 1.0);
+
+        // 2. Preview backdrop switches 1 -> 0: slot 0 moves to top (not occluded by slot 1)
+        //    and fades in with 240ms / EvCurves.out, reaching 1.0 within 240ms.
+        stage
+          ..setVeilLifted(true)
+          ..setPreviewBackdrop(_card('ep-1').art.stage);
+        await tester.pump();
+        expect(backdropStack().children[0].key, const ValueKey<String>('ev_stage_slot_1'));
+        expect(backdropStack().children[1].key, const ValueKey<String>('ev_stage_slot_0'));
+        expect(slotAnimatedOpacity(0).duration, const Duration(milliseconds: 240));
+        expect(slotAnimatedOpacity(0).curve, EvCurves.out);
+        expect(slotAnimatedOpacity(0).opacity, 1.0);
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey<String>('ev_stage_slot_0')),
+            matching: find.byKey(const ValueKey<String>('cache:bd_ep-1')),
+          ),
+          findsOneWidget,
+        );
+
+        await tester.pump(const Duration(milliseconds: 240));
+        expect(slotRenderedOpacity(0), 1.0);
+        expect(slotRenderedOpacity(1), 0.0);
+
+        // Veil lift completes by 260ms total (240ms + 20ms).
+        await tester.pump(const Duration(milliseconds: 20));
+        final liftedVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+        expect(liftedVeil.color.a, closeTo(0.30, 0.01));
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('ev_stage_veil')),
+            matching: find.byType(BackdropFilter),
+          ),
+          findsNothing,
+        );
+
+        // 3. Clearing preview restores base backdrop with EvDurations.crossfade (1100ms)
+        //    and lowers veil over 900ms (still mid-transition at 300ms).
+        stage
+          ..setVeilLifted(false)
+          ..clearPreviewBackdrop();
+        await tester.pump();
+        expect(backdropStack().children[0].key, const ValueKey<String>('ev_stage_slot_0'));
+        expect(backdropStack().children[1].key, const ValueKey<String>('ev_stage_slot_1'));
+        expect(slotAnimatedOpacity(1).duration, EvDurations.crossfade);
+        expect(slotAnimatedOpacity(1).curve, EvCurves.soft);
+
+        await tester.pump(const Duration(milliseconds: 300));
+        final loweringVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+        expect(loweringVeil.color.a, lessThan(0.60));
+        expect(loweringVeil.color.a, greaterThan(0.32));
+
+        await tester.pumpAndSettle();
+        final loweredVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+        expect(loweredVeil.color.a, closeTo(0.64, 0.01));
 
         stage.dispose();
       },

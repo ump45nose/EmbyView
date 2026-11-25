@@ -1174,7 +1174,7 @@ void main() {
     );
 
     testWidgets(
-      'series auto-selects first unwatched season, switches seasons, protects unwatched overview (0.6s reveal), and swaps stage backdrop on 350ms hover',
+      'series auto-selects first unwatched season, switches seasons, protects unwatched overview (0.6s reveal), and swaps stage backdrop on 100ms hover',
       (tester) async {
         tester.view.physicalSize = const Size(1440, 900);
         tester.view.devicePixelRatio = 1.0;
@@ -1231,7 +1231,9 @@ void main() {
         await tester.pumpAndSettle();
 
         // Hover unwatched episode s2_e3:
-        // - at 350ms: stage switches to crisp episode still (veilLifted: true)
+        // - before 100ms: rapid sweep does not switch backdrop yet
+        // - at 100ms: stage switches to crisp episode still (veilLifted: true)
+        // - by 400ms: top backdrop slot has faded in to 1.0, overview still hidden
         // - at 600ms: unwatched overview reveals!
         final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
         await mouse.addPointer(location: Offset.zero);
@@ -1239,12 +1241,17 @@ void main() {
 
         final ep3Center = tester.getCenter(find.byKey(const Key('ev_episode_card_s2_e3')));
         await mouse.moveTo(ep3Center);
-        await tester.pump(const Duration(milliseconds: 360));
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(h.stage.previewBackdrop, isNull);
+        expect(h.stage.veilLifted, isFalse);
+
+        await tester.pump(const Duration(milliseconds: 350));
         expect(h.stage.veilLifted, isTrue);
+        expect(h.stage.previewBackdrop, isNotNull);
         expect(h.stage.activeBackdropKey, contains('detail_test_still_s2_e3'));
         expect(find.byKey(const Key('ev_episode_overview_s2_e3')), findsNothing);
 
-        await tester.pump(const Duration(milliseconds: 260));
+        await tester.pump(const Duration(milliseconds: 220));
         expect(find.byKey(const Key('ev_episode_overview_s2_e3')), findsOneWidget);
 
         // Move away: overview hides, and after 900ms stage restores base backdrop.
@@ -1270,6 +1277,144 @@ void main() {
         expect(find.text('第 1 季'), findsOneWidget);
         expect(find.text('2 / 2 已看'), findsOneWidget);
         expect(find.byKey(const Key('ev_episode_card_s1_e1')), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'scrolled detail episode hover switches previewBackdrop onto top Stack slot with opacity 1.0 and soft 0.30 veil (blur 0) within 400ms in paper and cinema themes',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        for (final themeMode in const [ThemeMode.paper, ThemeMode.cinema]) {
+          final h = _createHarness(
+            initialPrefs: LocalPreferences(
+              theme: themeMode,
+              detailTrailerDelay: null,
+              themeMusic: false,
+            ),
+          );
+          // Pre-seed stage with a prior backdrop (like navigating from browse page)
+          // so entering detail page puts series backdrop on slot 1, forcing first
+          // episode hover to switch active slot 1 -> 0.
+          h.stage.setBaseBackdrop(
+            ArtworkPlan(
+              layers: [ArtworkLayer(source: _FakeArtworkRef('prior_home'), fit: ArtworkFit.cover)],
+              fallbackTitle: 'Home',
+            ),
+          );
+
+          await tester.pumpWidget(
+            _wrapDetail(
+              h,
+              child: const EvDetailPage(itemId: 's1', enableAnimations: false),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          // Scroll down past the full veil threshold (scrollProgress == 1.0) while keeping episode cards in view.
+          final scroller = tester.widget<SingleChildScrollView>(
+            find.byKey(const Key('ev_detail_scroller')),
+          ).controller!;
+          scroller.jumpTo(560);
+          await tester.pumpAndSettle();
+          expect(h.stage.scrollProgress, closeTo(1.0, 1e-6));
+
+          if (themeMode == ThemeMode.paper) {
+            final preVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+            expect(preVeil.color.a, closeTo(0.64, 0.01));
+            expect(
+              find.descendant(
+                of: find.byKey(const Key('ev_stage_veil')),
+                matching: find.byType(BackdropFilter),
+              ),
+              findsOneWidget,
+            );
+          }
+
+          final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+          await mouse.addPointer(location: Offset.zero);
+
+          Stack backdropStack() => tester.widget<Stack>(
+            find.ancestor(
+              of: find.byKey(const ValueKey<String>('ev_stage_slot_0')),
+              matching: find.byType(Stack),
+            ).first,
+          );
+
+          // Hover episode s2_e2 and advance exactly 400ms (100ms debounce + 300ms transition).
+          await mouse.moveTo(tester.getCenter(find.byKey(const Key('ev_episode_card_s2_e2'))));
+          await tester.pump(const Duration(milliseconds: 100));
+          await tester.pump(const Duration(milliseconds: 300));
+
+          expect(h.stage.previewBackdrop, isNotNull);
+          expect(stageArtworkKey(h.stage.previewBackdrop), contains('detail_test_still_s2_e2'));
+          expect(h.stage.veilLifted, isTrue);
+
+          final topKey1 = backdropStack().children[1].key! as ValueKey<String>;
+          final topSlot1 = find.byKey(topKey1);
+          expect(
+            find.descendant(
+              of: topSlot1,
+              matching: find.byKey(const ValueKey<String>('detail_test_still_s2_e2')),
+            ),
+            findsOneWidget,
+            reason: 'New episode still must be on top Stack slot in $themeMode',
+          );
+          final topAnimOpacity1 = tester.widget<AnimatedOpacity>(
+            find.descendant(of: topSlot1, matching: find.byType(AnimatedOpacity)),
+          );
+          final topFade1 = tester.widget<FadeTransition>(
+            find.descendant(of: topSlot1, matching: find.byType(FadeTransition)),
+          );
+          expect(topAnimOpacity1.opacity, 1.0);
+          expect(topFade1.opacity.value, 1.0);
+
+          final veilFill = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+          expect(veilFill.color.a, closeTo(0.30, 0.01));
+          final expectedBg = themeMode == ThemeMode.paper ? EvTheme.paper.bg : EvTheme.cinema.bg;
+          expect(veilFill.color.toARGB32() & 0x00FFFFFF, expectedBg.toARGB32() & 0x00FFFFFF);
+          expect(
+            find.descendant(
+              of: find.byKey(const Key('ev_stage_veil')),
+              matching: find.byType(BackdropFilter),
+            ),
+            findsNothing,
+          );
+
+          // Hover a second episode s2_e3 (toggling slot again) and verify 400ms top-slot full opacity.
+          await mouse.moveTo(tester.getCenter(find.byKey(const Key('ev_episode_card_s2_e3'))));
+          await tester.pump(const Duration(milliseconds: 100));
+          await tester.pump(const Duration(milliseconds: 300));
+
+          expect(stageArtworkKey(h.stage.previewBackdrop), contains('detail_test_still_s2_e3'));
+          final topKey2 = backdropStack().children[1].key! as ValueKey<String>;
+          expect(topKey2, isNot(topKey1));
+          final topSlot2 = find.byKey(topKey2);
+          expect(
+            find.descendant(
+              of: topSlot2,
+              matching: find.byKey(const ValueKey<String>('detail_test_still_s2_e3')),
+            ),
+            findsOneWidget,
+          );
+          expect(
+            tester.widget<FadeTransition>(
+              find.descendant(of: topSlot2, matching: find.byType(FadeTransition)),
+            ).opacity.value,
+            1.0,
+          );
+
+          // Clean up hover & timers before next iteration.
+          await mouse.moveTo(const Offset(5, 5));
+          await tester.pump(const Duration(milliseconds: 950));
+          await tester.pumpAndSettle();
+          await mouse.removePointer();
+          await tester.pumpWidget(const SizedBox.shrink());
+          await h.dispose();
+        }
       },
     );
   });

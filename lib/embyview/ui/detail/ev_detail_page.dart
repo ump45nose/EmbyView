@@ -349,7 +349,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
     _epT?.cancel(); _epT = null;
     if (active) {
       _hoveredEpId = ep.card.id;
-      _epT = Timer(const Duration(milliseconds: 350), () {
+      _epT = Timer(const Duration(milliseconds: 100), () {
         if (!mounted || _hoveredEpId != ep.card.id) return;
         _epHovering = true; if (_trailerLive) _stopLive();
         final st = _scope?.stage;

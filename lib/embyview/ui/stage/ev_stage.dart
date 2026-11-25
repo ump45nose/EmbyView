@@ -35,6 +35,8 @@ class EvStage extends StatefulWidget {
   final bool enableMotion;
 
   static const Duration _videoFadeDuration = Duration(milliseconds: 1400);
+  static const Duration _previewFadeDuration = Duration(milliseconds: 240);
+  static const Duration _veilLiftDuration = Duration(milliseconds: 260);
   static const Duration _veilTransitionDuration = Duration(milliseconds: 900);
   static const Duration _scrimCinemaDuration = Duration(milliseconds: 800);
   static const Duration _scrimPaperDuration = Duration(milliseconds: 500);
@@ -211,14 +213,20 @@ class _EvStageState extends State<EvStage>
       isPaper: theme.isPaper,
     );
 
+    final isPreview = c.previewBackdrop != null;
+    final slotDuration = isPreview ? EvStage._previewFadeDuration : EvDurations.crossfade;
+    final slotCurve = isPreview ? EvCurves.out : EvCurves.soft;
+
     Widget frame = Stack(
       fit: StackFit.expand,
       children: [
-        for (var i = 0; i < 2; i++)
+        for (final i in [1 - _activeSlot, _activeSlot])
           _BackdropSlot(
             key: ValueKey<String>('ev_stage_slot_$i'),
             plan: _slots[i],
             visible: hasBackdrop && _activeSlot == i,
+            duration: slotDuration,
+            curve: slotCurve,
             kenBurns: _kbController,
             enableMotion: widget.enableMotion && !isAmbient,
           ),
@@ -294,7 +302,9 @@ class _EvStageState extends State<EvStage>
                 key: const Key('ev_stage_veil'),
                 bg: theme.bg,
                 spec: veil,
-                duration: _veilAnimating ? EvStage._veilTransitionDuration : Duration.zero,
+                duration: !_veilAnimating
+                    ? Duration.zero
+                    : (c.veilLifted ? EvStage._veilLiftDuration : EvStage._veilTransitionDuration),
               ),
             ),
           ),
@@ -367,12 +377,16 @@ class _BackdropSlot extends StatefulWidget {
     super.key,
     required this.plan,
     required this.visible,
+    required this.duration,
+    required this.curve,
     required this.kenBurns,
     required this.enableMotion,
   });
 
   final ArtworkPlan? plan;
   final bool visible;
+  final Duration duration;
+  final Curve curve;
   final Animation<double> kenBurns;
   final bool enableMotion;
 
@@ -401,8 +415,8 @@ class _BackdropSlotState extends State<_BackdropSlot> {
     final plan = widget.plan;
     return AnimatedOpacity(
       opacity: widget.visible && plan != null ? 1.0 : 0.0,
-      duration: EvDurations.crossfade,
-      curve: EvCurves.soft,
+      duration: widget.duration,
+      curve: widget.curve,
       child: plan == null ? const SizedBox.shrink() : _buildPlan(plan),
     );
   }
