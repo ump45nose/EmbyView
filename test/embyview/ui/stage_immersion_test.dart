@@ -8,6 +8,7 @@ import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/stage/ev_stage.dart';
 import 'package:moonfin/embyview/ui/stage/ev_stage_controller.dart';
 import 'package:moonfin/embyview/ui/stage/immersion.dart';
+import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
 import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
 
 // 1x1 valid transparent PNG for synchronous MemoryImage decoding in tests.
@@ -844,6 +845,112 @@ void main() {
         stage.dispose();
         await playback.close();
         await prefs.close();
+      },
+    );
+
+    testWidgets(
+      'ev_stage_vlabel sits at top == scale.rem(4.75) below the top bar, and paper detail veilLifted retains soft 0.30*p warm-white veil without blur while animating smoothly',
+      (tester) async {
+        const size = Size(1440, 900);
+        final scale = EvScale.fromSize(size);
+        final stage = EvStageController()
+          ..setBaseBackdrop(_card('series-base').art.stage)
+          ..setMode(EvStageMode.detail, detailNoBlur: true)
+          ..setScrollProgress(0.8)
+          ..setVideoState(visible: true, label: '预告片 · 静音');
+
+        await tester.pumpWidget(
+          _stageHarness(
+            controller: stage,
+            themeMode: ThemeMode.paper,
+            enableMotion: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // 1. vlabel sits at top == scale.rem(4.75) (below top bar, never covered).
+        final vlabelRect = tester.getRect(find.byKey(const Key('ev_stage_vlabel')));
+        expect(vlabelRect.top, closeTo(scale.rem(4.75), 0.5));
+        final positioned = tester.widget<Positioned>(
+          find.ancestor(
+            of: find.byKey(const Key('ev_stage_vlabel')),
+            matching: find.byType(Positioned),
+          ).first,
+        );
+        expect(positioned.top, closeTo(scale.rem(4.75), 1e-6));
+
+        // 2. Paper detail scrolled down: lifting veil + setting episode preview animates smoothly
+        //    over 900ms (not 0ms snap) and settles to soft warm-white alpha = 0.30 * p, blur = 0.
+        stage
+          ..setVideoState(visible: false)
+          ..setVeilLifted(true)
+          ..setPreviewBackdrop(_card('ep-6').art.stage);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+
+        // Mid-transition at 50ms: veil opacity has not snapped directly to 0.24 yet.
+        final midVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+        expect(midVeil.color.a, greaterThan(0.35));
+
+        await tester.pumpAndSettle();
+        final settledPaperSpec = EvStage.computeVeil(
+          mode: EvStageMode.detail,
+          scrollProgress: 0.8,
+          detailNoBlur: true,
+          veilLifted: true,
+          isPaper: true,
+        );
+        expect(settledPaperSpec.opacity, closeTo(0.30 * 0.8, 1e-6));
+        expect(settledPaperSpec.blurSigma, 0.0);
+
+        final settledPaperVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+        expect(settledPaperVeil.color.a, closeTo(0.30 * 0.8, 0.01));
+        expect(
+          settledPaperVeil.color.toARGB32() & 0x00FFFFFF,
+          EvTheme.paper.bg.toARGB32() & 0x00FFFFFF,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('ev_stage_veil')),
+            matching: find.byType(BackdropFilter),
+          ),
+          findsNothing,
+        );
+
+        // 3. Cinema theme detail veilLifted stays unchanged (dark bg, alpha = 0.30 * p, blur = 0).
+        await tester.pumpWidget(
+          _stageHarness(
+            controller: stage,
+            themeMode: ThemeMode.cinema,
+            enableMotion: false,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final cinemaSpec = EvStage.computeVeil(
+          mode: EvStageMode.detail,
+          scrollProgress: 0.8,
+          detailNoBlur: true,
+          veilLifted: true,
+          isPaper: false,
+        );
+        expect(cinemaSpec.opacity, closeTo(0.30 * 0.8, 1e-6));
+        expect(cinemaSpec.blurSigma, 0.0);
+
+        final settledCinemaVeil = tester.widget<ColoredBox>(find.byKey(const Key('ev_stage_veil_fill')));
+        expect(settledCinemaVeil.color.a, closeTo(0.30 * 0.8, 0.01));
+        expect(
+          settledCinemaVeil.color.toARGB32() & 0x00FFFFFF,
+          EvTheme.cinema.bg.toARGB32() & 0x00FFFFFF,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('ev_stage_veil')),
+            matching: find.byType(BackdropFilter),
+          ),
+          findsNothing,
+        );
+
+        stage.dispose();
       },
     );
   });

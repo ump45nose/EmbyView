@@ -32,7 +32,10 @@ class _EvHomePageState extends State<EvHomePage> {
 
   HomeData? _home;
   HomeRecommendation? _activeHero;
-  String? _hoveredCardId;
+  MediaCard? _hoveredCard;
+  MediaCard? _focusedCard;
+  String? _activeInteractionCardId;
+  bool _wasHeroVisible = true;
   bool _loading = true;
   Object? _error;
   int _loadToken = 0;
@@ -51,10 +54,13 @@ class _EvHomePageState extends State<EvHomePage> {
     _scope = scope;
     if (!changed) return;
 
-    if (_hoveredCardId != null) {
-      scope.immersion.onCardHoverEnd(cardId: _hoveredCardId);
-      _hoveredCardId = null;
+    if (_activeInteractionCardId != null) {
+      scope.immersion.onCardHoverEnd(cardId: _activeInteractionCardId);
+      _activeInteractionCardId = null;
     }
+    _hoveredCard = null;
+    _focusedCard = null;
+    _wasHeroVisible = true;
     _hoverPaused.value = false;
     _previewCard.value = null;
     _attachedData = scope.services.data;
@@ -133,29 +139,68 @@ class _EvHomePageState extends State<EvHomePage> {
     final vh = pos.hasViewportDimension && pos.viewportDimension > 0 ? pos.viewportDimension : 900.0;
     scope.shell.setScrollOffset(pos.pixels);
     scope.stage.setScrollProgress((pos.pixels / (vh * 0.5)).clamp(0.0, 1.0));
-    if (!_isHeroVisible && _previewCard.value != null) _previewCard.value = null;
+    final heroVisible = _isHeroVisible;
+    if (!heroVisible && _previewCard.value != null) _previewCard.value = null;
+    if (!_wasHeroVisible && heroVisible) {
+      final active = _hoveredCard ?? _focusedCard;
+      if (active != null) {
+        _activeInteractionCardId = null;
+        _activateInteraction(active);
+      }
+    }
+    _wasHeroVisible = heroVisible;
   }
 
-  void _onCardInteraction(MediaCard card, bool active) {
+  void _activateInteraction(MediaCard card) {
     final scope = _scope;
-    if (scope == null) return;
+    if (scope == null || _activeInteractionCardId == card.id) return;
+    _activeInteractionCardId = card.id;
+    _hoverPaused.value = true;
+    final scrolledDown = !_isHeroVisible;
+    scope.immersion.onCardHoverStart(
+      card,
+      scrolledDown: scrolledDown,
+      allowVideo: !(scrolledDown && EvTheme.of(context).isPaper),
+      onBackdropReady: () {
+        if (mounted && _activeInteractionCardId == card.id && _isHeroVisible) _previewCard.value = card;
+      },
+    );
+  }
+
+  void _clearInteraction(String cardId) {
+    final scope = _scope;
+    if (scope == null || _activeInteractionCardId != cardId) return;
+    _activeInteractionCardId = null;
+    _hoverPaused.value = false;
+    scope.immersion.onCardHoverEnd(cardId: cardId);
+    if (_previewCard.value != null) _previewCard.value = null;
+  }
+
+  void _onCardHover(MediaCard card, bool active) {
     if (active) {
-      _hoveredCardId = card.id;
-      _hoverPaused.value = true;
-      final scrolledDown = !_isHeroVisible;
-      scope.immersion.onCardHoverStart(
-        card,
-        scrolledDown: scrolledDown,
-        allowVideo: !(scrolledDown && EvTheme.of(context).isPaper),
-        onBackdropReady: () {
-          if (mounted && _hoveredCardId == card.id && _isHeroVisible) _previewCard.value = card;
-        },
-      );
-    } else if (_hoveredCardId == card.id) {
-      _hoveredCardId = null;
-      _hoverPaused.value = false;
-      scope.immersion.onCardHoverEnd(cardId: card.id);
-      if (_previewCard.value != null) _previewCard.value = null;
+      _hoveredCard = card;
+      _activateInteraction(card);
+    } else if (_hoveredCard?.id == card.id) {
+      _hoveredCard = null;
+      if (_focusedCard != null) {
+        _activateInteraction(_focusedCard!);
+      } else {
+        _clearInteraction(card.id);
+      }
+    }
+  }
+
+  void _onCardFocus(MediaCard card, bool active) {
+    if (active) {
+      _focusedCard = card;
+      _activateInteraction(card);
+    } else if (_focusedCard?.id == card.id) {
+      _focusedCard = null;
+      if (_hoveredCard != null) {
+        _activateInteraction(_hoveredCard!);
+      } else {
+        _clearInteraction(card.id);
+      }
     }
   }
 
@@ -167,7 +212,7 @@ class _EvHomePageState extends State<EvHomePage> {
   @override
   void dispose() {
     unawaited(_prefsSub?.cancel());
-    if (_hoveredCardId != null) _scope?.immersion.onCardHoverEnd(cardId: _hoveredCardId);
+    if (_activeInteractionCardId != null) _scope?.immersion.onCardHoverEnd(cardId: _activeInteractionCardId);
     _scrollController..removeListener(_onScroll)..dispose();
     _previewCard.dispose();
     _hoverPaused.dispose();
@@ -317,8 +362,8 @@ class _EvHomePageState extends State<EvHomePage> {
         onMoreTap: s.more != null ? () => _scope?.shell.openWall(s.more!, title: s.title.isNotEmpty ? s.title : resolvedTitle) : null,
         onCardTap: _openDetail,
         onCardPlay: (c) => _play(PlayTarget(itemId: c.id), c.art),
-        onCardHoverChanged: _onCardInteraction,
-        onCardFocusChanged: _onCardInteraction,
+        onCardHoverChanged: _onCardHover,
+        onCardFocusChanged: _onCardFocus,
       );
     }
 
@@ -338,8 +383,8 @@ class _EvHomePageState extends State<EvHomePage> {
             resumeItems: home.continueWatching, style: EvCardStyle.landscape,
             onCardTap: _openDetail,
             onCardPlay: (c) => _play(resumeById[c.id]?.target ?? PlayTarget(itemId: c.id), c.art),
-            onCardHoverChanged: _onCardInteraction,
-            onCardFocusChanged: _onCardInteraction,
+            onCardHoverChanged: _onCardHover,
+            onCardFocusChanged: _onCardFocus,
           ),
         if (home.zones.isNotEmpty)
           EvZoneStrip(

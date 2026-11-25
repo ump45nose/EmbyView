@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' hide ThemeMode;
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/home/ev_feature_spread.dart';
@@ -1275,6 +1275,80 @@ void main() {
           await tester.pumpWidget(const SizedBox.shrink());
           await h.dispose();
         }
+      },
+    );
+
+    testWidgets(
+      'keyboard focus on home row 1 keeps page at top and swaps hero, lower shelves scroll into view, and moving back up restores top',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final h = _createHarness();
+        addTearDown(h.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: Size(1440, 900)),
+              child: Scaffold(
+                body: EvShell(
+                  services: h.services,
+                  controller: h.shell,
+                  stage: h.stage,
+                  immersion: h.immersion,
+                  configureWindow: false,
+                  enableStageMotion: false,
+                  homeBuilder: (_) => const EvHomePage(enableAnimations: false),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final scroller = tester.widget<SingleChildScrollView>(find.byKey(const Key('ev_home_scroller'))).controller!;
+        final heroFinder = find.byKey(const Key('ev_hero'));
+        expect(scroller.offset, closeTo(0.0, 0.5));
+
+        // Direct ArrowDown focuses first row card without scrolling down.
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pumpAndSettle();
+        expect(scroller.offset, closeTo(0.0, 0.5));
+        expect(
+          FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EvCard>()?.card.id,
+          'hero_resume',
+        );
+
+        // ArrowRight moves to 2nd card in row 1 -> stays at top, hero & stage follow focus after 0.4s.
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+        await tester.pump();
+        expect(scroller.offset, closeTo(0.0, 0.5));
+        expect(
+          FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EvCard>()?.card.id,
+          'cw_2',
+        );
+        await tester.pump(const Duration(milliseconds: 450));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(scroller.offset, closeTo(0.0, 0.5));
+        expect(find.descendant(of: heroFinder, matching: find.text('星际穿越')), findsOneWidget);
+        expect(h.stage.activeBackdropKey, contains('home_test_bg_cw_2'));
+
+        // ArrowDown from row 1 to lower sections scrolls the page down to bring them into view.
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pumpAndSettle();
+        expect(scroller.offset, greaterThan(100.0));
+
+        // ArrowUp back to row 1 scrolls the page back to the top so the full hero is exposed.
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+        await tester.pumpAndSettle();
+        expect(scroller.offset, closeTo(0.0, 1.0));
+        expect(
+          FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EvCard>()?.card.id,
+          isIn(['hero_resume', 'cw_2']),
+        );
       },
     );
   });

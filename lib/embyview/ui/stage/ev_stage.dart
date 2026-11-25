@@ -80,6 +80,7 @@ class _EvStageState extends State<EvStage>
   String? _lastVideoLabel;
   bool _lastVeilLifted = false;
   EvStageMode _lastMode = EvStageMode.hero;
+  double _lastScrollProgress = 0.0;
   bool _veilAnimating = false;
   bool _disableAnimations = false;
   WidgetBuilder? _videoSurfaceBuilder;
@@ -152,9 +153,16 @@ class _EvStageState extends State<EvStage>
     if (c.videoLabel != null && c.videoLabel!.isNotEmpty) {
       _lastVideoLabel = c.videoLabel;
     }
-    _veilAnimating = !initial && (c.veilLifted != _lastVeilLifted || c.mode != _lastMode);
+    if (initial) {
+      _veilAnimating = false;
+    } else if (c.veilLifted != _lastVeilLifted || c.mode != _lastMode) {
+      _veilAnimating = true;
+    } else if ((c.scrollProgress - _lastScrollProgress).abs() > 1e-4) {
+      _veilAnimating = false;
+    }
     _lastVeilLifted = c.veilLifted;
     _lastMode = c.mode;
+    _lastScrollProgress = c.scrollProgress;
   }
 
   void _syncKenBurns() {
@@ -303,7 +311,7 @@ class _EvStageState extends State<EvStage>
             Positioned(
               left: 0,
               right: 0,
-              top: scale.rem(1.25),
+              top: scale.rem(4.75),
               child: IgnorePointer(
                 child: Center(
                   child: _VideoLabelCapsule(

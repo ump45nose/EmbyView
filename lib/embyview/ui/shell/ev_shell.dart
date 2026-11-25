@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart' hide ThemeMode;
 import 'package:flutter/services.dart';
 import 'package:moonfin/embyview/embyview.dart';
+import 'package:moonfin/embyview/ui/shelf/ev_card.dart';
 import 'package:moonfin/embyview/ui/shell/ev_avatar_menu.dart';
 import 'package:moonfin/embyview/ui/shell/ev_scope.dart';
 import 'package:moonfin/embyview/ui/shell/ev_top_bar.dart';
@@ -20,7 +21,7 @@ import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
 class EvShell extends StatefulWidget {
   const EvShell({
     super.key, required this.services, this.initialDestination, this.controller,
-    this.stage, this.immersion,
+    this.stage, this.immersion, this.focusScopeNode,
     this.homeBuilder, this.zoneBuilder, this.wallBuilder,
     this.configureWindow = true, this.onConfigureWindow, this.windowDragBuilder,
     this.enableStageMotion = true,
@@ -31,6 +32,7 @@ class EvShell extends StatefulWidget {
   final EvShellController? controller;
   final EvStageController? stage;
   final Immersion? immersion;
+  final FocusScopeNode? focusScopeNode;
   final WidgetBuilder? homeBuilder;
   final Widget Function(BuildContext context, String zoneId)? zoneBuilder;
   final Widget Function(BuildContext context, WallQuery query, String? title)? wallBuilder;
@@ -58,7 +60,8 @@ class _EvShellState extends State<EvShell> {
   bool _avatarMenuOpen = false;
   int _zonesToken = 0;
 
-  final _shellScope = FocusScopeNode(debugLabel: 'ev_shell_scope');
+  late FocusScopeNode _shellScope;
+  late bool _ownsShellScope;
   final _menuScope = FocusScopeNode(debugLabel: 'ev_avatar_menu_scope');
 
   void _bindStage() {
@@ -68,9 +71,21 @@ class _EvShellState extends State<EvShell> {
     _immersion = widget.immersion ?? Immersion(stage: _stage, services: widget.services);
   }
 
+  void _ensureInitialFocus() {
+    if (!mounted || _avatarMenuOpen) return;
+    if (_shellScope.hasFocus || !_shellScope.canRequestFocus) return;
+    if (_shellScope.ancestors.any((a) => !a.descendantsAreFocusable)) return;
+    final primary = FocusManager.instance.primaryFocus;
+    if (primary == null || primary == FocusManager.instance.rootScope) {
+      _shellScope.requestFocus();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    _ownsShellScope = widget.focusScopeNode == null;
+    _shellScope = widget.focusScopeNode ?? FocusScopeNode(debugLabel: 'ev_shell_scope');
     _bindStage();
     _ownsShell = widget.controller == null;
     _shell = widget.controller ?? EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
@@ -82,11 +97,17 @@ class _EvShellState extends State<EvShell> {
     if (widget.configureWindow && widget.onConfigureWindow != null) {
       unawaited(() async { try { await widget.onConfigureWindow!(); } catch (_) {} }());
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _ensureInitialFocus());
   }
 
   @override
   void didUpdateWidget(EvShell old) {
     super.didUpdateWidget(old);
+    if (old.focusScopeNode != widget.focusScopeNode) {
+      if (_ownsShellScope) _shellScope.dispose();
+      _ownsShellScope = widget.focusScopeNode == null;
+      _shellScope = widget.focusScopeNode ?? FocusScopeNode(debugLabel: 'ev_shell_scope');
+    }
     if (old.stage != widget.stage || old.immersion != widget.immersion) {
       if (_ownsImmersion) _immersion.dispose();
       if (_ownsStage) _stage.dispose();
@@ -202,7 +223,7 @@ class _EvShellState extends State<EvShell> {
     unawaited(_accountsSub?.cancel());
     _shell.removeListener(_onShellChanged);
     if (_ownsShell) _shell.dispose();
-    _shellScope.dispose();
+    if (_ownsShellScope) _shellScope.dispose();
     _menuScope.dispose();
     if (_ownsImmersion) _immersion.dispose();
     if (_ownsStage) _stage.dispose();
@@ -244,6 +265,7 @@ class _EvShellState extends State<EvShell> {
                 },
                 child: FocusScope(
                   node: _shellScope,
+                  autofocus: true,
                   child: FocusTraversalGroup(
                     policy: _EvSpatialPolicy(),
                     child: ColoredBox(
@@ -375,9 +397,64 @@ class _EvSpatialPolicy extends ReadingOrderTraversalPolicy {
     if (best == null) return false;
     best.requestFocus();
     if (!horiz && best.context != null) {
-      try { Scrollable.ensureVisible(best.context!, alignment: 0.5, duration: EvDurations.normal, curve: EvCurves.out); } catch (_) {}
+      _scrollVerticallyForFocus(best.context!, best.rect, scope.rect, dir);
     }
     return true;
+  }
+
+  static ScrollableState? _findVerticalScrollable(BuildContext context) {
+    ScrollableState? found;
+    context.visitAncestorElements((el) {
+      if (el is StatefulElement && el.state is ScrollableState) {
+        final s = el.state as ScrollableState;
+        if (s.widget.axisDirection == AxisDirection.down ||
+            s.widget.axisDirection == AxisDirection.up) {
+          found = s;
+          return false;
+        }
+      }
+      return true;
+    });
+    return found;
+  }
+
+  static void _scrollVerticallyForFocus(
+    BuildContext context,
+    Rect targetRect,
+    Rect scopeRect,
+    TraversalDirection dir,
+  ) {
+    final vScroll = _findVerticalScrollable(context);
+    if (vScroll != null) {
+      final pos = vScroll.position;
+      final vh = pos.hasViewportDimension && pos.viewportDimension > 0
+          ? pos.viewportDimension
+          : (scopeRect.height > 0 ? scopeRect.height : 900.0);
+      final scrollPixels = pos.pixels;
+      final topInViewport = targetRect.top - scopeRect.top;
+      final bottomInViewport = targetRect.bottom - scopeRect.top;
+      final topInDoc = scrollPixels + topInViewport;
+      final isHeroPage = EvScope.maybeOf(context)?.stage.mode == EvStageMode.hero;
+
+      if (dir == TraversalDirection.up &&
+          scrollPixels > 0.5 &&
+          topInDoc < vh &&
+          (isHeroPage || topInDoc + targetRect.height <= vh)) {
+        try {
+          unawaited(pos.animateTo(0.0, duration: EvDurations.normal, curve: EvCurves.out));
+        } catch (_) {}
+        return;
+      }
+      if (scrollPixels < vh * 0.25 &&
+          topInViewport >= 0 &&
+          topInViewport < vh &&
+          (isHeroPage || bottomInViewport <= vh)) {
+        return;
+      }
+    }
+    try {
+      Scrollable.ensureVisible(context, alignment: 0.5, duration: EvDurations.normal, curve: EvCurves.out);
+    } catch (_) {}
   }
 }
 
@@ -388,11 +465,32 @@ class _EvSpatialAction extends Action<DirectionalFocusIntent> {
   @override
   bool isEnabled(DirectionalFocusIntent intent) => FocusManager.instance.primaryFocus?.context?.widget is! EditableText;
 
+  static FocusNode? _firstInitialTarget(FocusScopeNode scope) {
+    FocusNode? firstAny;
+    FocusNode? firstCard;
+    final scopeTop = scope.rect.top;
+    final vh = scope.rect.height > 0 ? scope.rect.height : 900.0;
+    for (final n in scope.traversalDescendants) {
+      if (!n.canRequestFocus || n.skipTraversal) continue;
+      final r = n.rect;
+      if (r.isEmpty || r.width <= 0 || r.height <= 0) continue;
+      firstAny ??= n;
+      final ctx = n.context;
+      if (ctx != null && ctx.findAncestorWidgetOfExactType<EvCard>() != null) {
+        final top = r.top - scopeTop;
+        if (top >= 0 && top < vh + 400) return n;
+        firstCard ??= n;
+      }
+    }
+    return firstCard ?? firstAny;
+  }
+
   @override
   void invoke(DirectionalFocusIntent intent) {
     final p = FocusManager.instance.primaryFocus;
     if (p == null || p == shellScope || p is FocusScopeNode) {
-      (p is FocusScopeNode ? p : shellScope).traversalDescendants.firstOrNull?.requestFocus();
+      final scope = p is FocusScopeNode ? p : shellScope;
+      _firstInitialTarget(scope)?.requestFocus();
       return;
     }
     _EvSpatialPolicy.moveFrom(p, p.enclosingScope ?? shellScope, intent.direction);

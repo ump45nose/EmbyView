@@ -45,7 +45,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
   ThemeMedia _themeMedia = const ThemeMedia();
   List<PersonCredit> _people = const [];
   List<MediaCard> _similar = const [];
-  List<ArtworkRef> _safeStills = const [];
+  List<SafeEpisodeStill> _safeStills = const [];
   List<SeasonSummary> _seasons = const [];
   List<SeasonJob> _jobs = const [];
   final Map<String, SeasonEpisodes> _epCache = {};
@@ -169,7 +169,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
   }
 
   Future<void> _loadSeries(EmbyViewData data, String seriesId, int token) async {
-    final (seasons, stills) = await (_safe(() => data.seasons(seriesId), const <SeasonSummary>[]), _safe(() => data.safeEpisodeStills(seriesId), const <ArtworkRef>[])).wait;
+    final (seasons, stills) = await (_safe(() => data.seasons(seriesId), const <SeasonSummary>[]), _safe(() => data.safeEpisodeStills(seriesId), const <SafeEpisodeStill>[])).wait;
     if (!mounted || token != _loadToken) return;
     setState(() { _seasons = seasons; _safeStills = stills; });
     if (seasons.isEmpty) { setState(() => _loadingEps = false); return; }
@@ -301,10 +301,27 @@ class _EvDetailPageState extends State<EvDetailPage> {
       return;
     }
     _stillIdx = 0; setState(() { _trailerLive = _stillLive = true; _cdSec = 0; });
-    void show() => _scope?.stage.setBaseBackdrop(ArtworkPlan(layers: [ArtworkLayer(source: _safeStills[_stillIdx % _safeStills.length], fit: ArtworkFit.cover)], fallbackTitle: _detail?.card.title ?? ''));
+    void show() => _scope?.stage.setBaseBackdrop(ArtworkPlan(layers: [ArtworkLayer(source: _safeStills[_stillIdx % _safeStills.length].image, fit: ArtworkFit.cover)], fallbackTitle: _detail?.card.title ?? ''));
     show();
     _stillT?.cancel();
-    _stillT = Timer.periodic(const Duration(milliseconds: 3200), (_) { if (mounted && _stillLive && _safeStills.isNotEmpty) { _stillIdx = (_stillIdx + 1) % _safeStills.length; show(); } });
+    _stillT = Timer.periodic(const Duration(milliseconds: 3200), (_) {
+      if (!mounted || !_stillLive || _safeStills.isEmpty) return;
+      setState(() => _stillIdx = (_stillIdx + 1) % _safeStills.length);
+      show();
+    });
+  }
+
+  String _safeStillLabel() {
+    if (_safeStills.isEmpty) return '正片片段';
+    final still = _safeStills[_stillIdx % _safeStills.length];
+    final sn = still.seasonNumber, ep = still.episodeNumber;
+    if (sn != null && ep != null) return '正片片段 · 第 $sn 季 第 $ep 集';
+    final rawName = still.seasonName?.trim();
+    if (rawName != null && rawName.isNotEmpty && ep != null) {
+      return '正片片段 · ${EvDetailEpisodesSection.formatSeasonName(SeasonSummary(id: '', name: rawName, total: 0))} 第 $ep 集';
+    }
+    if (ep != null) return '正片片段 · 第 $ep 集';
+    return '正片片段';
   }
 
   void _stopLive({bool restartCountdown = true}) {
@@ -470,13 +487,13 @@ class _EvDetailPageState extends State<EvDetailPage> {
       ScrollConfiguration(behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
           child: SingleChildScrollView(key: const Key('ev_detail_scroller'), controller: _scroll, child: _buildBody(t, s, d))),
       if (_stillLive)
-        Positioned(left: 0, right: 0, top: s.rem(1.25), child: IgnorePointer(child: Center(child: ClipRRect(
+        Positioned(left: 0, right: 0, top: s.rem(4.75), child: IgnorePointer(child: Center(child: ClipRRect(
           key: const Key('ev_detail_safe_still_label'), borderRadius: BorderRadius.circular(999),
           child: BackdropFilter(filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16), child: Container(
             height: s.rem(2), padding: EdgeInsets.symmetric(horizontal: s.rem(0.875)), color: const Color.fromRGBO(0, 0, 0, 0.42),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               EvIcon(EvIcons.film, size: s.rem(0.875), color: const Color(0xFFFFFFFF)), SizedBox(width: s.rem(0.5)),
-              Text('正片片段', style: t.bodyStyle(s.font(0.875), fontWeight: FontWeight.w500, color: const Color(0xFFFFFFFF))),
+              Text(_safeStillLabel(), style: t.bodyStyle(s.font(0.875), fontWeight: FontWeight.w500, color: const Color(0xFFFFFFFF))),
             ]),
           )),
         )))),

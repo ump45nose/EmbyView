@@ -294,6 +294,8 @@ void main() {
                 'Id': 'e$i',
                 'Name': 'E$i',
                 'Type': 'Episode',
+                'ParentIndexNumber': i >= 3 ? 2 : 1,
+                'SeasonName': i >= 3 ? '第 2 季' : 'Season 1',
                 'IndexNumber': i,
                 'SeriesId': 's',
                 if (i != 4) 'ImageTags': {'Primary': 'p$i'},
@@ -329,7 +331,11 @@ void main() {
     expect([episodes.season.total, episodes.playedCount, episodes.episodes.last.played], [4, 2, null]);
     expect(episodes.season.art?.id, 's:Primary:0');
     expect(episodes.episodes.last.still.layers.single.text, '第 4 集');
-    expect((await f.data.safeEpisodeStills('s')).map((e) => e.id), ['e1:Primary:0', 'e2:Primary:0', 'e3:Primary:0']);
+    final stills = await f.data.safeEpisodeStills('s');
+    expect(stills.map((e) => e.image.id), ['e1:Primary:0', 'e2:Primary:0', 'e3:Primary:0']);
+    expect(stills.map((e) => e.seasonNumber), [1, 1, 2]);
+    expect(stills.map((e) => e.episodeNumber), [1, 2, 3]);
+    expect(stills.map((e) => e.seasonName), ['Season 1', 'Season 1', '第 2 季']);
     expect(await f.data.safeEpisodeStills('other'), isEmpty);
     final first = (await f.data.detail('b')).card;
     expect(first.art.landscape.layers.map((e) => e.source.id), ['b:Thumb:0', 'b:Backdrop:0', 'b:Backdrop:0']);

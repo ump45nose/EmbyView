@@ -928,6 +928,186 @@ void main() {
         expect(focusInside(const Key('ev_topbar_tab_movie')), isTrue);
       },
     );
+
+    testWidgets(
+      'EvShell autofocuses on initial mount so arrow keys work immediately without Tab or click',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final prefs = _FakePreferences();
+        final accounts = _FakeAccounts(
+          const AccountSnapshot(
+            phase: AccountPhase.signedIn,
+            current: _kProfileSfw,
+            profiles: [_kProfileSfw],
+            sessionId: 's-auto',
+          ),
+        );
+        final shellController = EvShellController(zones: _kDefaultZones);
+        final cardNodes = List.generate(3, (i) => FocusNode(debugLabel: 'auto_card_$i'));
+        addTearDown(() async {
+          for (final n in cardNodes) {
+            n.dispose();
+          }
+          shellController.dispose();
+          await prefs.close();
+          await accounts.close();
+        });
+
+        await tester.pumpWidget(
+          _appShell(
+            EvShell(
+              services: EmbyViewServices(
+                preferences: prefs,
+                accounts: accounts,
+                sessionId: 's-auto',
+                data: _FakeData(_kDefaultZones),
+              ),
+              controller: shellController,
+              configureWindow: false,
+              enableStageMotion: false,
+              homeBuilder: (_) => SingleChildScrollView(
+                padding: const EdgeInsets.only(top: 120),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    EvButton.primary(label: '首屏按钮', onPressed: () {}),
+                    EvShelf(
+                      title: '首排卡片',
+                      style: EvCardStyle.landscape,
+                      itemCount: 3,
+                      itemBuilder: (_, i) => EvCard(
+                        card: _card('auto_$i', '卡片 $i'),
+                        style: EvCardStyle.landscape,
+                        focusNode: cardNodes[i],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Directly press ArrowDown without Tab or clicking -> focuses first card.
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+        expect(cardNodes[0].hasFocus, isTrue);
+
+        // Press ArrowRight -> moves to second card.
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+        await tester.pump();
+        expect(cardNodes[1].hasFocus, isTrue);
+      },
+    );
+
+    testWidgets(
+      'buildStageFourTestShell opens detail with Enter from home card and restores scroll offset and card focus on Esc',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final prefs = _FakePreferences();
+        final accounts = _FakeAccounts(
+          const AccountSnapshot(
+            phase: AccountPhase.signedIn,
+            current: _kProfileSfw,
+            profiles: [_kProfileSfw],
+            sessionId: 's-esc-restore',
+          ),
+        );
+        final data = _DetailFlowData(_kDefaultZones);
+        addTearDown(() async {
+          await prefs.close();
+          await accounts.close();
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: Size(1440, 900)),
+              child: buildStageFourTestShell(
+                services: EmbyViewServices(
+                  preferences: prefs,
+                  accounts: accounts,
+                  sessionId: 's-esc-restore',
+                  data: data,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 120));
+
+        // Directly press ArrowDown then ArrowRight without Tab/click to focus 2nd card in row 1.
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+        await tester.pump();
+
+        final scroller = tester.widget<SingleChildScrollView>(find.byKey(const Key('ev_home_scroller'))).controller!;
+        expect(scroller.offset, closeTo(0.0, 0.5));
+
+        final focusedCardNode = FocusManager.instance.primaryFocus;
+        expect(focusedCardNode, isNotNull);
+        final focusedCard = focusedCardNode!.context?.findAncestorWidgetOfExactType<EvCard>();
+        expect(focusedCard, isNotNull);
+        expect(focusedCard!.card.id, 'cw_2');
+        expect(focusedCardNode.hasFocus, isTrue);
+
+        // Press Enter -> opens detail page for cw_2.
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(find.byKey(const Key('ev_topbar_back')), findsOneWidget);
+        expect(find.text('星际穿越详情简介'), findsOneWidget);
+
+        // Press Esc -> returns to home with scroll offset and exact card FocusNode restored.
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 120));
+        expect(find.byKey(const Key('ev_topbar_back')), findsNothing);
+        expect(scroller.offset, closeTo(0.0, 0.5));
+        expect(focusedCardNode.hasFocus, isTrue);
+
+        // Now scroll down to a lower shelf, focus a card there, open detail, and Esc back -> both scroll and focus restore.
+        scroller.jumpTo(520);
+        await tester.pump();
+        final recentCardFinder = find.descendant(
+          of: find.byKey(const Key('ev_home_section_recent')),
+          matching: find.byType(EvCard),
+        ).first;
+        final recentFocusWidget = tester.widget<Focus>(
+          find.descendant(of: recentCardFinder, matching: find.byType(Focus)).first,
+        );
+        final recentCardEl = tester.element(
+          find.descendant(of: recentCardFinder, matching: find.byType(Focus)).first,
+        );
+        final recentNode = recentFocusWidget.focusNode ?? Focus.of(recentCardEl);
+        recentNode.requestFocus();
+        await tester.pump();
+        expect(recentNode.hasFocus, isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(find.byKey(const Key('ev_topbar_back')), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 120));
+        expect(find.byKey(const Key('ev_topbar_back')), findsNothing);
+        expect(scroller.offset, closeTo(520.0, 1.0));
+        expect(recentNode.hasFocus, isTrue);
+      },
+    );
   });
 
   group('EvPlayer.open lifecycle, duplicate guard, immersion & custom builder', () {
@@ -1400,4 +1580,72 @@ class _ThrowingPlayback implements EmbyViewPlayback {
   @override
   PlaybackSession open(PlayTarget target) =>
       throw StateError('playback unavailable');
+}
+
+class _DetailFlowData extends _FakeData {
+  _DetailFlowData(super.zoneList);
+
+  static final MediaCard _cw1 = _card('cw_1', '盗梦空间');
+  static final MediaCard _cw2 = _card('cw_2', '星际穿越');
+  static final MediaCard _rm1 = _card('rm_1', '最近电影甲');
+
+  @override
+  Future<HomeData> home({required ShelfSort seriesSort}) async => HomeData(
+    recommendations: [
+      HomeRecommendation(card: _cw1, reason: RecommendationReason.daily),
+    ],
+    continueWatching: [
+      ResumeCard(
+        card: _cw1,
+        target: const PlayTarget(itemId: 'cw_1', startAt: Duration(minutes: 20)),
+        position: const Duration(minutes: 20),
+        duration: const Duration(minutes: 148),
+      ),
+      ResumeCard(
+        card: _cw2,
+        target: const PlayTarget(itemId: 'cw_2', startAt: Duration(minutes: 45)),
+        position: const Duration(minutes: 45),
+        duration: const Duration(minutes: 169),
+      ),
+    ],
+    zones: zoneList,
+    recentMovies: HomeShelf(
+      id: 'movie',
+      title: '最近添加',
+      items: [_rm1],
+    ),
+  );
+
+  @override
+  Future<MediaDetail> detail(String itemId) async {
+    final card = switch (itemId) {
+      'cw_2' => _cw2,
+      'rm_1' => _rm1,
+      _ => _cw1,
+    };
+    return MediaDetail(
+      card: MediaCard(
+        id: card.id,
+        kind: card.kind,
+        libraryId: card.libraryId,
+        title: card.title,
+        year: card.year,
+        overview: '${card.title}详情简介',
+        art: card.art,
+      ),
+      playTarget: PlayTarget(itemId: card.id),
+    );
+  }
+
+  @override
+  Future<List<PersonCredit>> people(String itemId) async => const [];
+
+  @override
+  Future<List<MediaCard>> similar(String itemId, {int limit = 16}) async => const [];
+
+  @override
+  Future<ThemeMedia> themeMedia(String itemId) async => const ThemeMedia();
+
+  @override
+  Future<MediaQuality?> quality(String itemId) async => null;
 }

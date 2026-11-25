@@ -295,10 +295,10 @@ class _FakeDetailData implements EmbyViewData {
   final Map<String, List<PersonCredit>> peopleByItem;
   final Map<String, List<MediaCard>> similarByItem;
   final Map<String, ThemeMedia> themeByItem;
-  final Map<String, List<ArtworkRef>> safeStillsBySeries;
+  final Map<String, List<SafeEpisodeStill>> safeStillsBySeries;
   final Map<String, MediaQuality> qualityByItem;
   final Future<List<SeasonSummary>> Function(String seriesId)? onSeasons;
-  final Future<List<ArtworkRef>> Function(String seriesId)? onSafeStills;
+  final Future<List<SafeEpisodeStill>> Function(String seriesId)? onSafeStills;
   final Future<void> Function(String itemId, bool favorite)? onSetFavorite;
   final Future<void> Function(String itemId, bool played)? onSetPlayed;
 
@@ -333,7 +333,7 @@ class _FakeDetailData implements EmbyViewData {
       themeByItem[itemId] ?? const ThemeMedia();
 
   @override
-  Future<List<ArtworkRef>> safeEpisodeStills(String seriesId) async =>
+  Future<List<SafeEpisodeStill>> safeEpisodeStills(String seriesId) async =>
       onSafeStills != null ? onSafeStills!(seriesId) : (safeStillsBySeries[seriesId] ?? const []);
 
   @override
@@ -456,7 +456,7 @@ EpisodeCard _makeEpisode({
 }
 
 _FakeDetailData _buildFixtureData({
-  List<ArtworkRef>? seriesSafeStills,
+  List<SafeEpisodeStill>? seriesSafeStills,
   PreviewRef? seriesTrailer,
   PreviewRef? movieTrailer,
   bool movieWithLogo = true,
@@ -667,9 +667,9 @@ _FakeDetailData _buildFixtureData({
     safeStillsBySeries: {
       's1': seriesSafeStills ??
           [
-            _FakeArtworkRef('safe_1'),
-            _FakeArtworkRef('safe_2'),
-            _FakeArtworkRef('safe_3'),
+            SafeEpisodeStill(image: _FakeArtworkRef('safe_1'), seasonNumber: 1, episodeNumber: 1, seasonName: '第 1 季'),
+            SafeEpisodeStill(image: _FakeArtworkRef('safe_2'), seasonNumber: 1, episodeNumber: 2, seasonName: '第 1 季'),
+            SafeEpisodeStill(image: _FakeArtworkRef('safe_3'), seasonNumber: 2, episodeNumber: 1, seasonName: '第 2 季'),
           ],
     },
   );
@@ -1071,7 +1071,7 @@ void main() {
     );
 
     testWidgets(
-      'safe episode stills: <3 hides pill & does not play; >=3 plays slideshow labeled 正片片段 every 3.2s',
+      'safe episode stills: <3 hides pill & does not play; >=3 plays slideshow labeled with season/episode every 3.2s at top 4.75rem',
       (tester) async {
         tester.view.physicalSize = const Size(1440, 900);
         tester.view.devicePixelRatio = 1.0;
@@ -1081,7 +1081,10 @@ void main() {
         // Case A: < 3 safe stills -> no trailer pill.
         final hFew = _createHarness(
           data: _buildFixtureData(
-            seriesSafeStills: [_FakeArtworkRef('only_1'), _FakeArtworkRef('only_2')],
+            seriesSafeStills: [
+              SafeEpisodeStill(image: _FakeArtworkRef('only_1'), seasonNumber: 1, episodeNumber: 1),
+              SafeEpisodeStill(image: _FakeArtworkRef('only_2'), seasonNumber: 1, episodeNumber: 2),
+            ],
           ),
         );
         await tester.pumpWidget(
@@ -1096,14 +1099,29 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         await hFew.dispose();
 
-        // Case B: >= 3 safe stills -> countdown & 3.2s slideshow labeled 「正片片段」.
+        // Case B: >= 3 safe stills -> countdown & 3.2s slideshow with dynamic season/episode labels at top 4.75rem.
         final hMany = _createHarness(
           initialPrefs: const LocalPreferences(detailTrailerDelay: Duration(seconds: 8)),
           data: _buildFixtureData(
             seriesSafeStills: [
-              _FakeArtworkRef('safe_a'),
-              _FakeArtworkRef('safe_b'),
-              _FakeArtworkRef('safe_c'),
+              SafeEpisodeStill(
+                image: _FakeArtworkRef('safe_a'),
+                seasonNumber: 2,
+                episodeNumber: 1,
+                seasonName: '第 2 季',
+              ),
+              SafeEpisodeStill(
+                image: _FakeArtworkRef('safe_b'),
+                episodeNumber: 4,
+                seasonName: '季 3',
+              ),
+              SafeEpisodeStill(
+                image: _FakeArtworkRef('safe_c'),
+                episodeNumber: 7,
+              ),
+              SafeEpisodeStill(
+                image: _FakeArtworkRef('safe_d'),
+              ),
             ],
           ),
         );
@@ -1123,16 +1141,29 @@ void main() {
         await tester.tap(find.byKey(const Key('ev_detail_trailer_btn')));
         await tester.pump();
 
-        expect(find.byKey(const Key('ev_detail_safe_still_label')), findsOneWidget);
-        expect(find.text('正片片段'), findsOneWidget);
+        final labelFinder = find.byKey(const Key('ev_detail_safe_still_label'));
+        expect(labelFinder, findsOneWidget);
+        final scale = EvScale.fromSize(const Size(1440, 900));
+        final positioned = tester.widget<Positioned>(
+          find.ancestor(of: labelFinder, matching: find.byType(Positioned)).first,
+        );
+        expect(positioned.top, closeTo(scale.rem(4.75), 0.01));
+        expect(tester.getTopLeft(labelFinder).dy, closeTo(scale.rem(4.75), 0.5));
+        expect(find.text('正片片段 · 第 2 季 第 1 集'), findsOneWidget);
         expect(find.text('正片片段 · 点此停止'), findsOneWidget);
         expect(hMany.stage.activeBackdropKey, contains('detail_test_safe_a'));
 
         await tester.pump(const Duration(milliseconds: 3200));
         expect(hMany.stage.activeBackdropKey, contains('detail_test_safe_b'));
+        expect(find.text('正片片段 · 第 3 季 第 4 集'), findsOneWidget);
 
         await tester.pump(const Duration(milliseconds: 3200));
         expect(hMany.stage.activeBackdropKey, contains('detail_test_safe_c'));
+        expect(find.text('正片片段 · 第 7 集'), findsOneWidget);
+
+        await tester.pump(const Duration(milliseconds: 3200));
+        expect(hMany.stage.activeBackdropKey, contains('detail_test_safe_d'));
+        expect(find.text('正片片段'), findsOneWidget);
 
         // Tap again to stop and restore backdrop.
         await tester.tap(find.byKey(const Key('ev_detail_trailer_btn')));
@@ -1597,7 +1628,7 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
 
       final seasonsC = Completer<List<SeasonSummary>>();
-      final stillsC = Completer<List<ArtworkRef>>();
+      final stillsC = Completer<List<SafeEpisodeStill>>();
       var seasonsStarted = false, stillsStarted = false;
 
       final sCard = _makeCard(id: 's_conc', title: '并发剧集', kind: MediaKind.series, childCount: 1);

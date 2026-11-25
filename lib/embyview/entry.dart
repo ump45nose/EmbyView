@@ -259,8 +259,9 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   StreamSubscription<LocalPreferences>? _prefsSub;
   StreamSubscription<AccountSnapshot>? _accountsSub;
   final _quickLook = EvQuickLookController(), _palette = EvCommandPaletteController();
+  final _shellScope = FocusScopeNode(debugLabel: 'ev_shell_scope');
   final _s4Scope = FocusScopeNode(debugLabel: 'ev_stage4_scope'), _s4MenuScope = FocusScopeNode(debugLabel: 'ev_stage4_menu_scope');
-  final List<({_S4Entry entry, _StageSnap? saved})> _s4Stack = [];
+  final List<({_S4Entry entry, _StageSnap? saved, FocusNode? savedFocus})> _s4Stack = [];
   bool _shellMounted = true, _avatarMenuOpen = false;
   int _nextEntryId = 1, _zonesToken = 0;
 
@@ -274,7 +275,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
       onOpenUsers: _openUsers, onManageZones: () => _openSettings(section: EvSettingsSection.zones),
     )..addListener(_onShellChanged);
     _lastShellDest = _shell.current;
-    if (widget.initialEntry != null) { _s4Stack.add((entry: widget.initialEntry!, saved: null)); _shellMounted = false; }
+    if (widget.initialEntry != null) { _s4Stack.add((entry: widget.initialEntry!, saved: null, savedFocus: null)); _shellMounted = false; }
     _attachServices(widget.services);
     if (_s4Stack.isNotEmpty) _focusStageFourLater();
   }
@@ -317,7 +318,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   void dispose() {
     unawaited(_prefsSub?.cancel()); unawaited(_accountsSub?.cancel());
     _shell..removeListener(_onShellChanged)..dispose();
-    _quickLook.dispose(); _palette.dispose(); _s4Scope.dispose(); _s4MenuScope.dispose();
+    _quickLook.dispose(); _palette.dispose(); _shellScope.dispose(); _s4Scope.dispose(); _s4MenuScope.dispose();
     _runtime.release(); super.dispose();
   }
 
@@ -346,12 +347,34 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   void _resetHeroStage() => _runtime.stage..setMode(EvStageMode.hero)..setScrollProgress(0.0)..setVeilLifted(false)..clearPreviewBackdrop()..setAmbientColor(null);
   void _focusStageFourLater() => WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _s4Stack.isNotEmpty && !_s4Scope.hasFocus) _s4Scope.requestFocus(); });
 
+  void _restoreFocusLater(FocusNode? target, {required bool backToShell}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (backToShell) {
+        if (_s4Stack.isNotEmpty) return;
+        if (target != null && target.context != null && target.canRequestFocus) {
+          target.requestFocus();
+        } else if (_shellScope.canRequestFocus && !_shellScope.hasFocus) {
+          _shellScope.requestFocus();
+        }
+        return;
+      }
+      if (_s4Stack.isEmpty) return;
+      if (target != null && target.context != null && target.canRequestFocus) {
+        target.requestFocus();
+      } else if (!_s4Scope.hasFocus) {
+        _s4Scope.requestFocus();
+      }
+    });
+  }
+
   void _pushStageFour(_S4Entry next) {
     if (!mounted) return;
+    final savedFocus = FocusManager.instance.primaryFocus;
     _closeOverlays(rebuild: false); _runtime.immersion.onCardHoverEnd();
     final saved = _captureSnap();
     _shell.updateChrome(scrolled: false, topFade: 0.0);
-    setState(() => _s4Stack.add((entry: next, saved: saved)));
+    setState(() => _s4Stack.add((entry: next, saved: saved, savedFocus: savedFocus)));
     _focusStageFourLater();
   }
 
@@ -374,6 +397,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     setState(() { _s4Stack.clear(); _shellMounted = true; });
     if (sameDest && firstSaved != null) { _restoreSnap(firstSaved, restoreShellChrome: true); }
     else { navigate(); if (resetHero) _resetHeroStage(); }
+    _restoreFocusLater(null, backToShell: true);
   }
 
   void _popStageFour() {
@@ -385,7 +409,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     setState(() {});
     if (popped.saved != null) { _restoreSnap(popped.saved!, restoreShellChrome: backToShell); }
     else if (backToShell) { _resetHeroStage(); }
-    if (!backToShell) _focusStageFourLater();
+    _restoreFocusLater(popped.savedFocus, backToShell: backToShell);
   }
 
   void _onUserSelected(AccountProfile _) {
@@ -445,6 +469,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
                       child: EvShell(
                         services: widget.services, initialDestination: widget.initialDestination,
                         controller: _shell, stage: _runtime.stage, immersion: _runtime.immersion,
+                        focusScopeNode: _shellScope,
                         onConfigureWindow: () => _macWin(() => windowManager.setTitleBarStyle(TitleBarStyle.hidden, windowButtonVisibility: true)),
                         windowDragBuilder: _buildMacWindowDragArea,
                         homeBuilder: (_) => const EvHomePage(), zoneBuilder: (_, z) => EvZonePage(zoneId: z),

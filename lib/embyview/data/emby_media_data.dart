@@ -1094,22 +1094,32 @@ class EmbyMediaData implements EmbyViewData {
   }
 
   @override
-  Future<List<ArtworkRef>> safeEpisodeStills(String seriesId) async {
+  Future<List<SafeEpisodeStill>> safeEpisodeStills(String seriesId) async {
     final rows = await _all({'Fields': _fields}, resource: 'episodes', id: seriesId);
     final resumable = (await _all({
       'MediaTypes': 'Video',
       'Fields': 'SeriesId',
     }, resource: 'resume')).where((e) => e['SeriesId'] == seriesId).map((e) => e['Id'].toString()).toSet();
-    final images = <ArtworkRef>[];
+    final stills = <SafeEpisodeStill>[];
     for (final e in rows) {
       final user = e['UserData'] as Map? ?? const {};
       if (user['Played'] != true && !resumable.contains(e['Id'].toString())) {
         continue;
       }
       final image = _mapper.image(e, 'Primary');
-      if (image != null) images.add(image);
+      if (image != null) {
+        final seasonName = (e['SeasonName'] as String?)?.trim();
+        stills.add(
+          SafeEpisodeStill(
+            image: image,
+            seasonNumber: integer(e['ParentIndexNumber']),
+            episodeNumber: integer(e['IndexNumber']),
+            seasonName: seasonName == null || seasonName.isEmpty ? null : seasonName,
+          ),
+        );
+      }
     }
-    return images.length < 3 ? [] : images;
+    return stills.length < 3 ? [] : stills;
   }
 
   void _pageBounds(int offset, int limit) {

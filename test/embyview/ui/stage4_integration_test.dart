@@ -290,7 +290,7 @@ class _FakeData implements EmbyViewData {
   @override Future<ThemeMedia> themeMedia(String itemId) async => ThemeMedia(songs: [_FakePreview('theme_$itemId', '主题曲 $itemId')]);
   @override Future<MediaQuality?> quality(String itemId) async => const MediaQuality(resolution: '4K', origin: MediaOrigin.nasLocal);
   @override Future<List<SeasonSummary>> seasons(String seriesId) async => const [SeasonSummary(id: 'season1', number: 1, name: '第 1 季', total: 1)];
-  @override Future<List<ArtworkRef>> safeEpisodeStills(String seriesId) async => const [];
+  @override Future<List<SafeEpisodeStill>> safeEpisodeStills(String seriesId) async => const [];
   @override
   Future<SeasonEpisodes> episodes(String seriesId, String seasonId) async => SeasonEpisodes(
     season: const SeasonSummary(id: 'season1', number: 1, name: '第 1 季', total: 1),
@@ -549,14 +549,14 @@ void main() {
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
 
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
-      await _pumpFrames(tester);
+      await _pumpFrames(tester, 550);
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
 
       // Cmd+K suppresses Space QuickLook
       await _sendCmdKey(tester, LogicalKeyboardKey.keyK);
       expect(find.byKey(const Key('ev_palette_box')), findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
-      await _pumpFrames(tester);
+      await _pumpFrames(tester, 550);
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await _pumpFrames(tester);
@@ -585,7 +585,7 @@ void main() {
       await _pumpFrames(tester);
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
-      await _pumpFrames(tester);
+      await _pumpFrames(tester, 550);
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
 
       // 3c. Detail EvEpisodeCard & Similar EvCard
@@ -616,7 +616,7 @@ void main() {
       await _pumpFrames(tester);
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
-      await _pumpFrames(tester);
+      await _pumpFrames(tester, 550);
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
 
       // 3d. Pop back to Zone -> open Wall -> QuickLook on Wall EvCard
@@ -635,7 +635,7 @@ void main() {
       await _pumpFrames(tester);
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
-      await _pumpFrames(tester);
+      await _pumpFrames(tester, 550);
       expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());

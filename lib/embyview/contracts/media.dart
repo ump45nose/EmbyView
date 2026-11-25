@@ -543,6 +543,20 @@ class ThemeMedia {
   final PreviewRef? trailer;
 }
 
+class SafeEpisodeStill {
+  const SafeEpisodeStill({
+    required this.image,
+    this.seasonNumber,
+    this.episodeNumber,
+    this.seasonName,
+  });
+
+  final ArtworkRef image;
+  final int? seasonNumber;
+  final int? episodeNumber;
+  final String? seasonName;
+}
+
 abstract interface class EmbyViewData {
   Future<HomeData> home({required ShelfSort seriesSort});
   Future<List<ZoneTile>> zones();
@@ -559,7 +573,7 @@ abstract interface class EmbyViewData {
   Future<MediaQuality?> quality(String itemId);
   Future<List<ChapterMark>> chapters(String itemId, {String? mediaSourceId});
   Future<ThemeMedia> themeMedia(String itemId);
-  Future<List<ArtworkRef>> safeEpisodeStills(String seriesId);
+  Future<List<SafeEpisodeStill>> safeEpisodeStills(String seriesId);
   Future<Page<ResumeCard>> continueWatching({
     String? zoneId,
     int offset = 0,

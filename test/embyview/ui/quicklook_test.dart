@@ -173,7 +173,7 @@ class _FakeData implements EmbyViewData {
   @override Future<SeasonEpisodes> episodes(String seriesId, String seasonId) async => episodesBySeason[seasonId]!;
   @override Future<List<PersonCredit>> people(String itemId) async => const [];
   @override Future<List<MediaCard>> similar(String itemId, {int limit = 16}) async => similarItems;
-  @override Future<List<ArtworkRef>> safeEpisodeStills(String seriesId) async => const [];
+  @override Future<List<SafeEpisodeStill>> safeEpisodeStills(String seriesId) async => const [];
   @override Future<ThemeMedia> themeMedia(String itemId) async => themeById[itemId] ?? const ThemeMedia();
   @override Future<MediaQuality?> quality(String itemId) async => qualityById[itemId];
   @override dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -936,6 +936,174 @@ void main() {
     await tester.pumpAndSettle();
     // ignore: deprecated_member_use
     expect(ServicesBinding.instance.keyEventManager.keyMessageHandler, same(initialHandler));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Close reverse animation: 150ms mid-shrink & fade, 500ms unmount + focus restore, offscreen/null center shrink, mid-close reopen & play', (tester) async {
+    await _setViewport(tester, const Size(1440, 900));
+    final prefs = _FakePreferences(const LocalPreferences(backgroundVideo: false));
+    final accounts = _FakeAccounts();
+    final stage = EvStageController();
+    final shell = EvShellController();
+    final services = EmbyViewServices(preferences: prefs, accounts: accounts, sessionId: 's1');
+    final immersion = Immersion(stage: stage, services: services);
+    final controller = EvQuickLookController();
+    final playedCalls = <PlayTarget>[];
+
+    addTearDown(() async {
+      controller.dispose();
+      immersion.dispose();
+      stage.dispose();
+      shell.dispose();
+      await prefs.close();
+      await accounts.close();
+    });
+
+    final card = _makeCard(id: 'anim_card', title: '反向动画测试片');
+    await tester.pumpWidget(MaterialApp(
+      home: EvThemeScope(
+        preferences: prefs,
+        child: EvScope(
+          services: services, stage: stage, immersion: immersion, shell: shell,
+          child: EvQuickLookHost(
+            controller: controller,
+            onPlayTarget: (target, _, _) => playedCalls.add(target),
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 80, top: 120),
+                child: EvCard(card: card, style: EvCardStyle.poster, width: 180),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    ScaleTransition windowScale() => tester.widget<ScaleTransition>(
+      find.ancestor(of: find.byKey(const Key('ev_quicklook_window')), matching: find.byType(ScaleTransition)).first,
+    );
+    FadeTransition windowFade() => tester.widget<FadeTransition>(
+      find.ancestor(of: find.byKey(const Key('ev_quicklook_window')), matching: find.byType(FadeTransition)).first,
+    );
+
+    // 1. Focus card -> Space opens -> move focus away -> Space closes with reverse animation.
+    final cardFinder = find.byType(EvCard);
+    await _focusWidget(tester, cardFinder);
+    final cardFocusNode = FocusManager.instance.primaryFocus!;
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pumpAndSettle();
+    expect(controller.isOpen, isTrue);
+    expect(windowScale().alignment, isNot(Alignment.center));
+    expect(windowScale().scale.value, closeTo(1.0, 0.01));
+    expect(windowFade().opacity.value, closeTo(1.0, 0.01));
+
+    // Unfocus card while QuickLook is open to verify focus restoration happens only after close finishes.
+    cardFocusNode.unfocus();
+    await tester.pump();
+    expect(FocusManager.instance.primaryFocus, isNot(cardFocusNode));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+
+    // At 150ms: overlay is still mounted, shrinking toward origin and fading out; focus not restored yet.
+    expect(controller.isOpen, isFalse);
+    expect(controller.isClosing, isTrue);
+    expect(controller.current, isNotNull);
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
+    expect(windowScale().alignment, isNot(Alignment.center));
+    expect(windowScale().scale.value, lessThan(1.0));
+    expect(windowScale().scale.value, greaterThan(0.6));
+    expect(windowFade().opacity.value, lessThan(1.0));
+    expect(windowFade().opacity.value, greaterThan(0.0));
+    expect(FocusManager.instance.primaryFocus, isNot(cardFocusNode));
+
+    // After 500ms total + post-frame callback: overlay fully unmounted and card focus restored.
+    await tester.pump(const Duration(milliseconds: 360));
+    await tester.pump();
+    expect(controller.isClosing, isFalse);
+    expect(controller.current, isNull);
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
+    expect(FocusManager.instance.primaryFocus, same(cardFocusNode));
+
+    // 2. Esc also triggers the same 500ms reverse close animation and focus restoration.
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pumpAndSettle();
+    cardFocusNode.unfocus();
+    await tester.pump();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(controller.isClosing, isTrue);
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
+    expect(windowScale().scale.value, lessThan(1.0));
+    expect(windowFade().opacity.value, lessThan(1.0));
+
+    await tester.pump(const Duration(milliseconds: 360));
+    await tester.pump();
+    expect(controller.current, isNull);
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
+    expect(FocusManager.instance.primaryFocus, same(cardFocusNode));
+
+    // 3. Interrupt close animation mid-flight with Space -> immediately aborts close and reopens cleanly.
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(controller.isClosing, isTrue);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(controller.isOpen, isTrue);
+    expect(controller.isClosing, isFalse);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
+    expect(windowScale().scale.value, closeTo(1.0, 0.01));
+    expect(windowFade().opacity.value, closeTo(1.0, 0.01));
+
+    // 4. Interrupt close animation mid-flight with Enter -> immediately aborts close and triggers playback.
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(controller.isClosing, isTrue);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(controller.isOpen, isFalse);
+    expect(controller.isClosing, isFalse);
+    expect(controller.current, isNull);
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
+    expect(playedCalls.map((t) => t.itemId), ['anim_card']);
+
+    // 5. Missing origin (null) -> shrinks in place (Alignment.center).
+    controller.open(EvQuickLookTarget(card: card, origin: null));
+    await tester.pumpAndSettle();
+    expect(windowScale().alignment, Alignment.center);
+    controller.close();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
+    expect(windowScale().alignment, Alignment.center);
+    expect(windowScale().scale.value, lessThan(1.0));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
+
+    // 6. Offscreen origin (outside 1440x900 viewport) -> shrinks in place (Alignment.center).
+    controller.open(EvQuickLookTarget(card: card, origin: const Rect.fromLTWH(2000, 1200, 200, 300)));
+    await tester.pumpAndSettle();
+    expect(windowScale().alignment, Alignment.center);
+    controller.close();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsOneWidget);
+    expect(windowScale().alignment, Alignment.center);
+    expect(windowScale().scale.value, lessThan(1.0));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ev_quicklook_overlay')), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

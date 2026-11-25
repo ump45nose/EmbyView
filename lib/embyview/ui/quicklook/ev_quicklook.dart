@@ -18,10 +18,38 @@ class EvQuickLookTarget {
 /// Imperative controller for opening and closing the global QuickLook overlay.
 class EvQuickLookController extends ChangeNotifier {
   EvQuickLookTarget? _current;
-  bool get isOpen => _current != null;
+  bool _closing = false;
+  int _hostCount = 0;
+
+  bool get isOpen => _current != null && !_closing;
+  bool get isClosing => _closing;
   EvQuickLookTarget? get current => _current;
-  void open(EvQuickLookTarget target) { _current = target; notifyListeners(); }
-  void close() { if (_current == null) return; _current = null; notifyListeners(); }
+
+  void open(EvQuickLookTarget target) {
+    _current = target;
+    _closing = false;
+    notifyListeners();
+  }
+
+  void close({bool immediate = false}) {
+    if (_current == null) return;
+    if (!immediate && _hostCount > 0) {
+      if (_closing) return;
+      _closing = true;
+      notifyListeners();
+      return;
+    }
+    _closing = false;
+    _current = null;
+    notifyListeners();
+  }
+
+  void _completeClose() {
+    if (_current == null && !_closing) return;
+    _closing = false;
+    _current = null;
+    notifyListeners();
+  }
 }
 
 /// Global Space-bar QuickLook host wrapping app content inside [EvThemeScope] + [EvScope].
@@ -54,6 +82,7 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
   String? _activeCardId, _failedLogoKey;
   int _loadToken = 0;
   bool _videoActive = false;
+  bool _closingAnimActive = false;
   MediaQuality? _loadedQuality;
   SubtitleAvailability? _availability;
 
@@ -61,10 +90,24 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
   void initState() {
     super.initState();
     _ownsController = widget.controller == null;
-    _controller = (widget.controller ?? EvQuickLookController())..addListener(_onControllerChanged);
-    _anim = AnimationController(vsync: this, duration: EvDurations.medium);
-    _fadeAnim = CurvedAnimation(parent: _anim, curve: const Interval(0.0, 0.55, curve: EvCurves.soft));
-    _scaleCurve = CurvedAnimation(parent: _anim, curve: EvCurves.spring);
+    _controller = widget.controller ?? EvQuickLookController();
+    _controller._hostCount++;
+    _controller.addListener(_onControllerChanged);
+    _anim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+      reverseDuration: const Duration(milliseconds: 500),
+    )..addStatusListener(_onAnimStatus);
+    _fadeAnim = CurvedAnimation(
+      parent: _anim,
+      curve: const Interval(0.0, 0.5, curve: EvCurves.soft),
+      reverseCurve: Interval(0.5, 1.0, curve: EvCurves.soft.flipped),
+    );
+    _scaleCurve = CurvedAnimation(
+      parent: _anim,
+      curve: EvCurves.spring,
+      reverseCurve: EvCurves.out.flipped,
+    );
     _scaleAnim = Tween<double>(begin: 0.6, end: 1.0).animate(_scaleCurve);
     _QuickLookKeyDispatcher.add(_handleKeyMessage);
   }
@@ -81,9 +124,12 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     super.didUpdateWidget(old);
     if (old.controller == widget.controller) return;
     _controller.removeListener(_onControllerChanged);
+    _controller._hostCount--;
     if (_ownsController) _controller.dispose();
     _ownsController = widget.controller == null;
-    _controller = (widget.controller ?? EvQuickLookController())..addListener(_onControllerChanged);
+    _controller = widget.controller ?? EvQuickLookController();
+    _controller._hostCount++;
+    _controller.addListener(_onControllerChanged);
     _onControllerChanged();
   }
 
@@ -91,33 +137,55 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
   void dispose() {
     _QuickLookKeyDispatcher.remove(_handleKeyMessage);
     _controller.removeListener(_onControllerChanged);
+    _controller._hostCount--;
     if (_ownsController) _controller.dispose();
+    _anim.removeStatusListener(_onAnimStatus);
     _fadeAnim.dispose(); _scaleCurve.dispose(); _anim.dispose();
     ++_loadToken;
     if (_videoActive) { _videoActive = false; unawaited(_scope?.immersion.stopVideo()); }
     super.dispose();
   }
 
+  void _onAnimStatus(AnimationStatus status) {
+    if (status == AnimationStatus.dismissed && _controller.isClosing) {
+      _closingAnimActive = false;
+      _controller._completeClose();
+    }
+  }
+
   void _onControllerChanged() {
     if (!mounted) return;
     final target = _controller.current;
-    target == null ? _onTargetClosed() : _onTargetOpened(target);
-    setState(() {});
+    if (target == null) {
+      _onTargetClosed();
+    } else if (_controller.isClosing) {
+      _onTargetClosing();
+    } else {
+      _onTargetOpened(target);
+    }
+    if (mounted) setState(() {});
   }
 
   void _onTargetOpened(EvQuickLookTarget target) {
-    final prevId = _activeCardId, card = target.card, token = ++_loadToken;
+    final prevId = _activeCardId, wasClosing = _closingAnimActive, card = target.card, token = ++_loadToken;
+    _closingAnimActive = false;
     if (_videoActive && prevId != card.id) { _videoActive = false; unawaited(_scope?.immersion.stopVideo()); }
     _activeCardId = card.id; _failedLogoKey = null; _loadedQuality = null; _availability = null;
-    if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) { _anim.value = 1.0; } else { _anim.forward(from: 0.0); }
+    if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) {
+      _anim.value = 1.0;
+    } else if (wasClosing && prevId == card.id && _anim.value > 0.0) {
+      _anim.forward();
+    } else {
+      _anim.forward(from: 0.0);
+    }
 
     final services = _scope?.services, data = services?.data, subtitles = services?.subtitles;
     if (data != null) {
       unawaited(_safe(() => data.quality(card.id)).then((q) {
-        if (mounted && token == _loadToken && _controller.current?.card.id == card.id && q != null) setState(() => _loadedQuality = q);
+        if (mounted && token == _loadToken && _controller.isOpen && _controller.current?.card.id == card.id && q != null) setState(() => _loadedQuality = q);
       }));
       unawaited(_safe(() => data.themeMedia(card.id)).then((media) {
-        if (!mounted || token != _loadToken || _controller.current?.card.id != card.id) return;
+        if (!mounted || token != _loadToken || !_controller.isOpen || _controller.current?.card.id != card.id) return;
         final video = media?.backgroundVideo ?? media?.trailer, scope = _scope;
         if (video == null || scope == null || !scope.services.preferences.current.backgroundVideo) return;
         _videoActive = true;
@@ -127,12 +195,27 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     }
     if (subtitles != null) {
       unawaited(_safe(() => subtitles.availability(card.id)).then((av) {
-        if (mounted && token == _loadToken && _controller.current?.card.id == card.id && av != null) setState(() => _availability = av);
+        if (mounted && token == _loadToken && _controller.isOpen && _controller.current?.card.id == card.id && av != null) setState(() => _availability = av);
       }));
     }
   }
 
+  void _onTargetClosing() {
+    if (_closingAnimActive) return;
+    _closingAnimActive = true;
+    ++_loadToken;
+    if (_videoActive) { _videoActive = false; unawaited(_scope?.immersion.stopVideo()); }
+    if ((MediaQuery.maybeDisableAnimationsOf(context) ?? false) || _anim.value <= 0.0) {
+      _anim.value = 0.0;
+      _closingAnimActive = false;
+      _controller._completeClose();
+      return;
+    }
+    _anim.reverse();
+  }
+
   void _onTargetClosed() {
+    _closingAnimActive = false;
     ++_loadToken;
     _activeCardId = _failedLogoKey = null; _loadedQuality = null; _availability = null;
     _anim.stop();
@@ -140,7 +223,7 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     final restore = _restoreFocus; _restoreFocus = null;
     if (restore != null && restore.canRequestFocus && restore.context != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_controller.isOpen && restore.canRequestFocus && restore.context != null) restore.requestFocus();
+        if (mounted && _controller.current == null && restore.canRequestFocus && restore.context != null) restore.requestFocus();
       });
     }
   }
@@ -161,6 +244,27 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
       return false;
     }
 
+    if (_controller.isClosing) {
+      final hw = HardwareKeyboard.instance;
+      for (final e in message.events) {
+        final k = e.logicalKey;
+        if (k == LogicalKeyboardKey.enter || k == LogicalKeyboardKey.numpadEnter) {
+          if (e is KeyDownEvent) _playCurrent();
+          return true;
+        }
+        if (k == LogicalKeyboardKey.space) {
+          if (_scope?.services.preferences.current.quickLook == false) return false;
+          if (hw.isMetaPressed || hw.isControlPressed || hw.isAltPressed) return false;
+          if (e is KeyDownEvent) _reopenDuringClose();
+          return true;
+        }
+        if (k == LogicalKeyboardKey.escape) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     if (_scope?.services.preferences.current.quickLook == false) return false;
     final hw = HardwareKeyboard.instance;
     if (hw.isMetaPressed || hw.isControlPressed || hw.isAltPressed) return false;
@@ -174,6 +278,26 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     _restoreFocus = primary;
     _controller.open(target);
     return true;
+  }
+
+  void _reopenDuringClose() {
+    final primary = FocusManager.instance.primaryFocus, focusCtx = primary?.context;
+    EvQuickLookTarget? target;
+    FocusNode? focusToRestore = _restoreFocus;
+    if (focusCtx != null && focusCtx.mounted && _isInSubtree(focusCtx) && !_isEditableText(focusCtx)) {
+      target = widget.resolveFocusTarget?.call(focusCtx) ?? _resolveEvCard(focusCtx);
+      if (target != null) focusToRestore = primary;
+    }
+    if (target == null) {
+      final restoreCtx = _restoreFocus?.context;
+      if (restoreCtx != null && restoreCtx.mounted && _isInSubtree(restoreCtx) && !_isEditableText(restoreCtx)) {
+        target = widget.resolveFocusTarget?.call(restoreCtx) ?? _resolveEvCard(restoreCtx);
+      }
+    }
+    target ??= _controller.current;
+    if (target == null) return;
+    _restoreFocus = focusToRestore;
+    _controller.open(target);
   }
 
   bool _isInSubtree(BuildContext target) {
@@ -213,7 +337,7 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     if (target == null) return;
     final origin = _mediaRect(), playTarget = target.resume?.target ?? PlayTarget(itemId: target.card.id);
     _restoreFocus = null;
-    _controller.close();
+    _controller.close(immediate: true);
     if (widget.onPlayTarget != null) { widget.onPlayTarget!(playTarget, target.card.art, origin); }
     else { unawaited(EvPlayer.open(context, playTarget, origin: origin, art: target.card.art)); }
   }
@@ -222,7 +346,7 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     final target = _controller.current;
     if (target == null) return;
     _restoreFocus = null;
-    _controller.close();
+    _controller.close(immediate: true);
     (widget.onOpenDetail ?? _scope?.shell.onOpenDetail)?.call(target.card.id);
   }
 
@@ -247,51 +371,59 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     final quality = _mergeQuality(_loadedQuality, target.card.quality);
     final showSubtitles = _scope?.services.subtitles != null;
 
-    return LayoutBuilder(builder: (_, c) {
-      final vw = c.hasBoundedWidth && c.maxWidth > 0 ? c.maxWidth : s.size.width;
-      final vh = c.hasBoundedHeight && c.maxHeight > 0 ? c.maxHeight : s.size.height;
-      final winW = math.min(s.rem(56.0), vw * 0.92);
-      final maxH = math.max(0.0, vh - s.rem(3.0));
-      final align = _originAlignment(target.origin, vw, vh, winW, math.min(maxH, s.rem(44.0)));
-      final radius = BorderRadius.circular(s.rem(1.5));
+    return IgnorePointer(
+      ignoring: _controller.isClosing,
+      child: LayoutBuilder(builder: (_, c) {
+        final vw = c.hasBoundedWidth && c.maxWidth > 0 ? c.maxWidth : s.size.width;
+        final vh = c.hasBoundedHeight && c.maxHeight > 0 ? c.maxHeight : s.size.height;
+        final winW = math.min(s.rem(56.0), vw * 0.92);
+        final maxH = math.max(0.0, vh - s.rem(3.0));
+        final align = _originAlignment(target.origin, vw, vh, winW, math.min(maxH, s.rem(44.0)));
+        final radius = BorderRadius.circular(s.rem(1.5));
 
-      return Stack(key: const Key('ev_quicklook_overlay'), fit: StackFit.expand, children: [
-        FadeTransition(
-          opacity: _fadeAnim,
-          child: GestureDetector(
-            key: const Key('ev_quicklook_backdrop'), behavior: HitTestBehavior.opaque, onTap: _controller.close,
-            child: ColoredBox(color: t.isPaper ? const Color.fromRGBO(250, 249, 245, 0.60) : const Color.fromRGBO(0, 0, 0, 0.40)),
+        return Stack(key: const Key('ev_quicklook_overlay'), fit: StackFit.expand, children: [
+          FadeTransition(
+            opacity: _fadeAnim,
+            child: GestureDetector(
+              key: const Key('ev_quicklook_backdrop'), behavior: HitTestBehavior.opaque, onTap: _controller.close,
+              child: ColoredBox(color: t.isPaper ? const Color.fromRGBO(250, 249, 245, 0.60) : const Color.fromRGBO(0, 0, 0, 0.40)),
+            ),
           ),
-        ),
-        Center(child: FadeTransition(opacity: _fadeAnim, child: ScaleTransition(
-          scale: _scaleAnim, alignment: align,
-          child: Semantics(
-            scopesRoute: true, explicitChildNodes: true, label: '空格一瞥：${target.card.title}',
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: winW, minWidth: winW, maxHeight: maxH),
-              child: DecoratedBox(
-                key: const Key('ev_quicklook_window'),
-                decoration: BoxDecoration(
-                  color: t.glassSolid, borderRadius: radius, border: Border.all(color: t.glassBorder),
-                  boxShadow: [...t.glassShadow, BoxShadow(offset: Offset(0, s.rem(2.0)), blurRadius: s.rem(5.0), color: Color.fromRGBO(0, 0, 0, t.isPaper ? 0.16 : 0.50))],
-                ),
-                child: ClipRRect(
-                  borderRadius: radius,
-                  child: SingleChildScrollView(child: Column(
-                    mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [_buildMedia(s, target.card), _buildBody(t, s, target, quality, showSubtitles)],
-                  )),
+          Center(child: FadeTransition(opacity: _fadeAnim, child: ScaleTransition(
+            scale: _scaleAnim, alignment: align,
+            child: Semantics(
+              scopesRoute: true, explicitChildNodes: true, label: '空格一瞥：${target.card.title}',
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: winW, minWidth: winW, maxHeight: maxH),
+                child: DecoratedBox(
+                  key: const Key('ev_quicklook_window'),
+                  decoration: BoxDecoration(
+                    color: t.glassSolid, borderRadius: radius, border: Border.all(color: t.glassBorder),
+                    boxShadow: [...t.glassShadow, BoxShadow(offset: Offset(0, s.rem(2.0)), blurRadius: s.rem(5.0), color: Color.fromRGBO(0, 0, 0, t.isPaper ? 0.16 : 0.50))],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: radius,
+                    child: SingleChildScrollView(child: Column(
+                      mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [_buildMedia(s, target.card), _buildBody(t, s, target, quality, showSubtitles)],
+                    )),
+                  ),
                 ),
               ),
             ),
-          ),
-        ))),
-      ]);
-    });
+          ))),
+        ]);
+      }),
+    );
   }
 
   static Alignment _originAlignment(Rect? origin, double vw, double vh, double winW, double winH) {
-    if (origin == null || winW <= 0 || winH <= 0) return Alignment.center;
+    if (origin == null || origin.isEmpty || vw <= 0 || vh <= 0 || winW <= 0 || winH <= 0) {
+      return Alignment.center;
+    }
+    if (!Rect.fromLTWH(0, 0, vw, vh).overlaps(origin)) {
+      return Alignment.center;
+    }
     return Alignment(
       ((origin.center.dx - (vw - winW) / 2) / winW * 2 - 1).clamp(-1.5, 1.5),
       ((origin.center.dy - (vh - winH) / 2) / winH * 2 - 1).clamp(-1.5, 1.5),
