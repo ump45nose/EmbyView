@@ -77,10 +77,15 @@ class EvWallPage extends StatefulWidget {
   State<EvWallPage> createState() => _EvWallPageState();
 }
 
+enum _WallPopover { none, sort, filter }
+
 class _EvWallPageState extends State<EvWallPage> {
   static const int _maxConcurrentPages = 3;
 
+  final GlobalKey _stackKey = GlobalKey();
   final GlobalKey _headerKey = GlobalKey();
+  final GlobalKey _sortButtonKey = GlobalKey();
+  final GlobalKey _filterButtonKey = GlobalKey();
   late ScrollController _scrollController;
   late bool _ownsScrollController;
 
@@ -111,7 +116,9 @@ class _EvWallPageState extends State<EvWallPage> {
   bool _facetsFailed = false;
   String? _facetsErrorMessage, _pageErrorMessage;
 
-  bool _popoverOpen = false, _suppressScrollLetterSync = false;
+  _WallPopover _openPopover = _WallPopover.none;
+  bool _filterAnchoredToChrome = false;
+  bool _suppressScrollLetterSync = false;
   double? _measuredHeaderHeight, _lastViewportWidth;
   EvWallGridMetrics? _lastMetrics;
   double _lastLeadOffset = 0.0;
@@ -240,7 +247,7 @@ class _EvWallPageState extends State<EvWallPage> {
         _EvChromeFilterAction(
           key: const Key('ev_wall_chrome_filter_button'),
           filterCount: evWallActiveFilterCount(_query),
-          onTap: _togglePopover,
+          onTap: () => _toggleFilterPopover(fromChrome: true),
         ),
       ],
     );
@@ -572,8 +579,67 @@ class _EvWallPageState extends State<EvWallPage> {
     _enqueuePage(idx ~/ widget.pageSize, prefetchNeighbors: true);
   }
 
-  void _togglePopover() => setState(() => _popoverOpen = !_popoverOpen);
-  void _closePopover() { if (_popoverOpen) setState(() => _popoverOpen = false); }
+  void _toggleSortMenu() => setState(() {
+    _filterAnchoredToChrome = false;
+    _openPopover = _openPopover == _WallPopover.sort ? _WallPopover.none : _WallPopover.sort;
+  });
+
+  void _toggleFilterPopover({bool fromChrome = false}) => setState(() {
+    if (_openPopover == _WallPopover.filter && _filterAnchoredToChrome == fromChrome) {
+      _openPopover = _WallPopover.none;
+      _filterAnchoredToChrome = false;
+    } else {
+      _openPopover = _WallPopover.filter;
+      _filterAnchoredToChrome = fromChrome;
+    }
+  });
+
+  void _closePopover() {
+    if (_openPopover != _WallPopover.none) {
+      setState(() {
+        _openPopover = _WallPopover.none;
+        _filterAnchoredToChrome = false;
+      });
+    }
+  }
+
+  void _selectSort(WallSort sort) {
+    _closePopover();
+    _applyQuery((
+      scope: _query.scope,
+      sort: sort,
+      watched: _query.watched,
+      genreId: _query.genreId,
+      years: _query.years,
+      technology: _query.technology,
+    ));
+  }
+
+  ({double right, double top}) _popoverAnchor({
+    required GlobalKey buttonKey,
+    required bool fromChrome,
+    required bool scrolledPast,
+    required double gutter,
+    required EvScale scale,
+    required double viewportWidth,
+  }) {
+    if (fromChrome || scrolledPast) {
+      return (right: fromChrome ? scale.rem(1.5) : gutter, top: scale.rem(4.25));
+    }
+    final stackBox = _stackKey.currentContext?.findRenderObject() as RenderBox?;
+    final btnBox = buttonKey.currentContext?.findRenderObject() as RenderBox?;
+    if (stackBox != null && btnBox != null && stackBox.hasSize && btnBox.hasSize) {
+      final topLeft = btnBox.localToGlobal(Offset.zero, ancestor: stackBox);
+      final right = (stackBox.size.width - (topLeft.dx + btnBox.size.width))
+          .clamp(scale.rem(1.0), math.max(scale.rem(1.0), stackBox.size.width - scale.rem(13.0)))
+          .toDouble();
+      final top = (topLeft.dy + btnBox.size.height + scale.rem(0.5))
+          .clamp(scale.rem(4.25), stackBox.size.height)
+          .toDouble();
+      return (right: right, top: top);
+    }
+    return (right: gutter, top: scale.rem(9.75));
+  }
 
   void _onCardHover(MediaCard card, bool hovering) {
     if (hovering) {
@@ -668,7 +734,7 @@ class _EvWallPageState extends State<EvWallPage> {
     final estHeader = scale.rem(applied.isEmpty ? 11.75 : 15.0);
 
     return CallbackShortcuts(
-      bindings: {if (_popoverOpen) const SingleActivator(LogicalKeyboardKey.escape): _closePopover},
+      bindings: {if (_openPopover != _WallPopover.none) const SingleActivator(LogicalKeyboardKey.escape): _closePopover},
       child: LayoutBuilder(
         builder: (context, constraints) {
           final vw = constraints.hasBoundedWidth && constraints.maxWidth > 0 ? constraints.maxWidth : scale.size.width;
@@ -681,8 +747,21 @@ class _EvWallPageState extends State<EvWallPage> {
           _lastMetrics = metrics;
           _lastLeadOffset = scale.rem(5.5);
           final scrolledPast = _scrollController.hasClients && _scrollController.offset > scale.rem(4.0);
+          final sortAnchor = _openPopover == _WallPopover.sort
+              ? _popoverAnchor(
+                  buttonKey: _sortButtonKey, fromChrome: false, scrolledPast: scrolledPast,
+                  gutter: gutter, scale: scale, viewportWidth: vw,
+                )
+              : null;
+          final filterAnchor = _openPopover == _WallPopover.filter
+              ? _popoverAnchor(
+                  buttonKey: _filterButtonKey, fromChrome: _filterAnchoredToChrome, scrolledPast: scrolledPast,
+                  gutter: gutter, scale: scale, viewportWidth: vw,
+                )
+              : null;
 
           return Stack(
+            key: _stackKey,
             fit: StackFit.expand,
             children: [
               CustomScrollView(
@@ -748,18 +827,31 @@ class _EvWallPageState extends State<EvWallPage> {
                   );
                 },
               ),
-              if (_popoverOpen) ...[
+              if (_openPopover != _WallPopover.none) ...[
                 Positioned.fill(
                   child: GestureDetector(key: const Key('ev_wall_popover_scrim'), behavior: HitTestBehavior.translucent, onTap: _closePopover),
                 ),
-                Positioned(
-                  right: gutter, top: scale.rem(scrolledPast ? 4.25 : 9.75),
-                  child: EvWallFilterPopover(
-                    current: _query, facets: _facets, totalCount: _listing?.info.total,
-                    unit: _resolvedUnit, loading: _loadingFacets,
-                    onChanged: _applyQuery, onReset: _resetFilters, onClose: _closePopover,
+                if (_openPopover == _WallPopover.sort && sortAnchor != null)
+                  Positioned(
+                    right: sortAnchor.right,
+                    top: sortAnchor.top,
+                    child: EvWallSortMenu(
+                      current: _query.sort,
+                      options: _facets.sorts,
+                      loading: _loadingFacets,
+                      onSelected: _selectSort,
+                    ),
                   ),
-                ),
+                if (_openPopover == _WallPopover.filter && filterAnchor != null)
+                  Positioned(
+                    right: filterAnchor.right,
+                    top: filterAnchor.top,
+                    child: EvWallFilterPopover(
+                      current: _query, facets: _facets, totalCount: _listing?.info.total,
+                      unit: _resolvedUnit, loading: _loadingFacets,
+                      onChanged: _applyQuery, onReset: _resetFilters, onClose: _closePopover,
+                    ),
+                  ),
               ],
             ],
           );
@@ -791,15 +883,21 @@ class _EvWallPageState extends State<EvWallPage> {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _EvWallToolButton(
-              key: const Key('ev_wall_sort_button'), icon: EvIcons.sort, label: _sortLabel(),
-              trailing: EvIcon(EvIcons.down, size: scale.rem(0.75), color: theme.ink.withValues(alpha: 0.6)),
-              onTap: _togglePopover,
+            KeyedSubtree(
+              key: _sortButtonKey,
+              child: _EvWallToolButton(
+                key: const Key('ev_wall_sort_button'), icon: EvIcons.sort, label: _sortLabel(),
+                trailing: EvIcon(EvIcons.down, size: scale.rem(0.75), color: theme.ink.withValues(alpha: 0.6)),
+                onTap: _toggleSortMenu,
+              ),
             ),
             SizedBox(width: scale.rem(0.5)),
-            _EvWallToolButton(
-              key: const Key('ev_wall_filter_button'), icon: EvIcons.filter, label: '筛选',
-              badgeCount: filterCount, onTap: _togglePopover,
+            KeyedSubtree(
+              key: _filterButtonKey,
+              child: _EvWallToolButton(
+                key: const Key('ev_wall_filter_button'), icon: EvIcons.filter, label: '筛选',
+                badgeCount: filterCount, onTap: () => _toggleFilterPopover(fromChrome: false),
+              ),
             ),
           ],
         ),
@@ -1049,34 +1147,98 @@ class _EvWallToolButtonState extends State<_EvWallToolButton> {
   }
 }
 
-/// Compact top-bar sort/filter trigger placed in `EvShellController.rightActions`.
-class _EvChromeFilterAction extends StatelessWidget {
+/// Compact top-bar filter capsule placed in `EvShellController.rightActions`.
+class _EvChromeFilterAction extends StatefulWidget {
   const _EvChromeFilterAction({super.key, required this.filterCount, required this.onTap});
   final int filterCount;
   final VoidCallback onTap;
 
   @override
+  State<_EvChromeFilterAction> createState() => _EvChromeFilterActionState();
+}
+
+class _EvChromeFilterActionState extends State<_EvChromeFilterAction> {
+  bool _hovered = false, _focused = false, _pressed = false;
+  bool get _hi => _hovered || _focused;
+
+  @override
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context);
-    final badgeBg = theme.isPaper && !theme.onImage ? theme.priBg : theme.accent;
-    final badgeFg = theme.isPaper && !theme.onImage ? const Color(0xFFFFFFFF) : theme.bg;
-    return EvButton.ghost(
-      small: true, round: filterCount == 0, tooltip: '排序与筛选', onPressed: onTap,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          EvIcon(EvIcons.filter, size: scale.rem(1.0625), color: theme.ink),
-          if (filterCount > 0) ...[
-            SizedBox(width: scale.rem(0.375)),
-            Container(
-              constraints: BoxConstraints(minWidth: scale.rem(1.125)), height: scale.rem(1.125),
-              padding: EdgeInsets.symmetric(horizontal: scale.rem(0.25)),
-              decoration: BoxDecoration(color: badgeBg, borderRadius: BorderRadius.circular(999)),
-              alignment: Alignment.center,
-              child: Text('$filterCount', style: theme.bodyStyle(scale.rem(0.75), fontWeight: FontWeight.w700, color: badgeFg, height: 1.0)),
+    final h = scale.rem(2.375);
+    final isPaperSurface = theme.isPaper && !theme.onImage;
+    final bgColor = isPaperSurface
+        ? (_hi ? const Color(0xFFF0EEE6) : const Color(0xFFFFFFFF))
+        : (_hi ? theme.fill3 : null);
+    final borderColor = _focused
+        ? theme.focusColor
+        : (isPaperSurface ? const Color(0xFFD1CFC5) : null);
+    final badgeBg = isPaperSurface ? theme.priBg : theme.accent;
+    final badgeFg = isPaperSurface ? const Color(0xFFFFFFFF) : theme.bg;
+
+    final inner = Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        EvIcon(EvIcons.filter, size: scale.rem(1.0625), color: theme.ink),
+        if (widget.filterCount > 0) ...[
+          SizedBox(width: scale.rem(0.375)),
+          Container(
+            key: const Key('ev_wall_chrome_filter_badge'),
+            constraints: BoxConstraints(minWidth: scale.rem(1.125)),
+            height: scale.rem(1.125),
+            padding: EdgeInsets.symmetric(horizontal: scale.rem(0.25)),
+            decoration: BoxDecoration(color: badgeBg, borderRadius: BorderRadius.circular(999)),
+            alignment: Alignment.center,
+            child: Text(
+              '${widget.filterCount}',
+              style: theme.bodyStyle(scale.rem(0.75), fontWeight: FontWeight.w700, color: badgeFg, height: 1.0),
             ),
-          ],
+          ),
         ],
+      ],
+    );
+
+    return Semantics(
+      button: true,
+      focused: _focused,
+      label: '筛选',
+      child: Focus(
+        onFocusChange: (v) => setState(() => _focused = v),
+        onKeyEvent: (_, e) {
+          if (!evIsActivateKey(e)) return KeyEventResult.ignored;
+          widget.onTap();
+          return KeyEventResult.handled;
+        },
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() { _hovered = false; _pressed = false; }),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (_) => setState(() => _pressed = true),
+            onTapUp: (_) => setState(() => _pressed = false),
+            onTapCancel: () => setState(() => _pressed = false),
+            onTap: widget.onTap,
+            child: AnimatedScale(
+              scale: _pressed ? 0.94 : (_hi ? 1.04 : 1.0),
+              duration: const Duration(milliseconds: 300),
+              curve: EvCurves.spring,
+              child: EvGlass(
+                borderRadius: BorderRadius.circular(999),
+                color: bgColor,
+                borderColor: borderColor,
+                child: SizedBox(
+                  height: h,
+                  width: widget.filterCount == 0 ? h : null,
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: widget.filterCount == 0 ? 0.0 : scale.rem(0.75)),
+                    child: Center(widthFactor: 1.0, child: inner),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

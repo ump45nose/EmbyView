@@ -1173,5 +1173,109 @@ void main() {
         expect(favTaps, 1);
       },
     );
+
+    testWidgets(
+      'feature spread distributes all available portrait posters evenly across tilted columns without adjacent duplication',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        // Verify column assignment for both 6-poster (shortHighRated) and 9-poster (uhdDolbyVision) spreads.
+        for (final count in const [6, 9]) {
+          final refs = [for (var i = 0; i < count; i++) _FakeArtworkRef('fp_$i')];
+          final cols = [for (var ci = 0; ci < 7; ci++) EvFeatureSpread.postersForColumn(refs, ci, 6)];
+          final visibleIds = {for (final col in cols) for (final r in col.take(4)) r.id};
+          expect(visibleIds.length, count, reason: 'All $count posters should appear across the wall');
+          for (var ci = 0; ci < 6; ci++) {
+            expect(cols[ci].first.id, isNot(equals(cols[ci + 1].first.id)),
+                reason: 'Adjacent columns $ci and ${ci + 1} should not start with the same poster');
+          }
+        }
+
+        // Verify rendered widget displays all 6 portrait posters inside the tilted wall.
+        final sixCards = [for (var i = 0; i < 6; i++) _makeCard(id: 'short_$i', title: '高分短片 $i', posterAspect: 2 / 3)];
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: Size(1440, 900)),
+              child: EvThemeScope(
+                themeMode: ThemeMode.cinema,
+                child: Scaffold(
+                  body: Center(
+                    child: EvFeatureSpread(
+                      spread: FeatureSpread(
+                        feature: HomeFeature.shortHighRated,
+                        posters: sixCards,
+                        total: sixCards.length,
+                        query: _featureQuery(HomeFeature.shortHighRated),
+                      ),
+                      title: '100 分钟以内\n的高分电影',
+                      accentColor: EvTheme.cinema.movie,
+                      doodleIcon: EvIcons.illClock,
+                      enableAnimations: false,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final wallImages = tester.widgetList<Image>(
+          find.descendant(of: find.byKey(const Key('ev_feature_wall_shortHighRated')), matching: find.byType(Image)),
+        );
+        final renderedKeys = {
+          for (final img in wallImages)
+            if (img.key is ValueKey<String>) (img.key as ValueKey<String>).value.split('_').last,
+        };
+        for (var i = 0; i < 6; i++) {
+          expect(renderedKeys, contains('$i'), reason: 'Poster short_$i must be rendered in feature spread wall');
+        }
+        expect(renderedKeys.length, 6);
+      },
+    );
+
+    testWidgets(
+      'hovering a card with backdrop at home top (scrollProgress == 0) keeps EvStage sharp without blur in cinema and paper themes',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        for (final mode in const [ThemeMode.cinema, ThemeMode.paper]) {
+          final h = _createHarness(initialPrefs: LocalPreferences(theme: mode));
+          await tester.pumpWidget(_wrapHome(h, enableAnimations: false));
+          await tester.pumpAndSettle();
+
+          expect(h.stage.mode, EvStageMode.hero);
+          expect(h.stage.scrollProgress, 0.0);
+
+          final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+          await mouse.addPointer(location: Offset.zero);
+          final cwSection = find.byKey(const Key('ev_home_section_continue'));
+          final cwCards = find.descendant(of: cwSection, matching: find.byType(EvCard));
+          final targetTopLeft = tester.getTopLeft(cwCards.at(1));
+          await mouse.moveTo(targetTopLeft + const Offset(40, 24));
+          await tester.pump(const Duration(milliseconds: 450));
+          await tester.pump(const Duration(milliseconds: 300));
+
+          // Stage swapped to hovered card's clear backdrop with zero veil blur, zero blurfill, zero frame blur.
+          expect(h.stage.scrollProgress, 0.0);
+          expect(h.stage.activeBackdropKey, contains('home_test_bg_cw_2'));
+          expect(find.byKey(const Key('ev_stage_blurfill')), findsNothing);
+          expect(find.byKey(const Key('ev_stage_veil_fill')), findsNothing);
+          final frameBlur = tester.widget<ImageFiltered>(find.byKey(const Key('ev_stage_frame_blur')));
+          expect(frameBlur.enabled, isFalse);
+
+          await mouse.removePointer();
+          await tester.pumpWidget(const SizedBox.shrink());
+          await h.dispose();
+        }
+      },
+    );
   });
 }

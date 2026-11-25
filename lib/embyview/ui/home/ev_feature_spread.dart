@@ -41,13 +41,26 @@ class EvFeatureSpread extends StatefulWidget {
     return result;
   }
 
+  /// Selects [count] posters for [columnIndex] so all portrait [posters] are
+  /// distributed evenly across columns without adjacent-column collisions.
+  static List<ArtworkRef> postersForColumn(List<ArtworkRef> posters, int columnIndex, int count) {
+    final n = posters.length;
+    if (n == 0 || count <= 0) return const [];
+    if (n == 1) return List<ArtworkRef>.filled(count, posters.first);
+    final target = n >= 18 ? count : (n >= 9 ? 3 : (n >= 3 ? 2 : 1));
+    final stride = target.clamp(1, n - 1);
+    final cycle = n ~/ stride.gcd(n);
+    final start = (columnIndex * stride + (columnIndex ~/ cycle)) % n;
+    return [for (var j = 0; j < count; j++) posters[(start + j) % n]];
+  }
+
   @override
   State<EvFeatureSpread> createState() => EvFeatureSpreadState();
 }
 
 class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderStateMixin {
-  static const int _columnCount = 6;
-  static const int _postersPerColumn = 4;
+  static const int _columnCount = 7;
+  static const int _postersPerColumn = 6;
 
   late final AnimationController _upController;
   late final AnimationController _downController;
@@ -185,7 +198,7 @@ class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderSta
                         fit: StackFit.expand,
                         children: [
                           if (_portraitPosters.isNotEmpty)
-                            Positioned(right: 0, top: 0, bottom: 0, width: c.maxWidth * 0.66, child: IgnorePointer(child: _buildPosterWall(theme, scale, c.maxWidth * 0.66))),
+                            Positioned(right: 0, top: 0, bottom: 0, width: c.maxWidth * 0.66, child: IgnorePointer(child: _buildPosterWall(theme, scale, c.maxWidth * 0.66, c.maxHeight))),
                           Positioned(left: 0, top: 0, bottom: 0, width: c.maxWidth * 0.40, child: _buildCallout(theme, scale)),
                         ],
                       ),
@@ -232,10 +245,13 @@ class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderSta
     );
   }
 
-  Widget _buildPosterWall(EvTheme theme, EvScale scale, double wallW) {
+  Widget _buildPosterWall(EvTheme theme, EvScale scale, double wallW, double wallH) {
     final posters = _portraitPosters, gap = scale.rem(0.75), planeW = wallW * 1.14;
     final colW = math.max(48.0, (planeW - gap * (_columnCount - 1)) / _columnCount);
-    final posterH = colW * 1.5, halfCycleH = _postersPerColumn * (posterH + gap);
+    final posterH = colW * 1.5;
+    final planeH = math.max(wallH * 2.4, posterH * 3.0);
+    final postersPerCol = math.max(_postersPerColumn, (planeH / (posterH + gap)).ceil() + 1);
+    final halfCycleH = postersPerCol * (posterH + gap);
     final r = BorderRadius.circular(scale.rem(theme.isPaper ? 0.375 : 0.5));
     final shadow = theme.isPaper
         ? [BoxShadow(offset: Offset(scale.rem(0.25), scale.rem(0.25)), color: const Color.fromRGBO(20, 20, 19, 0.12))]
@@ -260,7 +276,7 @@ class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderSta
               ..rotateZ((10.0 - 3.0 * t) * math.pi / 180.0)
               ..scaleByDouble(s, s, 1.0, 1.0);
             return OverflowBox(
-              minWidth: planeW, maxWidth: planeW, minHeight: halfCycleH * 2, maxHeight: halfCycleH * 2,
+              minWidth: planeW, maxWidth: planeW, minHeight: planeH, maxHeight: planeH,
               child: Transform(alignment: Alignment.center, transform: m, child: child),
             );
           },
@@ -270,7 +286,7 @@ class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderSta
             children: [
               for (var ci = 0; ci < _columnCount; ci++) ...[
                 if (ci > 0) SizedBox(width: gap),
-                _buildColumn(ci, colW, posterH, gap, halfCycleH, posters, r, shadow, theme.cardBg),
+                _buildColumn(ci, colW, posterH, gap, planeH, postersPerCol, halfCycleH, posters, r, shadow, theme.cardBg),
               ],
             ],
           ),
@@ -280,11 +296,11 @@ class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderSta
   }
 
   Widget _buildColumn(
-    int ci, double colW, double posterH, double gap, double halfCycleH,
+    int ci, double colW, double posterH, double gap, double planeH, int postersPerCol, double halfCycleH,
     List<ArtworkRef> posters, BorderRadius r, List<BoxShadow> shadow, Color cardBg,
   ) {
     final downward = ci.isOdd, ctrl = downward ? _downController : _upController;
-    final base = [for (var j = 0; j < _postersPerColumn; j++) posters[(ci * 3 + j + (posters.length > 12 ? ci * 6 : 0)) % posters.length]];
+    final base = EvFeatureSpread.postersForColumn(posters, ci, postersPerCol);
     final doubled = [...base, ...base];
     final col = Column(
       mainAxisSize: MainAxisSize.min,
@@ -305,12 +321,20 @@ class EvFeatureSpreadState extends State<EvFeatureSpread> with TickerProviderSta
     );
     return SizedBox(
       width: colW,
-      child: AnimatedBuilder(
-        animation: ctrl, child: col,
-        builder: (_, child) => Transform.translate(
-          key: Key('ev_feature_col_${widget.spread.feature.name}_$ci'),
-          offset: Offset(0, downward ? -halfCycleH * (1.0 - ctrl.value) : -halfCycleH * ctrl.value),
-          child: child,
+      height: planeH,
+      child: OverflowBox(
+        alignment: Alignment.topCenter,
+        minWidth: colW,
+        maxWidth: colW,
+        minHeight: 0,
+        maxHeight: double.infinity,
+        child: AnimatedBuilder(
+          animation: ctrl, child: col,
+          builder: (_, child) => Transform.translate(
+            key: Key('ev_feature_col_${widget.spread.feature.name}_$ci'),
+            offset: Offset(0, downward ? -halfCycleH * (1.0 - ctrl.value) : -halfCycleH * ctrl.value),
+            child: child,
+          ),
         ),
       ),
     );

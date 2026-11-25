@@ -6,6 +6,7 @@ import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/icons/ev_icons.dart';
 import 'package:moonfin/embyview/ui/shell/ev_avatar_menu.dart';
 import 'package:moonfin/embyview/ui/shell/ev_scope.dart';
+import 'package:moonfin/embyview/ui/stage/ev_stage_controller.dart';
 import 'package:moonfin/embyview/ui/theme/ev_motion.dart';
 import 'package:moonfin/embyview/ui/theme/ev_primitives.dart';
 import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
@@ -27,7 +28,7 @@ class EvTopBar extends StatefulWidget {
     this.autoTuck = false,
     this.tuckDelay = const Duration(milliseconds: 1400),
     this.tuckLeaveDelay = const Duration(milliseconds: 700),
-    this.scrolled = false, this.topFade = 0.0, this.showBack = false,
+    this.scrolled = false, this.topFade = 0.0, this.onImageBackdrop, this.showBack = false,
     this.titlePlate, this.rightActions = const [],
     this.hideTabs = false, this.hideAvatar = false, this.showSearchTab = false,
     this.currentProfile, this.avatarMenuOpen = false, this.enableWindowDrag = true,
@@ -39,6 +40,7 @@ class EvTopBar extends StatefulWidget {
   final String? activeTabId;
   final NavigationStyle navigationStyle;
   final bool autoTuck, scrolled, showBack, hideTabs, hideAvatar, showSearchTab, avatarMenuOpen, enableWindowDrag;
+  final bool? onImageBackdrop;
   final Duration tuckDelay, tuckLeaveDelay;
   final double topFade;
   final EvChromeTitlePlate? titlePlate;
@@ -170,7 +172,8 @@ class _EvTopBarState extends State<EvTopBar> with SingleTickerProviderStateMixin
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context);
     final barOpacity = widget.topFade > 0.005 ? widget.topFade.clamp(0.0, 1.0) : (widget.scrolled ? 1.0 : 0.0);
-    final onImage = widget.topFade < 0.75;
+    final hasBackdrop = widget.onImageBackdrop ?? (EvScope.maybeOf(context)?.stage.mode != EvStageMode.ambient);
+    final onImage = hasBackdrop && widget.topFade < 0.75;
 
     return SizedBox(
       height: scale.rem(4.75),

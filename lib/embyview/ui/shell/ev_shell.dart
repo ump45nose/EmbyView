@@ -289,13 +289,14 @@ class _EvShellState extends State<EvShell> {
                           Positioned(
                             left: 0, right: 0, top: 0,
                             child: ListenableBuilder(
-                              listenable: _shell,
+                              listenable: Listenable.merge([_shell, _stage]),
                               builder: (context, _) {
                                 final current = _shell.current;
                                 return EvTopBar(
                                   zones: _shell.zones, activeTabId: current.activeTabId,
                                   navigationStyle: _prefs.navigation, autoTuck: current is EvZoneDestination,
                                   scrolled: _shell.scrolled, topFade: _shell.topFade,
+                                  onImageBackdrop: _stage.mode != EvStageMode.ambient,
                                   showBack: _shell.showBack, titlePlate: _shell.titlePlate,
                                   rightActions: _shell.rightActions, hideTabs: _shell.hideTabs,
                                   hideAvatar: _shell.hideAvatar, showSearchTab: _shell.onOpenSearch != null,

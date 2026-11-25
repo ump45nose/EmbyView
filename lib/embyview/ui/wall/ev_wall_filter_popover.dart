@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
@@ -125,7 +126,215 @@ class _EvWallChipState extends State<EvWallChip> {
   }
 }
 
-/// Sort & filter popover rendered strictly from [WallFacets] (no hardcoded options),
+/// Compact frosted-glass sort menu rendered strictly from [WallFacets.sorts],
+/// mirroring `openPop('sort', anchor)` (`.pop.glass`, `.mi`, `.chk`) in
+/// `.spec/mockups/proto.js` and `proto.css`.
+class EvWallSortMenu extends StatefulWidget {
+  const EvWallSortMenu({
+    super.key,
+    required this.current,
+    required this.options,
+    required this.onSelected,
+    this.loading = false,
+  });
+
+  final WallSort current;
+  final List<FacetOption<WallSort>> options;
+  final ValueChanged<WallSort> onSelected;
+  final bool loading;
+
+  @override
+  State<EvWallSortMenu> createState() => _EvWallSortMenuState();
+}
+
+class _EvWallSortMenuState extends State<EvWallSortMenu> {
+  final FocusScopeNode _scopeNode = FocusScopeNode(debugLabel: 'ev_wall_sort_menu_scope');
+  List<FocusNode> _itemNodes = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _syncNodes();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _focusInitial());
+  }
+
+  @override
+  void didUpdateWidget(EvWallSortMenu oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.options.length != widget.options.length) {
+      _syncNodes();
+    }
+  }
+
+  void _syncNodes() {
+    for (final n in _itemNodes) {
+      n.dispose();
+    }
+    _itemNodes = List<FocusNode>.generate(
+      widget.options.length,
+      (i) => FocusNode(debugLabel: 'ev_wall_sort_option_${widget.options[i].value.name}'),
+      growable: false,
+    );
+  }
+
+  void _focusInitial() {
+    if (!mounted || _itemNodes.isEmpty) return;
+    final selectedIdx = widget.options.indexWhere((o) => o.value == widget.current);
+    _itemNodes[selectedIdx >= 0 ? selectedIdx : 0].requestFocus();
+  }
+
+  void _moveFocus(int fromIndex, int delta) {
+    if (_itemNodes.isEmpty) return;
+    final next = (fromIndex + delta) % _itemNodes.length;
+    _itemNodes[next < 0 ? next + _itemNodes.length : next].requestFocus();
+  }
+
+  @override
+  void dispose() {
+    for (final n in _itemNodes) {
+      n.dispose();
+    }
+    _scopeNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EvTheme.of(context), scale = EvScale.of(context);
+    return FocusScope(
+      node: _scopeNode,
+      child: IntrinsicWidth(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minWidth: scale.rem(12.0)),
+          child: EvGlass(
+            key: const Key('ev_wall_sort_menu'),
+            borderRadius: BorderRadius.circular(scale.rem(1.0)),
+            padding: EdgeInsets.all(scale.rem(0.375)),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (widget.loading && widget.options.isEmpty)
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: scale.rem(0.75), vertical: scale.rem(0.6875)),
+                    child: Text('正在加载排序项…', style: theme.bodyStyle(scale.font(0.9375), color: theme.ink3)),
+                  )
+                else
+                  for (var i = 0; i < widget.options.length; i++)
+                    _EvWallSortMenuItem(
+                      key: Key('ev_wall_sort_option_${widget.options[i].value.name}'),
+                      option: widget.options[i],
+                      selected: widget.current == widget.options[i].value,
+                      focusNode: _itemNodes[i],
+                      onMoveUp: () => _moveFocus(i, -1),
+                      onMoveDown: () => _moveFocus(i, 1),
+                      onTap: () => widget.onSelected(widget.options[i].value),
+                    ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EvWallSortMenuItem extends StatefulWidget {
+  const _EvWallSortMenuItem({
+    super.key,
+    required this.option,
+    required this.selected,
+    required this.focusNode,
+    required this.onMoveUp,
+    required this.onMoveDown,
+    required this.onTap,
+  });
+
+  final FacetOption<WallSort> option;
+  final bool selected;
+  final FocusNode focusNode;
+  final VoidCallback onMoveUp;
+  final VoidCallback onMoveDown;
+  final VoidCallback onTap;
+
+  @override
+  State<_EvWallSortMenuItem> createState() => _EvWallSortMenuItemState();
+}
+
+class _EvWallSortMenuItemState extends State<_EvWallSortMenuItem> {
+  bool _hovered = false, _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EvTheme.of(context), scale = EvScale.of(context);
+    return Semantics(
+      button: true,
+      selected: widget.selected,
+      focused: _focused,
+      label: widget.option.label,
+      child: Focus(
+        focusNode: widget.focusNode,
+        onFocusChange: (v) => setState(() => _focused = v),
+        onKeyEvent: (_, e) {
+          if (e is KeyDownEvent) {
+            if (e.logicalKey == LogicalKeyboardKey.arrowDown) {
+              widget.onMoveDown();
+              return KeyEventResult.handled;
+            }
+            if (e.logicalKey == LogicalKeyboardKey.arrowUp) {
+              widget.onMoveUp();
+              return KeyEventResult.handled;
+            }
+          }
+          if (!evIsActivateKey(e)) return KeyEventResult.ignored;
+          widget.onTap();
+          return KeyEventResult.handled;
+        },
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              curve: EvCurves.soft,
+              padding: EdgeInsets.symmetric(horizontal: scale.rem(0.75), vertical: scale.rem(0.6875)),
+              decoration: BoxDecoration(
+                color: (_hovered || _focused) ? theme.fill2 : const Color(0x00000000),
+                borderRadius: BorderRadius.circular(scale.rem(0.625)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    widget.option.label,
+                    maxLines: 1,
+                    softWrap: false,
+                    style: theme.bodyStyle(scale.font(0.9375), fontWeight: FontWeight.w500, color: theme.ink),
+                  ),
+                  SizedBox(width: scale.rem(1.0)),
+                  if (widget.selected)
+                    EvIcon(
+                      EvIcons.check,
+                      key: Key('ev_wall_sort_check_${widget.option.value.name}'),
+                      size: scale.rem(1.0),
+                      color: theme.ink,
+                    )
+                  else
+                    SizedBox(width: scale.rem(1.0), height: scale.rem(1.0)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Filter popover rendered strictly from [WallFacets] (no hardcoded options),
 /// mirroring `.pop.glass.filterpop` in `.spec/mockups/proto.css` and `proto.js`.
 class EvWallFilterPopover extends StatelessWidget {
   const EvWallFilterPopover({
@@ -145,11 +354,11 @@ class EvWallFilterPopover extends StatelessWidget {
   static const Object _keep = Object();
 
   WallQuery _patch({
-    WallSort? sort, WatchFilter? watched,
+    WatchFilter? watched,
     Object? genreId = _keep, Object? years = _keep, Object? technology = _keep,
   }) => (
     scope: current.scope,
-    sort: sort ?? current.sort,
+    sort: current.sort,
     watched: watched ?? current.watched,
     genreId: identical(genreId, _keep) ? current.genreId : genreId as String?,
     years: identical(years, _keep) ? current.years : years as YearRange?,
@@ -159,7 +368,7 @@ class EvWallFilterPopover extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context);
-    final hasAny = facets.sorts.isNotEmpty || facets.watched.isNotEmpty ||
+    final hasAny = facets.watched.isNotEmpty ||
         facets.genres.isNotEmpty || facets.years.isNotEmpty || facets.technologies.isNotEmpty;
 
     return SizedBox(
@@ -183,15 +392,6 @@ class EvWallFilterPopover extends StatelessWidget {
                           padding: EdgeInsets.symmetric(horizontal: scale.rem(0.75), vertical: scale.rem(1.25)),
                           child: Text('正在加载筛选项…', style: theme.bodyStyle(scale.font(0.9375), color: theme.ink3)),
                         ),
-                      if (facets.sorts.isNotEmpty)
-                        _section(context, '排序', [
-                          for (final o in facets.sorts)
-                            EvWallChip(
-                              key: Key('ev_wall_facet_sort_${o.value.name}'), label: o.label, count: o.count,
-                              compact: true, selected: current.sort == o.value,
-                              onTap: () => onChanged(_patch(sort: o.value)),
-                            ),
-                        ]),
                       if (facets.watched.isNotEmpty)
                         _section(context, '观看状态', [
                           for (final o in facets.watched)

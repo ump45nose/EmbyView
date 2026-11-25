@@ -376,28 +376,66 @@ void main() {
         await tester.tap(find.byKey(const Key('ev_wall_chrome_filter_button')));
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('ev_wall_filter_popover')), findsOneWidget);
+        expect(find.byKey(const Key('ev_wall_sort_menu')), findsNothing);
 
-        // Options strictly match WallFacets (no hardcoded year/random sorts or hdr/surround51).
-        expect(find.byKey(const Key('ev_wall_facet_sort_title')), findsOneWidget);
-        expect(find.byKey(const Key('ev_wall_facet_sort_added')), findsOneWidget);
-        expect(find.byKey(const Key('ev_wall_facet_sort_score')), findsOneWidget);
-        expect(find.byKey(const Key('ev_wall_facet_sort_year')), findsNothing);
-        expect(find.byKey(const Key('ev_wall_facet_sort_random')), findsNothing);
+        // Filter popover strictly excludes Sort section and renders only WallFacets filter options.
+        expect(
+          find.descendant(of: find.byKey(const Key('ev_wall_filter_popover')), matching: find.text('排序')),
+          findsNothing,
+        );
         expect(find.byKey(const Key('ev_wall_facet_tech_uhd4k')), findsOneWidget);
         expect(find.byKey(const Key('ev_wall_facet_tech_dolbyVision')), findsOneWidget);
         expect(find.byKey(const Key('ev_wall_facet_tech_hdr')), findsNothing);
         expect(find.byKey(const Key('ev_wall_facet_tech_surround51')), findsNothing);
 
-        // Switch sort to WallSort.score -> hides alpha bar, re-calls openWall, resets scroll to top.
-        final beforeScore = data.openWallCalls.length;
-        await tester.tap(find.byKey(const Key('ev_wall_facet_sort_score')));
+        // Close filter popover, scroll back to top, and open independent sort menu.
+        await tester.tap(find.byKey(const Key('ev_wall_popover_close')));
         await tester.pumpAndSettle();
+        scrollController.jumpTo(0.0);
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byKey(const Key('ev_wall_sort_button')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_sort_menu')), findsOneWidget);
+        expect(find.byKey(const Key('ev_wall_filter_popover')), findsNothing);
+
+        // Sort menu strictly matches WallFacets.sorts and marks current selection with check icon.
+        expect(find.byKey(const Key('ev_wall_sort_option_title')), findsOneWidget);
+        expect(find.byKey(const Key('ev_wall_sort_option_added')), findsOneWidget);
+        expect(find.byKey(const Key('ev_wall_sort_option_score')), findsOneWidget);
+        expect(find.byKey(const Key('ev_wall_sort_option_year')), findsNothing);
+        expect(find.byKey(const Key('ev_wall_sort_option_random')), findsNothing);
+        expect(find.byKey(const Key('ev_wall_sort_check_title')), findsOneWidget);
+        expect(find.byKey(const Key('ev_wall_sort_check_score')), findsNothing);
+
+        // Opening filter popover while sort menu is open closes sort menu (mutually exclusive).
+        await tester.tap(find.byKey(const Key('ev_wall_popover_scrim')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('ev_wall_sort_button')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_sort_menu')), findsOneWidget);
+
+        // Select WallSort.score -> immediately updates sort, closes menu, hides alpha bar, resets scroll.
+        final beforeScore = data.openWallCalls.length;
+        await tester.tap(find.byKey(const Key('ev_wall_sort_option_score')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_sort_menu')), findsNothing);
         expect(data.openWallCalls.length, beforeScore + 1);
         expect(data.openWallCalls.last.sort, WallSort.score);
         expect(find.byKey(const Key('ev_alpha_bar')), findsNothing);
         expect(scrollController.offset, 0.0);
 
-        // Filter 4K (TechFilter.uhd4k) -> re-calls openWall, displays 9 filtered items + badge.
+        // Re-opening sort menu shows check icon on WallSort.score.
+        await tester.tap(find.byKey(const Key('ev_wall_sort_button')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_sort_check_score')), findsOneWidget);
+        expect(find.byKey(const Key('ev_wall_sort_check_title')), findsNothing);
+        await tester.tap(find.byKey(const Key('ev_wall_popover_scrim')));
+        await tester.pumpAndSettle();
+
+        // Open filter popover and filter 4K (TechFilter.uhd4k) -> displays 9 filtered items + badge.
+        await tester.tap(find.byKey(const Key('ev_wall_filter_button')));
+        await tester.pumpAndSettle();
         final before4k = data.openWallCalls.length;
         await tester.tap(find.byKey(const Key('ev_wall_facet_tech_uhd4k')));
         await tester.pumpAndSettle();
@@ -621,9 +659,32 @@ void main() {
         expect(find.byKey(const Key('ev_wall_error_banner')), findsNothing);
         expect(find.byKey(const ValueKey<String>('ev_wall_card_flaky_599')), findsOneWidget);
 
-        // Keyboard activation on tool button & facet chip (Enter / Space).
+        // Keyboard activation on sort button, arrow key navigation, and Space activation in sort menu.
         scrollController.jumpTo(0.0);
         await tester.pumpAndSettle();
+        final sortBtnFocus = find.descendant(
+          of: find.byKey(const Key('ev_wall_sort_button')),
+          matching: find.byType(Focus),
+        ).first;
+        final sortBtnInner = find.descendant(of: sortBtnFocus, matching: find.byType(MouseRegion)).first;
+        Focus.of(tester.element(sortBtnInner)).requestFocus();
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_sort_menu')), findsOneWidget);
+
+        // ArrowDown moves focus from 'title' to 'score', Space selects it and closes the menu.
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
+        await tester.pumpAndSettle();
+        expect(flakyData.lastQuery?.sort, WallSort.score);
+        expect(find.byKey(const Key('ev_wall_sort_menu')), findsNothing);
+
+        // Keyboard activation on filter button opens filter popover, Escape closes it.
         final filterBtnFocus = find.descendant(
           of: find.byKey(const Key('ev_wall_filter_button')),
           matching: find.byType(Focus),
@@ -636,21 +697,10 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('ev_wall_filter_popover')), findsOneWidget);
 
-        final scoreChipFocus = find.descendant(
-          of: find.byKey(const Key('ev_wall_facet_sort_score')),
-          matching: find.byType(Focus),
-        ).first;
-        final scoreChipInner = find.descendant(of: scoreChipFocus, matching: find.byType(MouseRegion)).first;
-        Focus.of(tester.element(scoreChipInner)).requestFocus();
-        await tester.pump();
-        await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
-        await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.escape);
         await tester.pumpAndSettle();
-        expect(flakyData.lastQuery?.sort, WallSort.score);
-
-        // Close popover and verify scrolling + letter jumps + page arrivals do NOT rebuild EvWallPage, and concurrency stays <= 3.
-        await tester.tap(find.byKey(const Key('ev_wall_popover_close')));
-        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_wall_filter_popover')), findsNothing);
 
         final hugeData = _HugeFakeWallData(total: 10000);
         final shell2 = EvShellController(initial: EvWallDestination(_defaultQuery('huge2'), title: '万级片库'));
@@ -687,6 +737,74 @@ void main() {
         expect(wallRebuilds, 0);
         expect(flakyData.maxInFlight, lessThanOrEqualTo(3));
         expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'paper theme wall top bar filter capsule stays out of EvOnImage mode at topFade == 0 with visible capsule, icon, and count badge',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final data = _FakeWallData(entries: [
+          _WallEntry(initial: 'D', is4k: true, card: _movieCard(id: 'd1', title: '盗梦空间', genres: const ['科幻'])),
+        ]);
+        final prefs = _FakePreferences(const LocalPreferences(theme: ThemeMode.paper));
+        final accounts = _FakeAccounts();
+        const filteredQuery = (
+          scope: WallScope.zone('movie'),
+          sort: WallSort.title,
+          watched: WatchFilter.played,
+          genreId: '恐怖',
+          years: YearRange(from: 1990, to: 1999),
+          technology: TechFilter.uhd4k,
+        );
+        final shell = EvShellController(
+          initial: const EvWallDestination(filteredQuery, title: '电影'),
+          zones: const [ZoneTile(id: 'movie', name: '电影', iconKey: 'nav_movie', colorSlot: 1, total: 1, unit: '部')],
+        );
+        addTearDown(() async {
+          shell.dispose();
+          await prefs.close();
+          await accounts.close();
+        });
+
+        await tester.pumpWidget(_hostWall(
+          data: data, shell: shell, prefs: prefs, accounts: accounts,
+          initialQuery: filteredQuery, title: '电影',
+        ));
+        await tester.pumpAndSettle();
+
+        expect(shell.topFade, 0.0);
+        final chromeFilterFinder = find.byKey(const Key('ev_wall_chrome_filter_button'));
+        expect(chromeFilterFinder, findsOneWidget);
+
+        // Must NOT be wrapped in EvOnImage light-ink inversion on ambient paper background.
+        final btnCtx = tester.element(chromeFilterFinder);
+        final btnTheme = EvTheme.of(btnCtx);
+        expect(btnTheme.isPaper, isTrue);
+        expect(btnTheme.onImage, isFalse);
+
+        // Capsule glass uses visible paper white fill + crisp border; icon uses dark paper ink.
+        final glass = tester.widget<EvGlass>(
+          find.descendant(of: chromeFilterFinder, matching: find.byType(EvGlass)),
+        );
+        expect(glass.color, const Color(0xFFFFFFFF));
+        expect(glass.borderColor, const Color(0xFFD1CFC5));
+
+        final icon = tester.widget<EvIcon>(
+          find.descendant(of: chromeFilterFinder, matching: find.byType(EvIcon)),
+        );
+        expect(icon.color, EvTheme.paper.ink);
+
+        // Filter badge displays count '4' with paper terracotta primary fill and white text.
+        final badgeFinder = find.byKey(const Key('ev_wall_chrome_filter_badge'));
+        expect(badgeFinder, findsOneWidget);
+        final badgeBox = tester.widget<Container>(badgeFinder);
+        expect((badgeBox.decoration as BoxDecoration).color, EvTheme.paper.priBg);
+        expect(find.descendant(of: badgeFinder, matching: find.text('4')), findsOneWidget);
       },
     );
   });
