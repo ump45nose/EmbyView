@@ -24,7 +24,7 @@ class _Backend extends PlayerBackend implements AetherBackend {
   final errors = StreamController<Map<String, dynamic>>.broadcast();
   final urls = <String>[];
   final starts = <Duration>[];
-  bool failOpen = false, playing = false;
+  bool failOpen = false, playing = false, runtimeTracks = true;
   bool failDisableSubtitle = false, failSelectSubtitle = false;
   int subtitleDisables = 0;
   Completer<void>? subtitleDisableGate, subtitleSelectGate;
@@ -44,7 +44,8 @@ class _Backend extends PlayerBackend implements AetherBackend {
     #isPlaying || #playWhenReady => playing,
     #isBuffering || #isSubtitleLoading => false,
     #playbackSpeed => 1.0,
-    #supportsRuntimeTrackSelection || #canRenderBitmapSubtitles => true,
+    #supportsRuntimeTrackSelection => runtimeTracks,
+    #canRenderBitmapSubtitles => true,
     #positionStream || #durationStream || #bufferStream => const Stream<Duration>.empty(),
     #playingStream || #bufferingStream || #completedStream || #subtitleLoadingStream => const Stream<bool>.empty(),
     #remoteCommandStream => const Stream<Map<String, dynamic>>.empty(),
@@ -498,6 +499,34 @@ void main() {
       generation: session.snapshot.generation,
     );
     await session.selectSubtitle(local);
+    final input = session as PlaybackSubtitleInput;
+    const live = 'live-test';
+    await input.setLiveSubtitle(live, generation: session.snapshot.generation, select: false);
+    backend.failDisableSubtitle = true;
+    await expectLater(session.selectSubtitle(live), throwsStateError);
+    expect(session.snapshot.selectedSubtitleId, local);
+    expect(session.snapshot.subtitleOverlayId, isNull);
+    expect(native.externalLoads.last.$2, 'file:///subtitles/active.srt');
+    backend.failDisableSubtitle = false;
+
+    await session.selectSubtitle(live);
+    backend.failSelectSubtitle = true;
+    final disabled = backend.subtitleDisables;
+    await expectLater(session.selectSubtitle(embedded), throwsStateError);
+    expect(session.snapshot.selectedSubtitleId, live);
+    expect(session.snapshot.subtitleOverlayId, live);
+    expect(backend.subtitleDisables, greaterThan(disabled));
+
+    final delayed = backend.subtitleSelectGate = Completer<void>();
+    final first = expectLater(session.selectSubtitle(embedded), throwsStateError);
+    await pumpEventQueue();
+    final newer = session.selectSubtitle(null);
+    delayed.complete();
+    await Future.wait([first, newer]);
+    expect(session.snapshot.selectedSubtitleId, isNull);
+    expect(session.snapshot.subtitleOverlayId, isNull);
+    backend.failSelectSubtitle = false;
+    await session.selectSubtitle(local);
     for (final disable in [false, true]) {
       final gate = Completer<void>();
       if (disable) {
@@ -520,6 +549,19 @@ void main() {
     expect(session.snapshot.selectedSubtitleId, embedded);
     await session.selectSubtitle(null);
     expect(session.snapshot.selectedSubtitleId, isNull);
+    // The real manager reopens the source when runtime switching is unavailable.
+    backend.runtimeTracks = false;
+    final previousGeneration = session.snapshot.generation;
+    await session.selectSubtitle(embedded);
+    expect(session.snapshot.generation, greaterThan(previousGeneration));
+    expect(input.subtitleSource!.subtitleSwitchFrom, previousGeneration);
+    final generationWithOld = session.snapshot.generation;
+    await input.setLiveSubtitle('first-live', generation: generationWithOld, select: true);
+    final generationWithoutOld = session.snapshot.generation;
+    expect(generationWithoutOld, greaterThan(generationWithOld));
+    await input.setLiveSubtitle('rebound-live', generation: generationWithoutOld, select: true);
+    expect(session.snapshot.generation, generationWithoutOld);
+    expect(session.snapshot.subtitleOverlayId, 'rebound-live');
   });
   test('live selection waits for native off before drawing and late sidecar selection yields to cancellation or the viewer', () async {
     final backend = _Backend();

@@ -270,6 +270,108 @@ void main() {
     });
   }
 
+  for (final change in ['subtitle', 'seek', 'audio']) {
+    test('source reopen after $change only keeps confirmed audio on the same uninterrupted timeline', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final f = await _Fixture.open();
+      addTearDown(f.close);
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      const audio = MethodChannel('embyview/audio_control'), asr = MethodChannel('embyview/asr');
+      final reads = <(int, int)>[];
+      final obsoleteRead = Completer<void>();
+      messenger.setMockMethodCallHandler(audio, (call) async {
+        if (call.method != 'readIndependent') return null;
+        final from = (call.arguments as Map)['startUs'] as int;
+        final to = (call.arguments as Map)['endUs'] as int;
+        final gen = f.playback.snapshot.generation;
+        reads.add((gen, from));
+        if (gen == 2 && from >= 20000000) await obsoleteRead.future;
+        return [
+          {'startUs': from, 'sourceUs': from, 'pcm': Uint8List((to - from) * 48000 ~/ 1000000 * 4)},
+        ];
+      });
+      messenger.setMockMethodCallHandler(
+        asr,
+        (call) async => call.method == 'modelStatus'
+            ? {'state': 'ready', 'receivedBytes': 1, 'totalBytes': 1}
+            : {
+                'language': 'en',
+                'segments': [
+                  {'startUs': 0, 'endUs': 1000000, 'text': 'Hello'},
+                ],
+              },
+      );
+      addTearDown(() {
+        if (!obsoleteRead.isCompleted) obsoleteRead.complete();
+        messenger.setMockMethodCallHandler(audio, null);
+        messenger.setMockMethodCallHandler(asr, null);
+      });
+      var charges = 0;
+      f.aiRequest = (_) async {
+        final translation = ++charges == 1 ? '第一句' : '第二句';
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'choices': [
+                {
+                  'finish_reason': 'stop',
+                  'message': {
+                    'content': jsonEncode({
+                      'lines': [
+                        {'id': 0, 'text': translation},
+                      ],
+                    }),
+                  },
+                },
+              ],
+            }),
+          ),
+          200,
+        );
+      };
+      void open(int gen, {int? subtitleSwitchFrom}) => f.playback.open(
+        _movie,
+        gen,
+        duration: const Duration(seconds: 40),
+        position: Duration(seconds: gen == 2 ? 0 : 6),
+        subtitleSwitchFrom: subtitleSwitchFrom,
+        audio: [PlaybackTrack(id: '$gen:1', name: 'English', source: PlaybackTrackSource.embedded)],
+        selectedAudioId: gen == 3 && change == 'audio' ? '$gen:8' : '$gen:1',
+        subtitles: [PlaybackTrack(id: '$gen:2', name: 'old', source: PlaybackTrackSource.embedded)],
+      );
+      open(2);
+      final firstCue = f.panel.changes.firstWhere((state) => state.ai?.cues.isNotEmpty == true);
+      final started = f.panel.startAi();
+      await firstCue;
+      expect(charges, 1);
+      await f.playback.selectSubtitle('2:2');
+      final saved = f.panel.changes.firstWhere(
+        (state) => state.generation == 3 && state.tracks.any((t) => t.save == SubtitleSaveState.failed),
+      );
+      if (change == 'seek') {
+        f.audioBoundaries.add((
+          sourceGeneration: 2,
+          kind: SubtitleAudioBoundaryKind.seek,
+          ready: false,
+          position: const Duration(seconds: 6),
+          streamIndex: null,
+        ));
+      }
+      open(3, subtitleSwitchFrom: 2);
+      obsoleteRead.complete();
+      await saved;
+      await started;
+      final uninterrupted = change == 'subtitle';
+      expect(reads.where((r) => r.$1 == 3).toList(), uninterrupted ? [(3, 20000000)] : [(3, 6000000), (3, 26000000)]);
+      expect(charges, uninterrupted ? 2 : 3);
+      final chinese = f.playback.registered.values.single;
+      expect(chinese, uninterrupted ? contains('第一句') : isNot(contains('第一句')));
+      expect(chinese, contains('第二句'));
+      expect(f.panel.snapshot.ai?.coverage.single.start, uninterrupted ? Duration.zero : const Duration(seconds: 6));
+      expect(f.panel.snapshot.ai?.coverage.single.end, const Duration(seconds: 40));
+    });
+  }
+
   test('normal playback end flushes a short final segment in the following mode', () async {
     final fixture = await _Fixture.open();
     addTearDown(fixture.close);
@@ -538,6 +640,8 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     List<PlaybackTrack> audio = const [],
     String? selectedAudioId,
     Duration duration = const Duration(seconds: 10),
+    Duration position = Duration.zero,
+    int? subtitleSwitchFrom,
   }) {
     subtitleSource = PlaybackSubtitleSource(
       generation: generation,
@@ -545,6 +649,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
       mediaSourceId: 'source',
       address: Uri.https('example.test', '/media'),
       itemFilePath: '/mnt/media/${target.itemId}.strm',
+      subtitleSwitchFrom: subtitleSwitchFrom,
       headers: const {},
       userAgent: 'Mozilla/5.0',
     );
@@ -557,6 +662,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
       target: target,
       phase: PlaybackPhase.playing,
       duration: duration,
+      position: position,
       subtitleTracks: subtitles,
       audioTracks: audio,
       selectedAudioId: selectedAudioId,

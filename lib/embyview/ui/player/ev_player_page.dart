@@ -61,6 +61,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   bool _autoCompareSwept = false;
   int _seekLeftNonce = 0, _seekRightNonce = 0, _compareSweepNonce = 0;
   String _toastMessage = '';
+  int _subtitleSelection = 0;
   EvIconData? _toastIcon;
   Timer? _idleTimer, _pauseTimer, _toastTimer, _auroraFlashTimer;
 
@@ -213,11 +214,11 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   }
 
   Future<void> _selectSubtitle(String? id) async {
-    final session = widget.session, generation = _snap.generation;
+    final session = widget.session, generation = _snap.generation, selection = ++_subtitleSelection;
     try {
       await session.selectSubtitle(id);
     } catch (error) {
-      if (mounted && identical(widget.session, session) && session.snapshot.generation == generation) {
+      if (mounted && selection == _subtitleSelection && identical(widget.session, session) && session.snapshot.generation == generation) {
         _showToast(error is EmbyViewFailure ? error.reason : '无法切换字幕，请重试。');
       }
     }

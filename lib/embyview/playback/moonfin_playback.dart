@@ -231,6 +231,9 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   String? _liveSubtitleId, _previousSubtitleId;
   bool _wantsLiveSubtitle = false, _liveRendererReady = false;
   int _subtitleChoice = 0;
+  int? _subtitleSwitchFrom;
+  bool _switchDisables = false, _reopenedWithoutSubtitles = false;
+  ({String? selected, String? previous, bool live})? _beforeSubtitleChoice;
   int _subtitleMediaEpoch = 0;
   bool _reloadExternal = false;
   Future<void> _subtitleOperations = Future.value();
@@ -436,6 +439,12 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     _redirectTime = address?.elapsed;
     _cacheHit = address?.cacheHit;
     _openingAt = _intent.elapsed;
+    _beforeSubtitleChoice = null;
+    final reopensForSubtitle = _subtitleSwitchFrom != null &&
+        _subtitleSource?.generation == _subtitleSwitchFrom &&
+        _subtitleSource?.mediaSourceId == result.mediaSourceId &&
+        _subtitleSource?.target.itemId == _target.itemId;
+    _reopenedWithoutSubtitles = reopensForSubtitle && _switchDisables;
     _clearLiveSubtitle();
     _native = NativePlaybackSnapshot(sourceGeneration: generation);
     _acceptNativeEvents = true;
@@ -444,7 +453,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       ++_subtitleMediaEpoch;
       _pendingExternal = null;
     } else {
-      _pendingExternal = _selectedExternal ?? _pendingExternal;
+      _pendingExternal = reopensForSubtitle ? null : _selectedExternal ?? _pendingExternal;
     }
     _indexedExternalIds.clear();
     _selectedExternal = null;
@@ -461,6 +470,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       headers: Map.unmodifiable(result.requestHeaders),
       userAgent: _owner.userAgent,
       itemFilePath: playbackItemPath(item),
+      subtitleSwitchFrom: reopensForSubtitle ? _subtitleSwitchFrom : null,
       mediaSourceFilePath: source?['Path'] as String?,
     );
     _snapshot = PlaybackSnapshot(
@@ -704,6 +714,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   @override
   Future<void> seek(Duration position) async {
     if (!_current) return;
+    _subtitleSwitchFrom = null;
     final end = _snapshot.duration;
     final clamped = position < Duration.zero
         ? Duration.zero
@@ -734,7 +745,10 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   }
 
   @override
-  Future<void> selectAudio(String trackId) => _control(() => _manager.changeAudioTrack(_trackIndex(trackId)));
+  Future<void> selectAudio(String trackId) {
+    _subtitleSwitchFrom = null;
+    return _control(() => _manager.changeAudioTrack(_trackIndex(trackId)));
+  }
 
   @override
   int get subtitleSelectionRevision => _subtitleChoice;
@@ -794,6 +808,11 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     if (trackId != null && trackId != _liveSubtitleId && !trackId.startsWith('$generation:external')) {
       _trackIndex(trackId); // Reject a retired row before changing the current selection.
     }
+    final before = _beforeSubtitleChoice ??= (
+      selected: _snapshot.selectedSubtitleId,
+      previous: _previousSubtitleId,
+      live: _wantsLiveSubtitle && _liveRendererReady,
+    );
     final choice = ++_subtitleChoice;
     final live = trackId != null && trackId == _liveSubtitleId;
     if (live && !_wantsLiveSubtitle) _previousSubtitleId = _snapshot.selectedSubtitleId;
@@ -802,17 +821,47 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     _emit();
     return _subtitleOperation(() async {
       bool current() => choice == _subtitleChoice && (!live || trackId == _liveSubtitleId);
-      if (!current()) return;
-      await _selectNativeSubtitle(live ? null : trackId, generation, current);
-      if (current()) {
-        _liveRendererReady = live;
-        _emit();
+      try {
+        if (!current()) return;
+        await _selectNativeSubtitle(live ? null : trackId, generation, current);
+        if (current()) _liveRendererReady = live;
+      } catch (_) {
+        if (current() && _current && generation == _snapshot.generation) {
+          final restoreLive = before.live && before.selected == _liveSubtitleId;
+          final restore = before.live ? before.previous : before.selected;
+          _wantsLiveSubtitle = restoreLive;
+          _previousSubtitleId = before.previous;
+          // The manager may already have changed its stream index before the
+          // renderer rejected the command. Reapply the last committed choice.
+          await _selectNativeSubtitle(restoreLive ? null : restore, generation, current, force: true);
+          if (current()) _liveRendererReady = restoreLive;
+        }
+        rethrow;
+      } finally {
+        if (choice == _subtitleChoice) {
+          _beforeSubtitleChoice = null;
+          _emit();
+        }
       }
     });
   }
 
-  Future<void> _selectNativeSubtitle(String? trackId, int generation, bool Function() current) async {
+  Future<void> _selectNativeSubtitle(String? trackId, int generation, bool Function() current, {bool force = false}) async {
     _checkSubtitleGeneration(generation);
+    final alreadyOff = _reopenedWithoutSubtitles && (_manager.subtitleStreamIndex ?? -1) < 0 &&
+        _selectedExternal == null && _pendingExternal == null;
+    _reopenedWithoutSubtitles = false;
+    if (trackId == null && alreadyOff) return;
+    _subtitleSwitchFrom = generation;
+    _switchDisables = trackId == null;
+    try {
+      await _applyNativeSubtitle(trackId, generation, current, force: force);
+    } finally {
+      _subtitleSwitchFrom = null;
+    }
+  }
+
+  Future<void> _applyNativeSubtitle(String? trackId, int generation, bool Function() current, {required bool force}) async {
     final source = _subtitleSource!;
     final mediaEpoch = _subtitleMediaEpoch;
     int? externalIndex, streamIndex;
@@ -829,7 +878,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       if (retained >= 0) externalIndex = retained;
     }
     if (externalIndex != null) {
-      if (_selectedExternal == externalIndex) return;
+      if (!force && _selectedExternal == externalIndex) return;
       final subtitle = _externalSubtitles[externalIndex];
       // An already active local sidecar can be replaced directly: turning
       // it off first would lose the current subtitle when loading fails.

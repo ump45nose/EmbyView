@@ -15,6 +15,7 @@ class PlaybackSubtitleSource {
     required this.userAgent,
     this.itemFilePath,
     this.mediaSourceFilePath,
+    this.subtitleSwitchFrom,
   });
   final int generation;
   final PlayTarget target;
@@ -26,6 +27,9 @@ class PlaybackSubtitleSource {
   /// Preserve the actual .strm item path even when PlaybackInfo names an HTTP path.
   final String? itemFilePath;
   final String? mediaSourceFilePath;
+
+  /// The source generation reopened by a subtitle selection on this media.
+  final int? subtitleSwitchFrom;
 }
 
 abstract interface class PlaybackSubtitleInput {

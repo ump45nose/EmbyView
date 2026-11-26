@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:uuid/uuid.dart';
 
@@ -7,6 +8,7 @@ import '../playback/playback_subtitle_input.dart';
 import 'ai/subtitle_ai.dart';
 import 'audio/subtitle_audio.dart';
 import 'emby_subtitle_library.dart';
+import 'jobs/subtitle_season_queue.dart' show missingSubtitleCoverage;
 import 'model/subtitle_document.dart';
 import 'sources/subtitle_sources.dart';
 import 'store/subtitle_store.dart';
@@ -15,6 +17,8 @@ const _expired = EmbyViewFailure('字幕所属的播放或用户已变更。', r
 const _unreadable = EmbyViewFailure('此轨没有可取得的文本原文。', code: 'subtitle_text_unavailable');
 const _window = Duration(seconds: 20);
 const _minimumLead = Duration(seconds: 12);
+
+typedef _RunCheckpoint = ({Duration start, int? audioIndex, SubtitleAiOutput output});
 
 class BoundSubtitlePanel implements SubtitlePanel {
   BoundSubtitlePanel({
@@ -89,12 +93,22 @@ class BoundSubtitlePanel implements SubtitlePanel {
       final reselect = _liveTrackId != null
           ? snapshot.selectedTrackId == _liveTrackId
           : _scope?.reselectRevision == input.subtitleSelectionRevision;
+      _RunCheckpoint? checkpoint;
+      if (resumeAi && !_resumeAfterBoundary && source.subtitleSwitchFrom == previous?.generation) {
+        final output = _ai.checkpoint ?? _scope?.checkpoint?.output;
+        final start = _ai.run?.startedAt ?? _preparing?.startedAt ?? _scope?.checkpoint?.start;
+        if (output != null && start != null) {
+          checkpoint = (start: start, audioIndex: _scope?.runAudioIndex, output: output);
+        }
+      }
       _scope?.close();
       _scope = !valid ? null : _PanelScope(source, sources.openScope());
       _resumeAfterBoundary = false;
       _resetAudio();
       if (restoring) _scope!.userApplied = true;
       if (resumeAi) {
+        _scope!.checkpoint = checkpoint;
+        _scope!.runAudioIndex = checkpoint?.audioIndex;
         _scope!.resumeAi = true;
         _scope!.reselectRevision = reselect ? input.subtitleSelectionRevision : null;
       }
@@ -119,7 +133,12 @@ class BoundSubtitlePanel implements SubtitlePanel {
           // its new generation as soon as the new playhead is available.
           scheduleMicrotask(() {
             if (identical(scope, _scope) && scope.resumeAi) {
-              unawaited(_startAi(resume: scope.reselectRevision != input.subtitleSelectionRevision));
+              unawaited(
+                _startAi(
+                  resume: scope.reselectRevision != input.subtitleSelectionRevision,
+                  checkpoint: scope.checkpoint,
+                ),
+              );
             }
           });
         }
@@ -143,6 +162,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final play = session.snapshot;
     final scope = _scope?.source.generation == play.generation ? _scope : null;
     final selected = scope == null ? null : play.selectedSubtitleId;
+    final run = _preparing ?? _ai.run;
     snapshot = SubtitleSnapshot(
       generation: play.generation,
       selectedTrackId: selected,
@@ -164,8 +184,8 @@ class BoundSubtitlePanel implements SubtitlePanel {
                   candidateId: scope.retained[track.id]?.candidateId,
                 ),
             ],
-      cues: selected != null && selected == _liveTrackId ? _ai.run?.cues ?? const [] : scope?.dialogue[selected],
-      ai: scope == null ? null : _preparing ?? _ai.run,
+      cues: selected != null && selected == _liveTrackId ? run?.cues ?? const [] : scope?.dialogue[selected],
+      ai: scope == null ? null : run,
     );
     _changes.add(snapshot);
   }
@@ -520,30 +540,62 @@ class BoundSubtitlePanel implements SubtitlePanel {
     }
   }
 
+  // A tap can overlap a paid window after the engine reopens the file.
+  // Cut PCM at sample boundaries before giving uncovered audio to the ASR.
+  Iterable<SubtitleAudioSegment> _uncoveredPcm(SubtitleAudioSegment segment, List<TimeRange> covered) sync* {
+    for (final gap in missingSubtitleCoverage(segment.end, [
+      TimeRange(start: Duration.zero, end: segment.start),
+      ...covered,
+    ])) {
+      if (gap.start == segment.start && gap.end == segment.end) {
+        yield segment;
+        continue;
+      }
+      int frame(Duration time) => ((time - segment.start).inMicroseconds * segment.sampleRate / 1000000).round().clamp(
+        0,
+        segment.pcm.length ~/ 4,
+      );
+      final first = frame(gap.start), last = frame(gap.end);
+      if (last > first) {
+        yield SubtitleAudioSegment(
+          start: gap.start,
+          sourceStart: segment.sourceStart + (gap.start - segment.start),
+          pcm: Uint8List.sublistView(segment.pcm, first * 4, last * 4),
+          sourceGeneration: segment.sourceGeneration,
+          timelineGeneration: segment.timelineGeneration,
+          discontinuity: true,
+        );
+      }
+    }
+  }
+
   Stream<SubtitleAudioSegment> _audio(
     PlaybackSubtitleSource source,
     Duration start,
     Duration? end,
     int? index,
-    SubtitleAiCancellation cancellation,
-  ) async* {
+    SubtitleAiCancellation cancellation, {
+    List<TimeRange> covered = const [],
+  }) async* {
     if (end == null || start >= end) return;
     final readerCancellation = SubtitleAudioCancellation();
     cancellation.addListener(readerCancellation.cancel);
     try {
-      for (var cursor = start; cursor < end;) {
-        final next = cursor + _window < end ? cursor + _window : end;
-        final segments = await SubtitleAudioReader.shared.read(
-          source,
-          start: cursor,
-          end: next,
-          streamIndex: index,
-          cancellation: readerCancellation,
-        );
-        for (final segment in segments) {
-          yield segment;
+      for (final gap in missingSubtitleCoverage(end, [TimeRange(start: Duration.zero, end: start), ...covered])) {
+        for (var cursor = gap.start; cursor < gap.end;) {
+          final next = cursor + _window < gap.end ? cursor + _window : gap.end;
+          final segments = await SubtitleAudioReader.shared.read(
+            source,
+            start: cursor,
+            end: next,
+            streamIndex: index,
+            cancellation: readerCancellation,
+          );
+          for (final segment in segments) {
+            yield segment;
+          }
+          cursor = next;
         }
-        cursor = next;
       }
     } finally {
       cancellation.removeListener(readerCancellation.cancel);
@@ -553,13 +605,17 @@ class BoundSubtitlePanel implements SubtitlePanel {
   @override
   Future<void> startAi() => _startAi();
 
-  Future<void> _startAi({Duration? position, int? streamIndex, bool resume = false}) async {
+  Future<void> _startAi({Duration? position, int? streamIndex, bool resume = false, _RunCheckpoint? checkpoint}) async {
     final scope = _active;
     scope.resumeAi = false;
     ++_runNumber;
     final play = session.snapshot, timeline = _timeline;
-    final start = position ?? play.position;
     final index = streamIndex ?? int.tryParse(play.selectedAudioId?.split(':').last ?? '');
+    scope.runAudioIndex = index;
+    scope.checkpoint = checkpoint?.audioIndex == index ? checkpoint : null;
+    final seed = scope.checkpoint;
+    final start = seed?.start ?? position ?? play.position;
+    final covered = seed?.output.coverage ?? const <TimeRange>[];
     final language = play.audioTracks.where((track) => track.id == '${play.generation}:$index').firstOrNull?.language;
     _run?.cancel();
     _ai.invalidate();
@@ -570,9 +626,15 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final cancellation = _run = SubtitleAiCancellation();
     final finished = _tapFinished = Completer<void>();
     bool current() => identical(_scope, scope) && timeline == _timeline && identical(_run, cancellation);
-    _preparing = AiRun(generation: play.generation, state: AiRunState.preparing, startedAt: start);
+    _preparing = AiRun(
+      generation: play.generation,
+      state: AiRunState.preparing,
+      startedAt: start,
+      coverage: covered,
+      cues: seed?.output.cues ?? const [],
+    );
     _emit();
-    final reader = StreamIterator(_audio(scope.source, start, play.duration, index, cancellation));
+    final reader = StreamIterator(_audio(scope.source, start, play.duration, index, cancellation, covered: covered));
     var independent = false;
     try {
       await input.setLiveSubtitle(liveId, generation: play.generation, select: !resume);
@@ -580,36 +642,47 @@ class BoundSubtitlePanel implements SubtitlePanel {
       await (checkAi ?? processor.checkGeneration)();
       final mediaContext = await _translationContext(scope);
       if (!current()) return;
+      var hasAudio = false;
       try {
         final measured = Stopwatch()..start();
-        independent =
-            await reader.moveNext() &&
-            measured.elapsed <= _window - _minimumLead &&
-            reader.current.end - session.snapshot.position >= _minimumLead;
+        hasAudio = await reader.moveNext();
+        independent = hasAudio
+            ? seed != null ||
+                  measured.elapsed <= _window - _minimumLead &&
+                      reader.current.end - session.snapshot.position >= _minimumLead
+            : seed != null &&
+                  play.duration != null &&
+                  missingSubtitleCoverage(play.duration!, [
+                    TimeRange(start: Duration.zero, end: start),
+                    ...covered,
+                  ]).isEmpty;
       } catch (_) {
         // Unavailable independent audio uses the existing playback tap.
       }
       if (!independent) await reader.cancel();
       if (!current()) return;
       Stream<SubtitleAudioSegment> ahead() async* {
+        if (!hasAudio) return;
         do {
           yield reader.current;
         } while (await reader.moveNext());
       }
 
+      final audio = independent
+          ? ahead()
+          : playbackSubtitleAudio(
+              input.audioInput,
+              sourceGeneration: play.generation,
+              start: start,
+              finish: finished.future,
+            );
       _preparing = null;
       final output = await _ai.start(
         generation: play.generation,
         timelineGeneration: timeline,
         position: start,
-        audio: independent
-            ? ahead()
-            : playbackSubtitleAudio(
-                input.audioInput,
-                sourceGeneration: play.generation,
-                start: start,
-                finish: finished.future,
-              ),
+        initialOutput: seed?.output,
+        audio: covered.isEmpty ? audio : audio.expand((segment) => _uncoveredPcm(segment, covered)),
         followsPlayhead: !independent,
         isCurrent: current,
         language: language,
@@ -628,7 +701,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
     } finally {
       await reader.cancel();
       try {
-        if (current()) await _retireLive(liveId);
+        if (current() && _liveTrackId == liveId) await _retireLive(liveId);
       } finally {
         if (identical(_run, cancellation)) {
           _tapFinished = null;
@@ -663,14 +736,20 @@ class BoundSubtitlePanel implements SubtitlePanel {
     unawaited(_save(scope, id, chinese, original: original));
     if (_ai.run?.state == AiRunState.completed) {
       await input.endLiveSubtitle(liveId, replacementId: id);
+      if (_liveTrackId == liveId) _liveTrackId = null;
     }
   }
 
   @override
   Future<void> cancelAi() async {
     final scope = _scope, timeline = _timeline, runNumber = _runNumber;
-    if (scope != null) scope.resumeAi = false;
-    final output = _ai.cancel();
+    final seed = scope?.checkpoint?.output;
+    final resuming = scope?.resumeAi == true || _run != null;
+    final output = _ai.cancel() ?? (resuming && seed?.cues.isNotEmpty == true ? seed : null);
+    if (scope != null) {
+      scope.resumeAi = false;
+      scope.checkpoint = null;
+    }
     _resumeAfterBoundary = false;
     _run?.cancel();
     _run = null;
@@ -714,6 +793,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
   void _audioBoundary(SubtitleAudioBoundary boundary) {
     if (boundary.sourceGeneration != _scope?.source.generation || session.snapshot.phase == PlaybackPhase.ended) return;
     if (!boundary.ready) {
+      _scope?.checkpoint = null;
       _resumeAfterBoundary |= _run != null;
       _resetAudio(continueLive: _resumeAfterBoundary);
       _emit();
@@ -763,6 +843,8 @@ class _PanelScope {
   Future<SubtitleItem>? item;
   Future<SubtitleScan>? scan;
   bool resumeAi = false;
+  _RunCheckpoint? checkpoint;
+  int? runAudioIndex;
   int? reselectRevision;
   var selectionRequest = 0;
   var scanning = false, userApplied = false, hasNas = false, autoSelectionSettled = false;
