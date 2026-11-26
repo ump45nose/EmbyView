@@ -532,4 +532,113 @@ void main() {
     await accounts.close();
     await prefs.close();
   });
+
+  test('cold-start restore fails over from unreachable primary address to secondary address and emits switched notice', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await MachinePreferences.open();
+    await prefs.update(
+      prefs.current.copyWith(
+        autoSwitchServerAddress: true,
+        serverAddresses: const {
+          'server': [
+            ServerAddressEntry(id: 'lan', url: 'http://nas.local:8096', label: '内网'),
+            ServerAddressEntry(id: 'ts', url: 'https://nas.tail-cold.ts.net', label: 'Tailscale'),
+          ],
+        },
+      ),
+    );
+    final store = _Store();
+    final sessions = _Sessions()..activeUserId = null;
+    final notices = <ConnectionNoticeEvent>[];
+    final probed = <String>[];
+
+    final accounts = MoonfinEmbyViewAccounts(
+      store: store,
+      sessions: sessions,
+      auth: _Auth(),
+      servers: store,
+      clients: store,
+      preferences: prefs,
+      chooseUserOnStartup: () => false,
+      beforeSessionChange: () async {},
+      probeAddress: (uri, _) async {
+        probed.add(uri.toString());
+        if (uri.host == 'nas.local') {
+          return const AddressProbeResult(reachable: false);
+        }
+        return const AddressProbeResult(reachable: true, latencyMs: 24, serverVersion: '4.10.2');
+      },
+    );
+    final sub = accounts.connectionNotices.listen(notices.add);
+
+    await accounts.restore();
+    expect(probed, ['http://nas.local:8096', 'https://nas.tail-cold.ts.net']);
+    expect(sessions.calls, ['restore']);
+    expect(store.serversById['server']?.address, 'https://nas.tail-cold.ts.net');
+    expect(store.clientsByServer['server']?.baseUrl, 'https://nas.tail-cold.ts.net');
+    expect(accounts.snapshot.phase, AccountPhase.signedIn);
+    expect(accounts.snapshot.activeAddress?.id, 'ts');
+    expect(notices, hasLength(1));
+    expect(notices.single.kind, ConnectionNoticeKind.switched);
+    expect(notices.single.fromLabel, '内网');
+    expect(notices.single.toLabel, 'Tailscale');
+
+    await sub.cancel();
+    await accounts.close();
+    await prefs.close();
+  });
+
+  test('adding backup HTTPS address syncs Server.candidateAddresses for untrusted cert trust and keeps CredentialStore token while another user remains', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await MachinePreferences.open();
+    final store = _Store();
+    final realServers = ServerRepository(store, store);
+    await realServers.loadStoredServers();
+    final prevAllow = gAllowSelfSignedCertificates;
+    gAllowSelfSignedCertificates = true;
+    addTearDown(() {
+      gAllowSelfSignedCertificates = prevAllow;
+      realServers.dispose();
+    });
+
+    final creds = _Credentials();
+    final sessions = _Sessions();
+    final accounts = MoonfinEmbyViewAccounts(
+      store: store,
+      sessions: sessions,
+      auth: _Auth(),
+      servers: realServers,
+      clients: store,
+      preferences: prefs,
+      credentials: creds,
+      chooseUserOnStartup: () => false,
+      beforeSessionChange: () async {},
+    );
+
+    expect(acceptsUntrustedCertificate('backup.home.lan'), isFalse);
+    await accounts.addServerAddress(
+      const ServerAddressEntry(
+        id: 'https-backup',
+        url: 'https://backup.home.lan:8920',
+        label: '备用 HTTPS',
+      ),
+    );
+    expect(
+      store.serversById['server']?.candidateAddresses,
+      ['http://nas.local:8096', 'https://backup.home.lan:8920'],
+    );
+    expect(acceptsUntrustedCertificate('backup.home.lan'), isTrue);
+
+    // Removing current user while 'new' still exists on the same server must NOT delete server token.
+    await accounts.removeLocalAccount('server/old');
+    expect(creds.deletedTokens, isEmpty);
+    expect(store.getUsers('server').map((u) => u.id), ['new']);
+
+    // Removing the last remaining user deletes the server-level token.
+    await accounts.removeLocalAccount('server/new');
+    expect(creds.deletedTokens, ['server']);
+
+    await accounts.close();
+    await prefs.close();
+  });
 }

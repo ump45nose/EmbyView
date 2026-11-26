@@ -80,6 +80,15 @@ class _FakeAccounts implements EmbyViewAccounts {
   Stream<AccountSnapshot> get changes => _changes.stream;
 
   @override
+  Stream<ConnectionNoticeEvent> get connectionNotices => const Stream.empty();
+
+  @override
+  Future<Uri?> probeAndFailover({Duration timeout = const Duration(seconds: 5)}) async => null;
+
+  @override
+  Future<void> retryConnection() async {}
+
+  @override
   Future<void> switchTo(String profileId, {String? password}) async {
     switchCalls.add(profileId);
     final next = _snapshot.profiles.where((p) => p.id == profileId).firstOrNull;

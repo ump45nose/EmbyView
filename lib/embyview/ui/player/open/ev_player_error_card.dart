@@ -41,9 +41,7 @@ class EvPlayerErrorCard extends StatefulWidget {
 
   static bool isRateLimitedFailure(EmbyViewFailure? failure) {
     if (failure == null) return false;
-    return failure.isRateLimited ||
-        failure.httpStatus == 403 ||
-        failure.code == 'rateLimited115';
+    return failure.isRateLimited || failure.code == 'rateLimited115';
   }
 
   @override

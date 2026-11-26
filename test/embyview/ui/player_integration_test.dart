@@ -168,6 +168,9 @@ class _StubAccounts implements EmbyViewAccounts {
     profiles: [AccountProfile(id: 'alice', displayName: 'Alice')],
   );
   @override Stream<AccountSnapshot> get changes => const Stream.empty();
+  @override Stream<ConnectionNoticeEvent> get connectionNotices => const Stream.empty();
+  @override Future<Uri?> probeAndFailover({Duration timeout = const Duration(seconds: 5)}) async => null;
+  @override Future<void> retryConnection() async {}
   @override dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
 }
 

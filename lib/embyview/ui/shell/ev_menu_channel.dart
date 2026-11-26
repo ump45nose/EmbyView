@@ -75,6 +75,8 @@ class EvPlayerMenuDelegate {
     required this.triggerAiSubtitle,
     required this.toggleAnime4k,
     required this.toggleFullscreen,
+    this.closePlayer,
+    this.isFailed,
   });
 
   final VoidCallback togglePlayPause;
@@ -85,8 +87,13 @@ class EvPlayerMenuDelegate {
   final VoidCallback triggerAiSubtitle;
   final VoidCallback toggleAnime4k;
   final VoidCallback toggleFullscreen;
+  final VoidCallback? closePlayer;
+  final bool Function()? isFailed;
 
   bool dispatch(String action) {
+    if (isFailed?.call() == true && action != EvMenuAction.toggleFullscreen) {
+      return false;
+    }
     switch (action) {
       case EvMenuAction.playPause:
         togglePlayPause();

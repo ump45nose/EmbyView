@@ -105,16 +105,22 @@ class SubtitleRuntime {
   }
 
   Future<SubtitleEpisodeContext> _resolve(String account, SubtitleEpisodeRequest request) async {
-    final (url, user, token) = _credentials(account);
-    EmbyMediaServerClient client() => EmbyMediaServerClient(baseUrl: url, deviceInfo: device)
+    final (_, user, token) = _credentials(account);
+    String currentUrl() {
+      final (curUrl, curUser, curToken) = _credentials(account);
+      if (curUser != user || curToken != token) throw _authorization;
+      return curUrl;
+    }
+
+    EmbyMediaServerClient client() => EmbyMediaServerClient(baseUrl: currentUrl(), deviceInfo: device)
       ..accessToken = token
       ..userId = user;
-    final library = EmbySubtitleLibrary(client());
+    final library = EmbySubtitleLibrary(client(), resolveBaseUrl: currentUrl);
     try {
       final item = await library.item(request.episodeId, request.mediaSourceId);
       final media = SubtitleMedia.fromPlayback(item.source, duration: item.duration);
       Future<(MediaFolderStatus, String)> authorization(String? expectedId) async {
-        if (_credentials(account) != (url, user, token)) throw _authorization;
+        currentUrl();
         final folder = await preferences.mediaFolderStatus();
         final mapped = await mapMedia(media, folder);
         final identity = sha256
@@ -122,7 +128,6 @@ class SubtitleRuntime {
               utf8.encode(
                 jsonEncode([
                   account,
-                  url,
                   folder.embyRoot,
                   await Directory(folder.localRoot!).resolveSymbolicLinks(),
                   media.embyFilePath,
@@ -147,7 +152,7 @@ class SubtitleRuntime {
         duration: item.duration ?? Duration.zero,
         authorizationId: identity,
         checkAuthorization: () async {
-          if (_credentials(account) != (url, user, token)) throw _authorization;
+          currentUrl();
           // A fresh connection uses the current mTLS configuration. Item metadata
           // confirms visibility without negotiating or opening another 115 stream.
           final verification = client();
@@ -201,6 +206,7 @@ class SubtitleRuntime {
       EmbyMediaServerClient(baseUrl: active.baseUrl, deviceInfo: active.deviceInfo)
         ..userId = active.userId
         ..accessToken = active.accessToken,
+      resolveBaseUrl: () => active.baseUrl,
     ),
   );
 

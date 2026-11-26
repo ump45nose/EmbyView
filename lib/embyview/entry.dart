@@ -3,7 +3,6 @@ library;
 
 import 'dart:async';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -46,6 +45,7 @@ import 'ui/users/ev_users_page.dart';
 import 'ui/wall/ev_wall_page.dart';
 import 'ui/zone/ev_zone_page.dart';
 
+export 'data/diagnostics_exporter.dart' show evExportDiagnosticsViaDialog;
 export 'ui/login/ev_login_models.dart' show EvLoginStep;
 export 'ui/settings/ev_settings_page.dart' show EvSettingsSection;
 
@@ -251,7 +251,9 @@ class _StageThreeRuntime {
     final cur = _active;
     if (cur != null && !cur._disposed && cur.sessionId == services.sessionId) {
       cur.refs++;
-      unawaited(cur.immersion.rebind(services));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!cur._disposed) unawaited(cur.immersion.rebind(services));
+      });
       if (cur.refs > 1) unawaited(cur.immersion.stopAll());
       return cur;
     }
@@ -317,6 +319,8 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   late EvShellDestination _lastShellDest;
   late bool _lastShortcutsOpen;
   EvNoticeState? _lastNotice;
+  String? _lastSignedInSessionId;
+  String? _lastSignedInUserId;
   late LocalPreferences _prefs;
   late AccountSnapshot _account;
   StreamSubscription<LocalPreferences>? _prefsSub;
@@ -334,11 +338,12 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   void initState() {
     super.initState();
     _runtime = _StageThreeRuntime.acquire(widget.services);
+    _lastSignedInSessionId = widget.services.sessionId;
+    _lastSignedInUserId = widget.services.accounts.snapshot.current?.id;
     _ownsShell = widget.shellController == null;
     _shell = widget.shellController ??
         EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
     _bindShellCallbacks(_shell);
-    _shell.addListener(_onShellChanged);
     if (widget.initialNotice != null) {
       _shell.showNotice(widget.initialNotice!);
     }
@@ -348,6 +353,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     _lastShellDest = _shell.current;
     _lastShortcutsOpen = _shell.shortcutsOpen;
     _lastNotice = _shell.notice;
+    _shell.addListener(_onShellChanged);
     if (widget.initialEntry != null) { _s4Stack.add((entry: widget.initialEntry!, saved: null, savedFocus: null)); _shellMounted = false; }
     _attachServices(widget.services);
     HardwareKeyboard.instance.addHandler(_onGlobalHardwareKey);
@@ -391,13 +397,9 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
       if (zc && !_shellMounted) unawaited(_loadZones(services, force: true));
     });
     _accountsSub = services.accounts.changes.listen((next) { if (mounted) setState(() => _account = next); });
-    try {
-      _noticeSub = services.accounts.connectionNotices.listen(
-        _shell.handleConnectionNotice,
-      );
-    } on NoSuchMethodError catch (_) {
-      _noticeSub = null;
-    }
+    _noticeSub = services.accounts.connectionNotices.listen(
+      _shell.handleConnectionNotice,
+    );
     if (!_shellMounted && _shell.zones.isEmpty) unawaited(_loadZones(services, force: false));
   }
 
@@ -409,15 +411,69 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     catch (_) { if (mounted && token == _zonesToken && force) _shell.setZones(const []); }
   }
 
+  void _scheduleImmersionRebind(EmbyViewServices services) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && identical(widget.services, services)) {
+        unawaited(_runtime.immersion.rebind(services));
+      }
+    });
+  }
+
   @override
   void didUpdateWidget(_StageFourShellHost old) {
     super.didUpdateWidget(old);
-    if (old.services.sessionId != widget.services.sessionId) {
-      final prev = _runtime; _runtime = _StageThreeRuntime.acquire(widget.services); prev.release();
-      ++_zonesToken; _closeOverlays(rebuild: false); _s4Stack.clear(); _shellMounted = true; _shell..setZones(const [])..goHome();
+    final nextSessionId = widget.services.sessionId;
+    final snap = widget.services.accounts.snapshot;
+    if (nextSessionId == null &&
+        (snap.phase == AccountPhase.switching || snap.phase == AccountPhase.signingIn)) {
+      if (!identical(old.services, widget.services)) {
+        _scheduleImmersionRebind(widget.services);
+        _attachServices(widget.services);
+      }
+      return;
+    }
+    if (nextSessionId != null && nextSessionId != _lastSignedInSessionId) {
+      final nextUserId = snap.current?.id;
+      final isFailedRecoveryOnUsers =
+          _s4Stack.lastOrNull?.entry is _S4Users &&
+          snap.failure != null &&
+          nextUserId == _lastSignedInUserId;
+      final stayOnUsersForCallback =
+          widget.initialEntry is _S4Users && _s4Stack.lastOrNull?.entry is _S4Users;
+      _lastSignedInSessionId = nextSessionId;
+      _lastSignedInUserId = nextUserId;
+      final prev = _runtime;
+      _runtime = _StageThreeRuntime.acquire(widget.services);
+      prev.release();
+      ++_zonesToken;
+      _shell
+        ..clearHomeCache()
+        ..hasVisibleLibraries = true
+        ..setZones(const []);
+      if (!isFailedRecoveryOnUsers && !stayOnUsersForCallback) {
+        _closeOverlays(rebuild: false);
+        _s4Stack.clear();
+        _shellMounted = true;
+        _shell.goHome();
+      }
+      _attachServices(widget.services);
+    } else if (old.services.sessionId != nextSessionId) {
+      final prev = _runtime;
+      _runtime = _StageThreeRuntime.acquire(widget.services);
+      prev.release();
+      ++_zonesToken;
+      _closeOverlays(rebuild: false);
+      _s4Stack.clear();
+      _shellMounted = true;
+      _shell
+        ..clearHomeCache()
+        ..hasVisibleLibraries = true
+        ..setZones(const [])
+        ..goHome();
       _attachServices(widget.services);
     } else if (!identical(old.services, widget.services)) {
-      unawaited(_runtime.immersion.rebind(widget.services)); _attachServices(widget.services);
+      _scheduleImmersionRebind(widget.services);
+      _attachServices(widget.services);
     }
   }
 
@@ -468,9 +524,12 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   void _handleMenuSignOut() {
     _closeOverlays(rebuild: true);
     unawaited(() async {
+      final rootNav = Navigator.maybeOf(context, rootNavigator: true);
+      if (EvPlayer.isOpening && rootNav != null && rootNav.canPop()) {
+        await rootNav.maybePop();
+      }
       try {
         await widget.services.accounts.signOut();
-      } on NoSuchMethodError catch (_) {
       } catch (_) {
       } finally {
         _handleSignedOutToUserPicker();
@@ -486,10 +545,8 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     await evExportDiagnosticsViaDialog();
   }
 
-  void _handleRetryConnection() {
-    try {
-      unawaited(widget.services.accounts.retryConnection());
-    } on NoSuchMethodError catch (_) {}
+  Future<void> _handleRetryConnection() async {
+    await widget.services.accounts.retryConnection();
   }
 
   bool get _isShowingOnboarding =>
@@ -804,7 +861,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
                   Positioned.fill(
                     child: EvNoticeCapsule(
                       notice: activeNotice,
-                      onRetry: _handleRetryConnection,
+                      onRetry: _shell.triggerConnectionRetry,
                       onOpenServerSettings: () => _openSettings(section: EvSettingsSection.account),
                       onDismiss: _shell.dismissNotice,
                     ),
@@ -946,14 +1003,16 @@ class _EmbyViewRouteHost extends StatelessWidget {
           listenable: entry,
           builder: (context, _) {
             final services = entry.services;
-            if (!services.signedIn) return const SizedBox.shrink();
-            return KeyedSubtree(
-              key: ValueKey(services.sessionId),
-              child: _buildStageThreeShell(
-                services,
-                initialDestination: destination,
-                initialEntry: initialEntry,
-              ),
+            final phase = services.accounts.snapshot.phase;
+            final keepMountedDuringSwitch =
+                phase == AccountPhase.switching || phase == AccountPhase.signingIn;
+            if (!services.signedIn && !keepMountedDuringSwitch) {
+              return const SizedBox.shrink();
+            }
+            return _buildStageThreeShell(
+              services,
+              initialDestination: destination,
+              initialEntry: initialEntry,
             );
           },
         );
@@ -1041,6 +1100,8 @@ Future<EmbyViewEntry> _createMoonfinEntry() async {
       final native = EmbyViewNativePlayback(dependencies<AetherBackend>());
       final data = EmbyMediaData(
         client: client,
+        serverId: sessions.activeServerId,
+        activeServerId: () => sessions.activeServerId,
         zonePreferences: () => preferences.current.zones,
       );
       final immersion = MacImmersionPlayback(
@@ -1055,6 +1116,8 @@ Future<EmbyViewEntry> _createMoonfinEntry() async {
         manager: manager,
         client: client,
         native: native,
+        serverId: sessions.activeServerId,
+        activeServerId: () => sessions.activeServerId,
         data: data,
         beforeOpen: immersion.stop,
         prefetch115: settings.preResolve115,
@@ -1348,39 +1411,31 @@ bool isEmbyViewAppMode({
   required String path,
   required bool isMacOS,
   bool? embyServersOnly,
+  ServerType? activeServerType,
 }) {
   if (isEmbyViewRoutePath(path)) return true;
   if (!isMacOS) return false;
-  if (installedEmbyViewEntry != null) return true;
+  if (activeServerType != null) return activeServerType == ServerType.emby;
   if (embyServersOnly != null) return embyServersOnly;
   try {
+    if (GetIt.instance.isRegistered<SessionRepository>() &&
+        GetIt.instance.isRegistered<ServerRepository>()) {
+      final activeServerId = GetIt.instance<SessionRepository>().activeServerId;
+      if (activeServerId != null && activeServerId.isNotEmpty) {
+        final active = GetIt.instance<ServerRepository>().getServer(activeServerId);
+        if (active != null) {
+          return active.serverType == ServerType.emby;
+        }
+      }
+    }
     if (GetIt.instance.isRegistered<ServerRepository>()) {
       final servers = GetIt.instance<ServerRepository>().servers;
-      return servers.every((s) => s.serverType == ServerType.emby);
+      if (servers.isNotEmpty) {
+        return servers.every((s) => s.serverType == ServerType.emby);
+      }
     }
   } catch (_) {}
   return true;
-}
-
-/// Prompts for a save location and exports sanitized diagnostic logs via
-/// [EvDiagnosticsExporter]. Used by the macOS "帮助 → 导出诊断日志" menu item.
-Future<EvDiagnosticsExportResult?> evExportDiagnosticsViaDialog({
-  EvDiagnosticsExporter exporter = const EvDiagnosticsExporter(),
-}) async {
-  final ts = DateTime.now().toIso8601String().replaceAll(':', '').split('.').first;
-  String? path;
-  try {
-    path = await FilePicker.saveFile(
-      dialogTitle: '导出诊断日志',
-      fileName: 'EmbyView-diagnostics-$ts.log',
-      type: FileType.custom,
-      allowedExtensions: const ['log', 'txt'],
-    );
-  } catch (_) {
-    return null;
-  }
-  if (path == null || path.isEmpty) return null;
-  return exporter.exportSanitizedBundle(destinationPath: path);
 }
 
 /// The caller supplies verified platform, server and authentication state.
@@ -1490,6 +1545,7 @@ class EmbyViewLoginHost extends StatefulWidget {
     this.backend,
     this.preferences,
     this.onSignedIn,
+    this.onExportDiagnostics,
   });
 
   final EvLoginStep initialStep;
@@ -1497,15 +1553,18 @@ class EmbyViewLoginHost extends StatefulWidget {
   final EvLoginBackend? backend;
   final EmbyViewPreferences? preferences;
   final VoidCallback? onSignedIn;
+  final Future<void> Function()? onExportDiagnostics;
 
   @override
   State<EmbyViewLoginHost> createState() => _EmbyViewLoginHostState();
 }
 
 class _EmbyViewLoginHostState extends State<EmbyViewLoginHost> {
+  final _loginKey = GlobalKey<EvLoginPageState>();
   late final EvLoginBackend _backend =
       widget.backend ?? MoonfinEvLoginBackend();
   MachinePreferences? _ownedPrefs;
+  Object? _menuToken;
 
   EmbyViewPreferences? get _effectivePrefs =>
       widget.preferences ?? installedEmbyViewEntry?.services.preferences ?? _ownedPrefs;
@@ -1524,6 +1583,23 @@ class _EmbyViewLoginHostState extends State<EmbyViewLoginHost> {
     if (_effectivePrefs == null) {
       unawaited(_openPrefs());
     }
+    _menuToken = EvMenuChannel.instance.registerHandler(_handleMenuAction);
+  }
+
+  bool _handleMenuAction(String action, EvMenuActionSource _) {
+    switch (action) {
+      case EvMenuAction.exportDiagnostics:
+        unawaited(
+          widget.onExportDiagnostics != null
+              ? widget.onExportDiagnostics!()
+              : evExportDiagnosticsViaDialog(),
+        );
+        return true;
+      case EvMenuAction.back:
+        return _loginKey.currentState?.handleBack() ?? false;
+      default:
+        return false;
+    }
   }
 
   Future<void> _openPrefs() async {
@@ -1539,6 +1615,10 @@ class _EmbyViewLoginHostState extends State<EmbyViewLoginHost> {
 
   @override
   void dispose() {
+    if (_menuToken != null) {
+      EvMenuChannel.instance.unregisterHandler(_menuToken!);
+      _menuToken = null;
+    }
     final owned = _ownedPrefs;
     if (owned != null) unawaited(owned.close());
     super.dispose();
@@ -1564,6 +1644,7 @@ class _EmbyViewLoginHostState extends State<EmbyViewLoginHost> {
       preferences: prefs,
       themeMode: prefs == null ? ThemeMode.cinema : null,
       child: EvLoginPage(
+        key: _loginKey,
         backend: _backend,
         initialStep: widget.initialStep,
         initialServerId: widget.initialServerId,
@@ -1607,8 +1688,10 @@ class _EmbyViewHome extends StatelessWidget {
             final services = entry.services;
             final home = registration.stageThreeHome;
             if (home == null) return legacyHome(context);
-            if (!services.signedIn) {
-              final snap = services.accounts.snapshot;
+            final snap = services.accounts.snapshot;
+            if (!services.signedIn &&
+                snap.phase != AccountPhase.switching &&
+                snap.phase != AccountPhase.signingIn) {
               return switch (snap.phase) {
                 AccountPhase.choosing => EmbyViewLoginHost(
                   initialStep: EvLoginStep.users,
@@ -1625,10 +1708,7 @@ class _EmbyViewHome extends StatelessWidget {
                 ),
               };
             }
-            return KeyedSubtree(
-              key: ValueKey(services.sessionId),
-              child: home(context, services),
-            );
+            return home(context, services);
           },
         );
       },

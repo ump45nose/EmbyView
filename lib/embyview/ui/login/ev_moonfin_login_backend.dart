@@ -199,7 +199,6 @@ class MoonfinEvLoginBackend implements EvLoginBackend {
         id: u.id,
         name: u.name,
         hasPassword: u.hasPassword,
-        hasStoredToken: false,
         avatar: _avatarFor(storedServer.address, u.id, u.imageTag),
         serverId: storedServer.id,
       );
@@ -210,7 +209,6 @@ class MoonfinEvLoginBackend implements EvLoginBackend {
         id: u.id,
         name: u.name,
         hasPassword: existing?.hasPassword ?? true,
-        hasStoredToken: u.accessToken.isNotEmpty,
         avatar:
             existing?.avatar ?? _avatarFor(storedServer.address, u.id, u.imageTag),
         serverId: storedServer.id,
@@ -367,7 +365,12 @@ class MoonfinEvLoginBackend implements EvLoginBackend {
       throw const EmbyViewFailure('已验证账号，但启动会话失败，请重试。', retryable: true);
     }
     if (!rememberPassword) {
-      await _credentials?.deleteToken(server.id);
+      final otherStoredUsers = _serverUsers
+          .getStoredServerUsers(server.id)
+          .where((u) => u.id != state.userId);
+      if (otherStoredUsers.isEmpty) {
+        await _credentials?.deleteToken(server.id);
+      }
     }
   }
 

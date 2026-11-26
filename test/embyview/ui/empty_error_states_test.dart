@@ -34,11 +34,13 @@ class _FakePreferences implements EmbyViewPreferences {
 }
 
 class _FakeAccounts implements EmbyViewAccounts {
-  _FakeAccounts(this._snapshot);
+  _FakeAccounts(this._snapshot, {this.onProbeAndFailover});
   AccountSnapshot _snapshot;
+  final Future<Uri?> Function()? onProbeAndFailover;
   final _changes = StreamController<AccountSnapshot>.broadcast();
   final _notices = StreamController<ConnectionNoticeEvent>.broadcast();
   int retryConnectionCalls = 0;
+  int probeAndFailoverCalls = 0;
 
   @override
   AccountSnapshot get snapshot => _snapshot;
@@ -52,6 +54,17 @@ class _FakeAccounts implements EmbyViewAccounts {
   void emit(AccountSnapshot next) {
     _snapshot = next;
     _changes.add(next);
+  }
+
+  void emitNotice(ConnectionNoticeEvent event) {
+    _notices.add(event);
+  }
+
+  @override
+  Future<Uri?> probeAndFailover({Duration timeout = const Duration(seconds: 5)}) async {
+    probeAndFailoverCalls++;
+    if (onProbeAndFailover != null) return onProbeAndFailover!();
+    return null;
   }
 
   @override
@@ -651,6 +664,124 @@ void main() {
       expect(find.text('30'), findsOneWidget);
       expect(find.text('HTTP 403 · 115 网盘 · 第 1 次自动重试'), findsOneWidget);
       expect(session.retryOpenCalls, 0);
+    });
+
+    testWidgets('non-115 HTTP 403 renders generic playback error without 115 copy or 30s countdown', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final prefs = _FakePreferences(const LocalPreferences(theme: ThemeMode.cinema));
+      final session = _RetryTrackingSession(
+        const PlaybackSnapshot(
+          generation: 1,
+          target: PlayTarget(itemId: 'local403'),
+          item: MediaCard(id: 'local403', kind: MediaKind.movie, title: '本地影片'),
+          phase: PlaybackPhase.failed,
+          failure: EmbyViewFailure(
+            '播放无法打开，请重试。',
+            retryable: true,
+            code: 'engineFailed',
+            httpStatus: 403,
+            isRateLimited: false,
+          ),
+        ),
+      );
+      addTearDown(() async {
+        await session.close();
+        await prefs.dispose();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: EvThemeScope(
+            preferences: prefs,
+            child: EvPlayerPage(session: session, autoTickRetry: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('ev_player_error_countdown_ring')), findsNothing);
+      expect(find.text('115 暂时限制了播放'), findsNothing);
+      expect(find.text('播放无法打开，请重试。'), findsOneWidget);
+      expect(find.text('HTTP 403'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 31));
+      expect(session.retryOpenCalls, 0);
+    });
+  });
+
+  group('Home auto-failover & unconditional retryConnection', () {
+    testWidgets('primary address failure automatically triggers probeAndFailover, emits switched capsule, and loads home', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final prefs = _FakePreferences(const LocalPreferences(autoSwitchServerAddress: true));
+      var activeAddress = 'http://nas.local:8096';
+      late _FakeAccounts accounts;
+      accounts = _FakeAccounts(
+        _sampleAccount(),
+        onProbeAndFailover: () async {
+          activeAddress = 'https://nas.ts.net';
+          accounts.emitNotice(
+            const ConnectionNoticeEvent.switched(
+              serverName: '家里的 Emby',
+              fromLabel: '内网',
+              toLabel: 'Tailscale',
+              activeAddress: 'https://nas.ts.net',
+            ),
+          );
+          return Uri.parse(activeAddress);
+        },
+      );
+      final data = _FakeData(
+        zones: _sampleZones(),
+        onHome: (_) async {
+          if (activeAddress == 'http://nas.local:8096') {
+            throw const EmbyViewFailure('无法连接媒体服务器，请重试', retryable: true, code: 'network');
+          }
+          return _sampleHome();
+        },
+      );
+      final services = EmbyViewServices(
+        preferences: prefs,
+        accounts: accounts,
+        sessionId: 'sess-failover',
+        data: data,
+        playback: _FakePlayback(),
+        immersion: _FakeImmersion(),
+      );
+      final shell = EvShellController(zones: _sampleZones());
+      addTearDown(() async {
+        shell.dispose();
+        await prefs.dispose();
+        await accounts.dispose();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: EvShell(
+            services: services,
+            controller: shell,
+            configureWindow: false,
+            enableStageMotion: false,
+            homeBuilder: (_) => const EvHomePage(enableAnimations: false, enableAutoRetry: false),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(accounts.probeAndFailoverCalls, 1);
+      expect(data.homeCalls, 2);
+      expect(find.byKey(const Key('ev_home_error')), findsNothing);
+      expect(find.byKey(const Key('ev_home_sections')), findsOneWidget);
+      expect(find.byKey(const Key('ev_notice_switched')), findsOneWidget);
+      expect(find.text('内网连不上，已换到 Tailscale 地址'), findsOneWidget);
     });
   });
 }

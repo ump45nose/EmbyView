@@ -91,7 +91,9 @@ class _EvUsersPageState extends State<EvUsersPage> {
   void _onAccountChanged(AccountSnapshot next) {
     if (!mounted) return;
     final inProgress = next.phase == AccountPhase.switching || next.phase == AccountPhase.signingIn;
-    final switched = next.phase == AccountPhase.signedIn && (next.sessionId != _activeSessionId || next.current?.id != _activeUserId);
+    final switched = next.phase == AccountPhase.signedIn &&
+        next.failure == null &&
+        (next.sessionId != _activeSessionId || next.current?.id != _activeUserId);
     setState(() {
       _snapshot = next;
       if (_confirmRemoveProfileId != null && next.profiles.every((p) => p.id != _confirmRemoveProfileId) && next.current?.id != _confirmRemoveProfileId) {
@@ -102,6 +104,9 @@ class _EvUsersPageState extends State<EvUsersPage> {
         _activeSessionId = next.sessionId;
         _activeUserId = next.current?.id;
         _resetTransientState();
+      } else if (next.phase == AccountPhase.signedIn && next.failure != null && next.current?.id == _activeUserId) {
+        _activeSessionId = next.sessionId;
+        if (!_busy) _errorMessage ??= next.failure!.reason;
       } else if (next.phase == AccountPhase.signedIn && next.failure == null && !_busy) {
         _errorMessage = null;
         _failedProfile = null;

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:playback_core/playback_core.dart';
 import 'package:server_core/server_core.dart';
@@ -192,6 +193,8 @@ class _Items extends Fake implements ItemsApi {
 }
 
 class _PlaybackApi extends Fake implements PlaybackApi {
+  _PlaybackApi(this.baseUrl);
+  final String Function() baseUrl;
   final starts = <Map<String, dynamic>>[];
   final stops = <Map<String, dynamic>>[];
   final progresses = <Map<String, dynamic>>[];
@@ -230,6 +233,15 @@ class _PlaybackApi extends Fake implements PlaybackApi {
     ],
   };
   @override
+  String getStreamUrl(
+    String itemId, {
+    String? mediaSourceId,
+    String? audioStreamIndex,
+    String? subtitleStreamIndex,
+    String? liveStreamId,
+  }) => '${baseUrl()}/Videos/$itemId/stream?Static=true';
+
+  @override
   Future<void> reportPlaybackStart(Map<String, dynamic> info) async {
     starts.add(info);
   }
@@ -258,7 +270,7 @@ class _Client extends Fake implements MediaServerClient {
   @override
   final _Items itemsApi = _Items();
   @override
-  final _PlaybackApi playbackApi = _PlaybackApi();
+  late final _PlaybackApi playbackApi = _PlaybackApi(() => baseUrl);
   @override
   TrickplayApi? get trickplayApi => null;
 }
@@ -1368,5 +1380,85 @@ void main() {
     expect(Uri.parse(backend.urls.last).path, '/attempt-3');
     expect(backend.starts.last, const Duration(minutes: 4));
     expect(adapter.diagnostics.records.where((e) => e.event == 'resolved').last.cacheHit, isFalse);
+  });
+
+  test('switching server baseUrl on same session keeps MoonfinPlaybackAdapter working and uses new address', () async {
+    final backend = _Backend();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final client = _Client();
+    client.itemsApi.metadata['local1'] = {
+      'Type': 'Movie',
+      'Name': 'Local Movie',
+      'Path': '/mnt/media/local.mkv',
+      'ImageTags': {'Primary': 'img1'},
+    };
+    client.playbackApi.sourcePatch = {
+      'Path': '/mnt/media/local.mkv',
+      'IsRemote': false,
+      'Protocol': 'File',
+      'DirectStreamUrl': '/Videos/local1/stream?Static=true',
+    };
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+
+    // Switch to backup address on same server/user/token session.
+    client.baseUrl = 'https://backup.ts.net:8920';
+
+    final session = adapter.open(const PlayTarget(itemId: 'local1'));
+    await pumpEventQueue(times: 30);
+    expect(session.snapshot.phase, isNot(PlaybackPhase.failed));
+    expect(backend.urls.last, startsWith('https://backup.ts.net:8920/'));
+    expect(session.snapshot.quality?.origin, MediaOrigin.nasLocal);
+    final poster = session.snapshot.item?.art.poster.layers.first.source.image as NetworkImage?;
+    expect(poster?.url, startsWith('https://backup.ts.net:8920/'));
+    await session.close();
+  });
+
+  test('non-115 HTTP 403 does not report 115 rate limiting', () async {
+    final backend = _Backend()..asyncFailureOpens = 2;
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final client = _Client();
+    client.itemsApi.metadata['local403'] = {
+      'Type': 'Movie',
+      'Name': 'Local Movie',
+      'Path': '/mnt/media/local.mkv',
+    };
+    client.playbackApi.sourcePatch = {
+      'Path': '/mnt/media/local.mkv',
+      'IsRemote': false,
+      'Protocol': 'File',
+      'DirectStreamUrl': '/Videos/local403/stream?Static=true',
+    };
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+
+    final session = adapter.open(const PlayTarget(itemId: 'local403'));
+    await pumpEventQueue(times: 30);
+    expect(session.snapshot.phase, PlaybackPhase.failed);
+    expect(session.snapshot.failure?.httpStatus, 403);
+    expect(session.snapshot.failure?.isRateLimited, isFalse);
+    expect(session.snapshot.failure?.code, isNot('rateLimited115'));
+    expect(session.snapshot.failure?.sourceLabel, isNull);
+    await session.close();
   });
 }

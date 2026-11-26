@@ -56,6 +56,7 @@ class _EvHomePageState extends State<EvHomePage> {
   bool _wasHeroVisible = true;
   bool _loading = true;
   bool _emptyLibraries = false;
+  bool _probingFailover = false;
   Object? _error;
   EvHomeForcedState? _activeForcedState;
   int _loadToken = 0;
@@ -200,18 +201,14 @@ class _EvHomePageState extends State<EvHomePage> {
       if (!mounted) return;
       setState(() => _account = next);
     });
-    try {
-      _noticeSub = accounts.connectionNotices.listen((event) {
-        if (!mounted || _activeForcedState != null) return;
-        if ((event.kind == ConnectionNoticeKind.recovered ||
-                event.kind == ConnectionNoticeKind.switched) &&
-            (_error != null || _home == null)) {
-          unawaited(_loadHome());
-        }
-      });
-    } on NoSuchMethodError catch (_) {
-      _noticeSub = null;
-    }
+    _noticeSub = accounts.connectionNotices.listen((event) {
+      if (!mounted || _activeForcedState != null || _probingFailover) return;
+      if ((event.kind == ConnectionNoticeKind.recovered ||
+              event.kind == ConnectionNoticeKind.switched) &&
+          (_error != null || _home == null)) {
+        unawaited(_loadHome(allowFailover: false));
+      }
+    });
   }
 
   void _attachPreferences(EmbyViewPreferences prefs) {
@@ -275,6 +272,42 @@ class _EvHomePageState extends State<EvHomePage> {
     _autoRetryTimer = null;
   }
 
+  bool _isConnectionFailure(Object error) {
+    if (error is EmbyViewFailure) {
+      if (error.code == 'network') return true;
+      const nonConnectionCodes = {
+        'unauthorized',
+        'forbidden',
+        'session_changed',
+        'wall_changed',
+        'zone_missing',
+        'season_missing',
+        'invalid_page',
+        'unsupported_filter',
+      };
+      if (error.code != null && nonConnectionCodes.contains(error.code)) {
+        return false;
+      }
+      return error.retryable;
+    }
+    return true;
+  }
+
+  Future<void> _retryConnectionAndLoadHome() async {
+    final accounts = _scope?.services.accounts;
+    if (accounts != null) {
+      _probingFailover = true;
+      try {
+        await accounts.retryConnection();
+      } catch (_) {
+      } finally {
+        _probingFailover = false;
+      }
+    }
+    if (!mounted) return;
+    await _loadHome(allowFailover: false);
+  }
+
   void _restartAutoRetryTimer() {
     _cancelAutoRetryTimer();
     if (!widget.enableAutoRetry) return;
@@ -286,14 +319,14 @@ class _EvHomePageState extends State<EvHomePage> {
         _cancelAutoRetryTimer();
         return;
       }
-      unawaited(_loadHome());
+      unawaited(_retryConnectionAndLoadHome());
     });
   }
 
   void _handleNoticeRetry() {
     if (!mounted) return;
     _activeForcedState = null;
-    unawaited(_loadHome());
+    unawaited(_loadHome(allowFailover: false));
   }
 
   void _handleRecheck() {
@@ -304,15 +337,7 @@ class _EvHomePageState extends State<EvHomePage> {
   void _handleRetryError() {
     _cancelAutoRetryTimer();
     _activeForcedState = null;
-    final accounts = _scope?.services.accounts;
-    if (accounts != null && accounts.snapshot.connection == ConnectionState.disconnected) {
-      unawaited(() async {
-        try {
-          await accounts.retryConnection();
-        } catch (_) {}
-      }());
-    }
-    unawaited(_loadHome());
+    unawaited(_retryConnectionAndLoadHome());
   }
 
   void _openServerSettings() {
@@ -322,7 +347,10 @@ class _EvHomePageState extends State<EvHomePage> {
 
   void _openUsers() => _scope?.shell.onOpenUsers?.call();
 
-  Future<void> _loadHome({bool refreshZones = false}) async {
+  Future<void> _loadHome({
+    bool refreshZones = false,
+    bool allowFailover = true,
+  }) async {
     final scope = _scope, data = scope?.services.data;
     final token = ++_loadToken;
     if (scope == null || data == null) {
@@ -401,14 +429,33 @@ class _EvHomePageState extends State<EvHomePage> {
       if (initialHero != null) scope.stage.setBaseBackdrop(initialHero.card.art.stage);
     } catch (e) {
       if (!mounted || token != _loadToken) return;
+      if (allowFailover &&
+          _isConnectionFailure(e) &&
+          scope.services.preferences.current.autoSwitchServerAddress) {
+        Uri? nextAddress;
+        _probingFailover = true;
+        try {
+          nextAddress = await scope.services.accounts.probeAndFailover();
+        } catch (_) {
+          nextAddress = null;
+        } finally {
+          _probingFailover = false;
+        }
+        if (!mounted || token != _loadToken) return;
+        if (nextAddress != null) {
+          return _loadHome(refreshZones: refreshZones, allowFailover: false);
+        }
+      }
       final hasCachedContent = _home != null && !_emptyLibraries;
       if (hasCachedContent) {
         _cancelAutoRetryTimer();
-        scope.shell.showOfflineNotice(
-          serverName: _account.serverName,
-          triedAddressCount: _triedAddressCount(),
-          autoTick: widget.enableAutoRetry,
-        );
+        if (scope.shell.notice?.kind != EvNoticeKind.offline) {
+          scope.shell.showOfflineNotice(
+            serverName: _account.serverName,
+            triedAddressCount: _triedAddressCount(),
+            autoTick: widget.enableAutoRetry,
+          );
+        }
         setState(() {
           _error = e;
           _loading = false;

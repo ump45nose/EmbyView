@@ -21,11 +21,13 @@ typedef SubtitleItem = ({
 });
 
 class EmbySubtitleLibrary implements SubtitleIndexPort {
-  EmbySubtitleLibrary(this.client) {
+  EmbySubtitleLibrary(this.client, {String Function()? resolveBaseUrl})
+    : _resolveBaseUrl = resolveBaseUrl {
     configureServerDio(_requests);
   }
 
   final EmbyMediaServerClient client;
+  final String Function()? _resolveBaseUrl;
   final _requests = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 8),
@@ -34,7 +36,15 @@ class EmbySubtitleLibrary implements SubtitleIndexPort {
     ),
   );
 
+  void _syncBaseUrl() {
+    final next = _resolveBaseUrl?.call();
+    if (next != null && next.isNotEmpty && next != client.baseUrl) {
+      client.baseUrl = next;
+    }
+  }
+
   Future<SubtitleItem> item(String id, [String? sourceId]) async {
+    _syncBaseUrl();
     final item = await client.itemsApi.getItem(id, fields: 'Path,MediaSources,MediaStreams,OriginalTitle');
     final resolved = await EmbyMediaStreamResolver(client)
         .resolve(item, mediaSourceId: sourceId, enableTranscoding: false);
@@ -149,6 +159,7 @@ class EmbySubtitleLibrary implements SubtitleIndexPort {
   }
 
   String _url(String value) {
+    _syncBaseUrl();
     final server = Uri.parse(client.baseUrl);
     final address = Uri.parse(value);
     final uri = address.hasAuthority

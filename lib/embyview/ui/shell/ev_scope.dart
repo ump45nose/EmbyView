@@ -112,7 +112,8 @@ class EvShellController extends ChangeNotifier {
   VoidCallback? onOpenSearch, onOpenSettings, onOpenAbout, onOpenServerSettings;
   VoidCallback? onOpenUsers, onManageZones;
   VoidCallback? onSignedOutToUserPicker, onSignOut, onSwitchServer, onAddAccount;
-  VoidCallback? onToggleCommandPalette, onGoHome, onRetryConnection, onRetryHome;
+  VoidCallback? onToggleCommandPalette, onGoHome, onRetryHome;
+  FutureOr<void> Function()? onRetryConnection;
   bool Function()? onBack;
   bool Function()? onCloseAvatarMenu;
   ValueChanged<String>? onOpenZoneById;
@@ -205,8 +206,13 @@ class EvShellController extends ChangeNotifier {
     _cachedHomeDataOwner = null;
   }
 
-  void triggerConnectionRetry() {
-    onRetryConnection?.call();
+  Future<void> triggerConnectionRetry() async {
+    final retry = onRetryConnection;
+    if (retry != null) {
+      try {
+        await retry();
+      } catch (_) {}
+    }
     onRetryHome?.call();
   }
 
@@ -304,8 +310,6 @@ class EvShellController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void clearNotice() => dismissNotice();
-
   void handleConnectionNotice(ConnectionNoticeEvent event) {
     if (event.kind == ConnectionNoticeKind.recovered) {
       dismissNotice();
@@ -317,10 +321,42 @@ class EvShellController extends ChangeNotifier {
   // --- macOS menu bar & shortcut dispatcher ---
 
   bool handleMenuAction(String action) {
+    final player = (activePlayerResolver ?? () => EvPlayer.activePlayerActions)();
+    final playerActive = EvPlayer.isOpening || player != null;
+
     if (EvMenuAction.isPlaybackAction(action)) {
-      final player = (activePlayerResolver ?? () => EvPlayer.activePlayerActions)();
       if (player == null) return false;
       return player.dispatch(action);
+    }
+
+    if (playerActive) {
+      switch (action) {
+        case EvMenuAction.exportDiagnostics:
+          final exporter = onExportDiagnostics;
+          if (exporter != null) {
+            unawaited(exporter());
+            return true;
+          }
+          return false;
+        case EvMenuAction.back:
+          if (player?.closePlayer != null) {
+            player!.closePlayer!();
+            return true;
+          }
+          if (onBack != null) return onBack!();
+          return false;
+        case EvMenuAction.signOut:
+          player?.closePlayer?.call();
+          closeShortcuts();
+          if (onSignOut != null) {
+            onSignOut!();
+          } else {
+            onSignedOutToUserPicker?.call();
+          }
+          return true;
+        default:
+          return false;
+      }
     }
 
     final zoneIndex = EvMenuAction.zoneIndexFor(action);

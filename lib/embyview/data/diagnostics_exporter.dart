@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:get_it/get_it.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
@@ -8,6 +9,31 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../data/services/log_service.dart';
 import 'build_info.dart';
+
+/// Prompts for a save location and exports sanitized diagnostic logs via
+/// [EvDiagnosticsExporter]. Shared by the macOS menu item and Settings → About.
+Future<EvDiagnosticsExportResult?> evExportDiagnosticsViaDialog({
+  EvDiagnosticsExporter exporter = const EvDiagnosticsExporter(),
+  EvBuildInfo? buildInfo,
+}) async {
+  final ts = DateTime.now().toIso8601String().replaceAll(':', '').split('.').first;
+  String? path;
+  try {
+    path = await FilePicker.saveFile(
+      dialogTitle: '导出诊断日志',
+      fileName: 'EmbyView-diagnostics-$ts.log',
+      type: FileType.custom,
+      allowedExtensions: const ['log', 'txt'],
+    );
+  } catch (_) {
+    return null;
+  }
+  if (path == null || path.isEmpty) return null;
+  return exporter.exportSanitizedBundle(
+    destinationPath: path,
+    buildInfo: buildInfo,
+  );
+}
 
 /// Result metadata returned by [EvDiagnosticsExporter.exportSanitizedBundle].
 @immutable
@@ -46,9 +72,9 @@ class EvDiagnosticsExporter {
 
   // --- Pure sanitization patterns ---
 
-  // 1. Authorization headers (Bearer / Basic / MediaBrowser / Token).
+  // 1. Authorization & Cookie headers (quoted JSON value or full unquoted header line).
   static final RegExp _authHeaderRe = RegExp(
-    r'''\b(authorization|x-emby-authorization)\s*[:=]\s*("?)([^\r\n"]*)(\2)''',
+    r'''\b(authorization|x-emby-authorization|set-cookie|cookie)\s*[:=]\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\r\n]+))''',
     caseSensitive: false,
   );
 
@@ -58,22 +84,25 @@ class EvDiagnosticsExporter {
     caseSensitive: false,
   );
 
-  // 3. OpenAI / Anthropic style secret API keys (e.g. sk-..., sk-proj-..., sk-ant-...).
-  static final RegExp _skKeyRe = RegExp(r'\bsk-[A-Za-z0-9_-]{8,}\b');
+  // 3. OpenAI / Anthropic / Google style secret API keys (e.g. sk-..., AIza...).
+  static final RegExp _apiKeyLiteralRe = RegExp(
+    r'\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{16,})\b',
+  );
 
-  // 4. Query parameters carrying credentials or signatures.
+  // 4. Query parameters carrying credentials or signatures (including prefixed names).
   static final RegExp _querySecretRe = RegExp(
-    r'([?&](?:api[_-]?key|token|access[_-]?token|auth[_-]?token|refresh[_-]?token|'
-    r'x-emby-token|x-mediabrowser-token|password|passwd|pwd|pass|secret|sig|signature)=)'
+    r'([?&](?:[A-Za-z0-9_-]*(?:api[_-]?key|token|password|passwd|secret)|'
+    r'pwd|pass|sig|signature)=)'
     r'[^&\s"\x27<>)}\]]*',
     caseSensitive: false,
   );
 
-  // 5. Key/value credentials (JSON, HTTP headers, key=value, key: value).
+  // 5. Key/value credentials (JSON, HTTP headers, key=value, key: value),
+  //    covering prefixed names like translationApiKey, gateway_api_key,
+  //    emby_token, streamToken, x-goog-api-key, cookie, set-cookie.
   static final RegExp _kvCredentialRe = RegExp(
-    r'''(["']?\b(?:x-emby-token|x-mediabrowser-token|x-api-key|api[_-]?key|'''
-    r'''access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|'''
-    r'''pwd|pass|pw|client[_-]?secret|secret|signature)\b["']?\s*[:=]\s*["']?)'''
+    r'''(["']?\b(?:[A-Za-z0-9_-]*(?:api[_-]?key|token|password|passwd|secret|cookie)|'''
+    r'''pwd|pass|pw|signature)\b["']?\s*[:=]\s*["']?)'''
     r'''(?:(?:Bearer|Basic|MediaBrowser)\s+)?([^\s&"',;<>{}\[\]\r\n]+)''',
     caseSensitive: false,
   );
@@ -85,11 +114,20 @@ class EvDiagnosticsExporter {
     caseSensitive: false,
   );
 
-  // 7. Local / Tailscale hostnames (with optional :port).
+  // 7. Local / private / Tailscale hostnames (with optional :port).
   static final RegExp _localOrTailscaleHostRe = RegExp(
     r'\b[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
     r'(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*'
-    r'\.(?:local|ts\.net)(?::\d{1,5})?\b',
+    r'\.(?:local|lan|home|internal|ts\.net)(?::\d{1,5})?\b',
+    caseSensitive: false,
+  );
+
+  // 7b. Bare domain:port references (excluding source/log filenames like foo.dart:42).
+  static final RegExp _bareDomainPortRe = RegExp(
+    r'\b(?!(?:https?|wss?|smb|ftp)\b)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+    r'(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*'
+    r'\.(?!(?:dart|swift|log|txt|json|jsonl|yaml|yml|xml|plist|kt|java|cpp|hpp|cc|mm|py|js|ts|css|html|md|srt|ass|vtt)\b)'
+    r'[A-Za-z]{2,24}:\d{1,5}\b',
     caseSensitive: false,
   );
 
@@ -142,21 +180,28 @@ class EvDiagnosticsExporter {
     if (raw.isEmpty) return raw;
     var out = raw;
 
-    // Preserve Authorization header key while redacting the full header value.
+    // Preserve Authorization / Cookie header key while redacting the full value.
     out = out.replaceAllMapped(_authHeaderRe, (m) {
       final key = m.group(1)!;
-      final quote = m.group(2)!;
-      final val = m.group(3)!;
-      if (val.isEmpty) return m.group(0)!;
-      return '$key: $quote[REDACTED]$quote';
+      final dq = m.group(2);
+      final sq = m.group(3);
+      final bare = m.group(4);
+      if (dq != null) {
+        return dq.isEmpty ? m.group(0)! : '$key: "[REDACTED]"';
+      }
+      if (sq != null) {
+        return sq.isEmpty ? m.group(0)! : "$key: '[REDACTED]'";
+      }
+      if (bare == null || bare.trim().isEmpty) return m.group(0)!;
+      return '$key: [REDACTED]';
     });
 
     // Redact query-string credentials before authority redaction so query keys stay legible.
     out = out.replaceAllMapped(_querySecretRe, (m) => '${m.group(1)}[REDACTED]');
 
-    // Redact standalone Bearer tokens and sk-* keys.
+    // Redact standalone Bearer tokens and API key literals (sk-*, AIza*).
     out = out.replaceAll(_bearerRe, 'Bearer [REDACTED]');
-    out = out.replaceAll(_skKeyRe, '[REDACTED_KEY]');
+    out = out.replaceAll(_apiKeyLiteralRe, '[REDACTED_KEY]');
 
     // Redact key-value credentials (password, token, api_key, X-Emby-Token, etc.).
     out = out.replaceAllMapped(_kvCredentialRe, (m) => '${m.group(1)}[REDACTED]');
@@ -168,8 +213,9 @@ class EvDiagnosticsExporter {
     out = out.replaceAllMapped(_hostLookupRe, (m) => '${m.group(1)}[REDACTED_HOST]');
     out = out.replaceAllMapped(_kvHostRe, (m) => '${m.group(1)}[REDACTED_HOST]');
 
-    // Redact bare .local and .ts.net hostnames.
+    // Redact bare .local, .lan, .home, .internal, .ts.net hostnames and bare domain:port.
     out = out.replaceAll(_localOrTailscaleHostRe, '[REDACTED_HOST]');
+    out = out.replaceAll(_bareDomainPortRe, '[REDACTED_HOST]');
 
     // Redact IPv4 / IPv6 addresses.
     out = out.replaceAll(_bracketIpv6Re, '[REDACTED_IP]');

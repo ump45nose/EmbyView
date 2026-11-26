@@ -150,5 +150,30 @@ void main() {
         isNull,
       );
     });
+
+    test('accepts embyview:// scheme identically to moonfin://', () {
+      expect(
+        DeepLinkService.routeForDeepLink(Uri.parse('embyview://item?id=abc123')),
+        '/item/abc123',
+      );
+      expect(
+        DeepLinkService.routeForDeepLink(
+          Uri.parse('embyview://play?id=abc123&serverId=srv-1&userId=user-1'),
+        ),
+        '/item/abc123?serverId=srv-1&userId=user-1&autoPlay=true',
+      );
+      expect(
+        DeepLinkService.routeForDeepLink(
+          Uri.parse('embyview://home?serverId=srv-1&userId=user-1'),
+        ),
+        '/home?serverId=srv-1&userId=user-1',
+      );
+      expect(
+        DeepLinkService.routeForDeepLink(
+          Uri.parse('embyview://search?query=frieren'),
+        ),
+        '/search?query=frieren',
+      );
+    });
   });
 }

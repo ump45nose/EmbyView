@@ -58,7 +58,6 @@ class EvLoginUser {
     required this.id,
     required this.name,
     this.hasPassword = true,
-    this.hasStoredToken = false,
     this.avatar,
     this.serverId,
   });
@@ -66,7 +65,6 @@ class EvLoginUser {
   final String id;
   final String name;
   final bool hasPassword;
-  final bool hasStoredToken;
   final ArtworkRef? avatar;
   final String? serverId;
 

@@ -7,7 +7,6 @@ import 'package:flutter/widgets.dart' hide ConnectionState, Page;
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/subtitles/ai/local_subtitle_asr.dart';
 import 'package:moonfin/embyview/ui/icons/ev_icons.dart';
-import 'package:moonfin/embyview/ui/settings/ev_settings_widgets.dart';
 import 'package:moonfin/embyview/ui/shell/ev_avatar_menu.dart';
 import 'package:moonfin/embyview/ui/theme/ev_primitives.dart';
 import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
@@ -222,7 +221,7 @@ class _EvOnboardingCardState extends State<EvOnboardingCard> {
     if (prefs != null && !prefs.current.onboardingDismissed) {
       try {
         await prefs.update(
-          evCopyPreferences(prefs.current, onboardingDismissed: true),
+          prefs.current.copyWith(onboardingDismissed: true),
         );
       } catch (_) {}
     }

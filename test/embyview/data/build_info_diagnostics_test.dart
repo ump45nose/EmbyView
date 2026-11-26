@@ -113,6 +113,41 @@ HTTP 403 · whisper large-v3-turbo · 574 MB
       expect(EvDiagnosticsExporter.formatByteSize(2048), '2.0 KB');
       expect(EvDiagnosticsExporter.formatByteSize(2516582), '2.4 MB');
     });
+
+    test('redacts prefixed credential keys, unquoted X-Emby-Authorization, AIza keys, cookies, bare domain:port, and private TLDs', () {
+      const raw = '''
+{"translationApiKey": "trKeySecret123", "gateway_api_key": "gwKeySecret456", "emby_token": "etok789", "streamToken": "stTok999"}
+x-goog-api-key: AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz12345
+Cookie: session_id=cookieVal1; auth=cookieVal2
+Set-Cookie: sid=setCookieSecret; Path=/; HttpOnly
+X-Emby-Authorization: MediaBrowser Client="EmbyView", Device="MacBook", DeviceId="dev-secret-id", Token="embyAuthTok"
+Failed connecting to emby.example.com:8920, nas.lan:8096, box.home, media.corp.internal
+at EmbyMediaData.detail (package:moonfin/embyview/data/emby_media_data.dart:951)
+''';
+      final clean = EvDiagnosticsExporter.sanitizeDiagnosticText(raw);
+
+      for (final leaked in const [
+        'trKeySecret123',
+        'gwKeySecret456',
+        'etok789',
+        'stTok999',
+        'AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz12345',
+        'cookieVal1',
+        'cookieVal2',
+        'setCookieSecret',
+        'dev-secret-id',
+        'embyAuthTok',
+        'emby.example.com:8920',
+        'nas.lan',
+        'box.home',
+        'media.corp.internal',
+      ]) {
+        expect(clean, isNot(contains(leaked)), reason: 'Leaked: $leaked\n$clean');
+      }
+
+      // Keeps safe stack frame file:line context.
+      expect(clean, contains('emby_media_data.dart:951'));
+    });
   });
 
   group('EvDiagnosticsExporter 7-day filtering and bundle export', () {

@@ -198,13 +198,9 @@ class _EvShellState extends State<EvShell> {
     unawaited(_noticeSub?.cancel());
     _noticeSub = null;
     if (!widget.renderGlobalOverlays) return;
-    try {
-      _noticeSub = services.accounts.connectionNotices.listen(
-        _shell.handleConnectionNotice,
-      );
-    } on NoSuchMethodError catch (_) {
-      _noticeSub = null;
-    }
+    _noticeSub = services.accounts.connectionNotices.listen(
+      _shell.handleConnectionNotice,
+    );
   }
 
   Future<void> _loadZones(EmbyViewServices services, {required bool force}) async {
@@ -445,7 +441,6 @@ class _EvShellState extends State<EvShell> {
                                   onImageBackdrop: _stage.mode != EvStageMode.ambient,
                                   showBack: _shell.showBack, titlePlate: _shell.titlePlate,
                                   rightActions: _shell.rightActions, hideTabs: _shell.hideTabs,
-                                  hideZoneTabs: !_shell.hasVisibleLibraries,
                                   hideAvatar: _shell.hideAvatar, showSearchTab: _shell.onOpenSearch != null,
                                   currentProfile: _account.current, avatarMenuOpen: _avatarMenuOpen,
                                   enableWindowDrag: widget.configureWindow,
@@ -477,11 +472,9 @@ class _EvShellState extends State<EvShell> {
                                 notice: _shell.notice!,
                                 onRetry: () {
                                   if (_shell.onRetryConnection != null || _shell.onRetryHome != null) {
-                                    _shell.triggerConnectionRetry();
+                                    unawaited(_shell.triggerConnectionRetry());
                                   } else {
-                                    try {
-                                      unawaited(widget.services.accounts.retryConnection());
-                                    } on NoSuchMethodError catch (_) {}
+                                    unawaited(widget.services.accounts.retryConnection());
                                   }
                                 },
                                 onOpenServerSettings: () =>

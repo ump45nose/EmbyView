@@ -42,6 +42,7 @@ class Server {
     String? address,
     String? displayAddress,
     bool clearDisplayAddress = false,
+    List<String>? candidateAddresses,
     String? version,
     ServerType? serverType,
     String? loginDisclaimer,
@@ -56,7 +57,7 @@ class Server {
       displayAddress: clearDisplayAddress
           ? null
           : displayAddress ?? this.displayAddress,
-      candidateAddresses: candidateAddresses,
+      candidateAddresses: candidateAddresses ?? this.candidateAddresses,
       version: version ?? this.version,
       serverType: serverType ?? this.serverType,
       loginDisclaimer: loginDisclaimer ?? this.loginDisclaimer,

@@ -9,6 +9,7 @@ import 'package:moonfin/embyview/entry.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
 import 'package:moonfin/embyview/ui/player/ev_player_page.dart';
 import 'package:moonfin/embyview/ui/settings/ev_settings_sections.dart';
+import 'package:server_core/server_core.dart';
 
 const List<ZoneTile> _kZones = [
   ZoneTile(id: 'anime', name: '番剧', iconKey: 'nav_anime', colorSlot: 0, total: 12, unit: '部'),
@@ -88,6 +89,9 @@ class _FakeAccounts implements EmbyViewAccounts {
     retryConnectionCalls++;
   }
 
+  @override
+  Future<Uri?> probeAndFailover({Duration timeout = const Duration(seconds: 5)}) async => null;
+
   Future<void> close() async {
     if (!_changes.isClosed) unawaited(_changes.close());
     if (!_notices.isClosed) unawaited(_notices.close());
@@ -98,9 +102,17 @@ class _FakeAccounts implements EmbyViewAccounts {
 }
 
 class _FakeData implements EmbyViewData {
+  bool failHome = false;
+  int homeCalls = 0;
+
   @override
-  Future<HomeData> home({required ShelfSort seriesSort}) async =>
-      const HomeData(zones: _kZones);
+  Future<HomeData> home({required ShelfSort seriesSort}) async {
+    homeCalls++;
+    if (failHome) {
+      throw const EmbyViewFailure('无法连接媒体服务器，请重试', retryable: true, code: 'network');
+    }
+    return const HomeData(zones: _kZones);
+  }
 
   @override
   Future<List<ZoneTile>> zones() async => _kZones;
@@ -358,6 +370,7 @@ class _FakePlayback implements EmbyViewPlayback {
 Future<({
   _FakePreferences prefs,
   _FakeAccounts accounts,
+  _FakeData data,
   EvShellController controller,
 })> _pumpHost(
   WidgetTester tester, {
@@ -381,6 +394,7 @@ Future<({
     LocalPreferences(theme: theme, onboardingDismissed: true),
   );
   final accounts = _FakeAccounts();
+  final data = _FakeData();
   final controller = EvShellController(
     initial: initialDestination ?? const EvHomeDestination(),
     zones: _kZones,
@@ -389,7 +403,7 @@ Future<({
     preferences: prefs,
     accounts: accounts,
     sessionId: 'sess-w74',
-    data: _FakeData(),
+    data: data,
     playback: _FakePlayback(),
     immersion: _FakeImmersion(),
   );
@@ -415,7 +429,7 @@ Future<({
     ),
   );
   await tester.pumpAndSettle();
-  return (prefs: prefs, accounts: accounts, controller: controller);
+  return (prefs: prefs, accounts: accounts, data: data, controller: controller);
 }
 
 Future<void> _pressQuestionMark(WidgetTester tester) async {
@@ -808,7 +822,9 @@ void main() {
       testWidgets('renders notice:offline countdown, retry, server settings & notice:switched auto-dismiss in ${mode.name}', (tester) async {
         final env = await _pumpHost(tester, theme: mode);
 
-        // 1. Offline event via connectionNotices stream
+        // 1. Offline event via connectionNotices stream (server remains unreachable on retry)
+        env.data.failHome = true;
+        final homeCallsBeforeRetry = env.data.homeCalls;
         env.accounts.emitNotice(
           const ConnectionNoticeEvent.offline(serverName: '家里的 Emby', triedAddressCount: 2),
         );
@@ -823,15 +839,17 @@ void main() {
         await tester.pump(const Duration(seconds: 3));
         expect(find.text('· 5 秒后重试'), findsOneWidget);
 
-        // Advance remaining 5 seconds -> auto retries and resets to 10s
+        // Advance remaining 5 seconds -> auto retries (connection + home) and resets to 10s
         await tester.pump(const Duration(seconds: 5));
         expect(env.accounts.retryConnectionCalls, 1);
+        expect(env.data.homeCalls, greaterThan(homeCallsBeforeRetry));
         expect(find.text('· 10 秒后重试'), findsOneWidget);
 
         // Tap 立即重试 -> triggers retry immediately
         await tester.tap(find.byKey(const Key('ev_notice_retry')));
         await tester.pump();
         expect(env.accounts.retryConnectionCalls, 2);
+        env.data.failHome = false;
 
         // Tap 服务器设置 -> opens Settings:account
         await tester.tap(find.byKey(const Key('ev_notice_server_settings')));
@@ -877,6 +895,150 @@ void main() {
       expect(isEmbyViewAppMode(path: '/', isMacOS: true, embyServersOnly: true), isTrue);
       expect(isEmbyViewAppMode(path: '/', isMacOS: true, embyServersOnly: false), isFalse);
       expect(isEmbyViewAppMode(path: '/home', isMacOS: false), isFalse);
+      expect(
+        isEmbyViewAppMode(
+          path: '/home',
+          isMacOS: true,
+          activeServerType: ServerType.jellyfin,
+        ),
+        isFalse,
+      );
+      expect(
+        isEmbyViewAppMode(
+          path: '/home',
+          isMacOS: true,
+          activeServerType: ServerType.emby,
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('buildStageFourTestShell mounts cleanly with initialNotice and initialShortcutsOpen without LateInitializationError', (tester) async {
+      await _pumpHost(
+        tester,
+        initialNotice: const EvNoticeState.switched(
+          serverName: '家里的 Emby',
+          message: '内网连不上，已换到 Tailscale 地址',
+          autoDismissAfter: null,
+        ),
+        initialShortcutsOpen: true,
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const Key('ev_notice_switched')), findsOneWidget);
+      expect(find.byKey(const Key('ev_shortcuts_overlay')), findsOneWidget);
+    });
+
+    test('player menu isolation blocks browse/overlay actions while player is active and blocks non-fullscreen controls on failed phase', () {
+      var closed = 0;
+      var signedOut = 0;
+      var exported = 0;
+      var settingsOpened = 0;
+      var searchOpened = 0;
+      var paletteToggled = 0;
+      var playPauseCalls = 0;
+      var fullscreenCalls = 0;
+      var failed = false;
+
+      final delegate = EvPlayerMenuDelegate(
+        togglePlayPause: () => playPauseCalls++,
+        seekBack10: () {},
+        seekForward10: () {},
+        nextEpisode: () {},
+        toggleSubtitlePanel: () {},
+        triggerAiSubtitle: () {},
+        toggleAnime4k: () {},
+        toggleFullscreen: () => fullscreenCalls++,
+        closePlayer: () => closed++,
+        isFailed: () => failed,
+      );
+
+      final controller = EvShellController(
+        zones: _kZones,
+        onOpenSettings: () => settingsOpened++,
+        onOpenSearch: () => searchOpened++,
+        onToggleCommandPalette: () => paletteToggled++,
+        onSignOut: () => signedOut++,
+        onExportDiagnostics: () async => exported++,
+        activePlayerResolver: () => delegate,
+      );
+      addTearDown(controller.dispose);
+
+      // Non-player browsing/overlay actions are blocked while player is active.
+      expect(controller.handleMenuAction(EvMenuAction.settings), isFalse);
+      expect(controller.handleMenuAction(EvMenuAction.search), isFalse);
+      expect(controller.handleMenuAction(EvMenuAction.goZone1), isFalse);
+      expect(controller.handleMenuAction(EvMenuAction.commandPalette), isFalse);
+      expect(controller.handleMenuAction(EvMenuAction.shortcuts), isFalse);
+      expect(settingsOpened, 0);
+      expect(searchOpened, 0);
+      expect(paletteToggled, 0);
+      expect(controller.shortcutsOpen, isFalse);
+
+      // Playback, exportDiagnostics, back (closePlayer), and signOut (closePlayer + signOut) are allowed.
+      expect(controller.handleMenuAction(EvMenuAction.playPause), isTrue);
+      expect(playPauseCalls, 1);
+      expect(controller.handleMenuAction(EvMenuAction.exportDiagnostics), isTrue);
+      expect(exported, 1);
+      expect(controller.handleMenuAction(EvMenuAction.back), isTrue);
+      expect(closed, 1);
+      expect(controller.handleMenuAction(EvMenuAction.signOut), isTrue);
+      expect(closed, 2);
+      expect(signedOut, 1);
+
+      // When player is in PlaybackPhase.failed, only toggleFullscreen is permitted among playback actions.
+      failed = true;
+      expect(controller.handleMenuAction(EvMenuAction.playPause), isFalse);
+      expect(playPauseCalls, 1);
+      expect(controller.handleMenuAction(EvMenuAction.seekBack10), isFalse);
+      expect(controller.handleMenuAction(EvMenuAction.subtitlePanel), isFalse);
+      expect(controller.handleMenuAction(EvMenuAction.toggleFullscreen), isTrue);
+      expect(fullscreenCalls, 1);
+    });
+
+    testWidgets('EmbyViewLoginHost wires EvMenuChannel for exportDiagnostics and login step back', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      var exported = 0;
+      final prefs = _FakePreferences(const LocalPreferences(theme: ThemeMode.cinema));
+      addTearDown(prefs.close);
+
+      await tester.pumpWidget(
+        MediaQuery(
+          data: const MediaQueryData(
+            size: Size(1440, 900),
+            disableAnimations: true,
+          ),
+          child: MaterialApp(
+            home: EmbyViewLoginHost(
+              initialStep: EvLoginStep.pass,
+              backend: EvDemoLoginBackend(),
+              preferences: prefs,
+              onExportDiagnostics: () async => exported++,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(EvMenuChannel.instance.dispatchAction(EvMenuAction.exportDiagnostics), isTrue);
+      expect(exported, 1);
+
+      // Back steps from pass -> users -> server, then returns false at root.
+      expect(EvMenuChannel.instance.dispatchAction(EvMenuAction.back), isTrue);
+      await tester.pump();
+      expect(find.byKey(const Key('ev_login_password_bar')), findsNothing);
+      expect(find.byKey(const Key('ev_login_users_grid')), findsOneWidget);
+
+      expect(EvMenuChannel.instance.dispatchAction(EvMenuAction.back), isTrue);
+      await tester.pump();
+      expect(find.byKey(const Key('ev_login_server_card')), findsOneWidget);
+
+      expect(EvMenuChannel.instance.dispatchAction(EvMenuAction.back), isFalse);
     });
   });
 }

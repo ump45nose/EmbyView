@@ -26,6 +26,8 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
     required this.manager,
     required this.client,
     required this.native,
+    String? serverId,
+    String? Function()? activeServerId,
     this.data,
     this.beforeOpen,
     this.userAgent = embyViewPlaybackUserAgent,
@@ -39,16 +41,19 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
     this.sessionCacheByteBudget,
     PlaybackRedirectCache? redirectCache,
     NativePlaybackAudioInput? audioInput,
-  }) : anime4kForAnime = anime4kForAnime ?? anime4k,
+  }) : _serverId = serverId,
+       _activeServerId = activeServerId,
+       anime4kForAnime = anime4kForAnime ?? anime4k,
        anime4kForOther = anime4kForOther ?? anime4k,
        _cache = redirectCache ?? PlaybackRedirectCache(),
        audioInput = audioInput ?? NativePlaybackAudioInput() {
-    _server = client.baseUrl;
+    _lastBaseUrl = client.baseUrl;
     _user = client.userId ?? '';
+    _token = client.accessToken ?? '';
     _resolver = EmbyViewStreamResolver(
       delegate: EmbyMediaStreamResolver(client),
       cache: _cache,
-      server: _server,
+      serverUrl: () => client.baseUrl,
       user: _user,
       userAgent: userAgent,
       prefetchEnabled: prefetch115,
@@ -56,10 +61,17 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
       onError: _resolutionError,
     );
   }
-  late final _mapper = MediaMapper(server: _server, user: _user, token: client.accessToken ?? '');
+  late final _mapper = MediaMapper(
+    serverUrl: () => client.baseUrl,
+    serverId: _serverId,
+    user: _user,
+    token: _token,
+  );
   final PlaybackManager manager;
   final MediaServerClient client;
   final EmbyViewNativePlayback native;
+  final String? _serverId;
+  final String? Function()? _activeServerId;
   final EmbyViewData? data;
   final Future<void> Function()? beforeOpen;
   final String userAgent;
@@ -76,8 +88,9 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
   final NativePlaybackAudioInput audioInput;
   final PlaybackRedirectCache _cache;
   final diagnostics = PlaybackDiagnostics();
-  late final String _server;
+  late String _lastBaseUrl;
   late final String _user;
+  late final String _token;
   late final EmbyViewStreamResolver _resolver;
   final _prepared = <String, Future<void>>{};
   MoonfinPlaybackSession? _active;
@@ -85,11 +98,29 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
   Future<void>? _dispose;
   void Function()? _restoreManager;
   static int _sourceGeneration = 0;
-  bool get _valid => _dispose == null && client.baseUrl == _server && client.userId == _user;
+
+  String get _currentServer => client.baseUrl;
+
+  bool get _valid =>
+      _dispose == null &&
+      client.userId == _user &&
+      (client.accessToken ?? '') == _token &&
+      (_serverId == null || _activeServerId == null || _activeServerId() == _serverId);
+
+  void _syncBaseUrlIfChanged() {
+    final current = client.baseUrl;
+    if (current == _lastBaseUrl) return;
+    final previous = _lastBaseUrl;
+    _lastBaseUrl = current;
+    _cache.invalidateForServer(server: previous, user: _user);
+    _resolver.forget();
+    _prepared.clear();
+  }
 
   @override
   Future<void> prepare(String itemId) {
     if (!_valid || !prefetch115) return Future.value();
+    _syncBaseUrlIfChanged();
     return _prepared.putIfAbsent(itemId, () async {
       final watch = Stopwatch()..start();
       try {
@@ -97,7 +128,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
         final resolver = EmbyViewStreamResolver(
           delegate: EmbyMediaStreamResolver(client),
           cache: _cache,
-          server: _server,
+          serverUrl: () => client.baseUrl,
           user: _user,
           userAgent: userAgent,
           onResolved: (_, result, info, address) {
@@ -136,6 +167,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
   @override
   PlaybackSession open(PlayTarget target) {
     if (!_valid) throw const EmbyViewFailure('播放账号已变更，请重新打开。', retryable: true);
+    _syncBaseUrlIfChanged();
     final previous = _active;
     final session = MoonfinPlaybackSession._(this, target);
     _active = session;
@@ -215,7 +247,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   MoonfinPlaybackSession._(this._owner, this._target)
     : _snapshot = PlaybackSnapshot(generation: 0, target: _target),
       _animeRequested = _owner.anime4k,
-      _thumbnails = PlaybackThumbnails(_owner.client, '${_owner._server}:${_owner._user}') {
+      _thumbnails = PlaybackThumbnails(_owner.client, _owner._user) {
     _intent.start();
   }
   final MoonfinPlaybackAdapter _owner;
@@ -662,7 +694,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       code: category,
       httpStatus: httpStatus,
       sourceLabel: is115 ? '115 网盘' : null,
-      isRateLimited: httpStatus == 403,
+      isRateLimited: false,
     );
   }
 
@@ -682,7 +714,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       _quality = _sourceQuality(
         resolution,
         audioIndex: _manager.audioStreamIndex,
-        server: _owner._server,
+        server: _owner._currentServer,
         itemPath: _raw['Path'] as String?,
       );
     }
@@ -1140,15 +1172,17 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   @override
   Future<void> retryOpen() async {
     if (!_current || _openingTask != null) return;
+    _owner._syncBaseUrlIfChanged();
+    final currentServer = _owner._currentServer;
     _owner._cache.invalidateForItem(
-      server: _owner._server,
+      server: currentServer,
       user: _owner._user,
       item: _target.itemId,
     );
     if (_subtitleSource case final currentSource?) {
       _owner._cache.invalidate(
         PlaybackSourceKey(
-          server: _owner._server,
+          server: currentServer,
           user: _owner._user,
           item: _target.itemId,
           mediaSource: currentSource.mediaSourceId,

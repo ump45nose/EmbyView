@@ -118,6 +118,8 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
         unawaited(widget.session.setFullscreen(!_snap.fullscreen));
         _pokeControls();
       },
+      closePlayer: _handleClose,
+      isFailed: () => _snap.phase == PlaybackPhase.failed,
     );
     EvPlayer.registerActivePlayer(_menuDelegate);
   }

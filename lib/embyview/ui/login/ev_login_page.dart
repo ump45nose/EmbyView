@@ -63,10 +63,10 @@ class EvLoginPage extends StatefulWidget {
   final VoidCallback? onSignedIn;
 
   @override
-  State<EvLoginPage> createState() => _EvLoginPageState();
+  State<EvLoginPage> createState() => EvLoginPageState();
 }
 
-class _EvLoginPageState extends State<EvLoginPage>
+class EvLoginPageState extends State<EvLoginPage>
     with TickerProviderStateMixin {
   late EvLoginStep _step;
   late List<EvDiscoveredServer> _discovered;
@@ -130,7 +130,11 @@ class _EvLoginPageState extends State<EvLoginPage>
         _selectedUser =
             _users.where((u) => u.hasPassword).firstOrNull ?? _users.first;
       }
-      _passwordCtrl.text = widget.initialPassword ?? '';
+      final initialPassword = widget.initialPassword ?? '';
+      _passwordCtrl.value = TextEditingValue(
+        text: initialPassword,
+        selection: TextSelection.collapsed(offset: initialPassword.length),
+      );
       _focusPasswordLater();
     } else {
       _passwordCtrl.clear();
@@ -203,8 +207,44 @@ class _EvLoginPageState extends State<EvLoginPage>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _passwordFocus.canRequestFocus) {
         _passwordFocus.requestFocus();
+        final len = _passwordCtrl.text.length;
+        if (_passwordCtrl.selection.baseOffset != len ||
+            _passwordCtrl.selection.extentOffset != len) {
+          _passwordCtrl.selection = TextSelection.collapsed(offset: len);
+        }
       }
     });
+  }
+
+  /// Navigates one step back inside the login flow (used by Escape and the
+  /// macOS menu bar "返回" action). Returns `true` when handled.
+  bool handleBack() {
+    if (_busy) return true;
+    switch (_step) {
+      case EvLoginStep.pass:
+        setState(() {
+          _selectedUser = null;
+          _manualUserMode = false;
+          _authError = null;
+          _passwordCtrl.clear();
+          _setStep(EvLoginStep.users);
+        });
+        return true;
+      case EvLoginStep.cert:
+        _cancelCert();
+        return true;
+      case EvLoginStep.fail:
+        setState(() {
+          _failure = null;
+          _setStep(EvLoginStep.server);
+        });
+        return true;
+      case EvLoginStep.users:
+        _switchServer();
+        return true;
+      case EvLoginStep.server:
+        return false;
+    }
   }
 
   void _focusUsernameLater() {

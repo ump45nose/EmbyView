@@ -30,7 +30,7 @@ class EvTopBar extends StatefulWidget {
     this.tuckLeaveDelay = const Duration(milliseconds: 700),
     this.scrolled = false, this.topFade = 0.0, this.onImageBackdrop, this.showBack = false,
     this.titlePlate, this.rightActions = const [],
-    this.hideTabs = false, this.hideZoneTabs = false, this.hideAvatar = false, this.showSearchTab = false,
+    this.hideTabs = false, this.hideAvatar = false, this.showSearchTab = false,
     this.currentProfile, this.avatarMenuOpen = false, this.enableWindowDrag = true,
     this.windowDragBuilder,
     this.onSelectTab, this.onBack, this.onAvatarTap,
@@ -39,7 +39,7 @@ class EvTopBar extends StatefulWidget {
   final List<ZoneTile> zones;
   final String? activeTabId;
   final NavigationStyle navigationStyle;
-  final bool autoTuck, scrolled, showBack, hideTabs, hideZoneTabs, hideAvatar, showSearchTab, avatarMenuOpen, enableWindowDrag;
+  final bool autoTuck, scrolled, showBack, hideTabs, hideAvatar, showSearchTab, avatarMenuOpen, enableWindowDrag;
   final bool? onImageBackdrop;
   final Duration tuckDelay, tuckLeaveDelay;
   final double topFade;
@@ -69,8 +69,7 @@ class _EvTopBarState extends State<EvTopBar> with SingleTickerProviderStateMixin
 
   List<_NavItem> get _items => [
     const _NavItem('home', '首页', EvIcons.navHome),
-    if (!widget.hideZoneTabs)
-      for (final z in widget.zones) _NavItem(z.id, z.name, EvIcons.byKey(z.iconKey)),
+    for (final z in widget.zones) _NavItem(z.id, z.name, EvIcons.byKey(z.iconKey)),
     if (widget.showSearchTab) const _NavItem('search', '搜索', EvIcons.navSearch, hint: '⌘F'),
   ];
 
@@ -92,7 +91,6 @@ class _EvTopBarState extends State<EvTopBar> with SingleTickerProviderStateMixin
     final styleChanged = old.navigationStyle != widget.navigationStyle;
     final zonesChanged = old.zones.length != widget.zones.length ||
         old.showSearchTab != widget.showSearchTab ||
-        old.hideZoneTabs != widget.hideZoneTabs ||
         Iterable.generate(old.zones.length).any((i) => old.zones[i].id != widget.zones[i].id || old.zones[i].name != widget.zones[i].name);
 
     if (zonesChanged) {

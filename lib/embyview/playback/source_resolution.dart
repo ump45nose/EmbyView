@@ -208,6 +208,24 @@ class PlaybackRedirectCache {
     }
   }
 
+  /// Invalidates every cached and in-flight redirect entry bound to [server]
+  /// for [user] (used when switching between multiple addresses of a server).
+  void invalidateForServer({
+    required String server,
+    required String user,
+  }) {
+    final keys = <PlaybackSourceKey>{
+      ..._cache.keys,
+      ..._pending.keys,
+      ..._epochs.keys,
+    };
+    for (final key in keys) {
+      if (key.server == server && key.user == user) {
+        invalidate(key);
+      }
+    }
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;

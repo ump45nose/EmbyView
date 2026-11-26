@@ -5,42 +5,8 @@ import 'package:flutter/widgets.dart' hide ConnectionState, Page;
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
 
-const Object _keepField = Object();
 const Color evTransparent = Color(0x00000000);
 const Color evDangerColor = Color(0xFFE5484D);
-
-/// Creates a modified copy of [LocalPreferences] without dropping any field.
-LocalPreferences evCopyPreferences(
-  LocalPreferences b, {
-  ThemeMode? theme, NavigationStyle? navigation, ShelfSort? seriesSort,
-  bool? chooseUserOnStartup, bool? onboardingDismissed, bool? autoSwitchServerAddress,
-  Map<String, List<ServerAddressEntry>>? serverAddresses,
-  bool? backgroundVideo, Duration? backgroundVideoDelay,
-  Object? detailTrailerDelay = _keepField, bool? themeMusic, double? themeVolume,
-  bool? quickLook, bool? hideUnwatchedOverview, bool? preResolve115,
-  int? readAheadBytes, bool? autoPlayNext, bool? anime4kForAnime, bool? anime4kForOther,
-  List<String>? subtitleLanguages, bool? autoSelectChineseSubtitle,
-  Set<SubtitleSource>? subtitleSources, String? translationBaseUrl, String? translationModel,
-  int? monthlyBudgetMicros, MediaFolderStatus? mediaFolder, List<ZonePreference>? zones,
-}) => LocalPreferences(
-  theme: theme ?? b.theme, navigation: navigation ?? b.navigation, seriesSort: seriesSort ?? b.seriesSort,
-  chooseUserOnStartup: chooseUserOnStartup ?? b.chooseUserOnStartup,
-  onboardingDismissed: onboardingDismissed ?? b.onboardingDismissed,
-  autoSwitchServerAddress: autoSwitchServerAddress ?? b.autoSwitchServerAddress,
-  serverAddresses: serverAddresses ?? b.serverAddresses,
-  backgroundVideo: backgroundVideo ?? b.backgroundVideo,
-  backgroundVideoDelay: backgroundVideoDelay ?? b.backgroundVideoDelay,
-  detailTrailerDelay: identical(detailTrailerDelay, _keepField) ? b.detailTrailerDelay : detailTrailerDelay as Duration?,
-  themeMusic: themeMusic ?? b.themeMusic, themeVolume: themeVolume ?? b.themeVolume, quickLook: quickLook ?? b.quickLook,
-  hideUnwatchedOverview: hideUnwatchedOverview ?? b.hideUnwatchedOverview, preResolve115: preResolve115 ?? b.preResolve115,
-  readAheadBytes: readAheadBytes ?? b.readAheadBytes, autoPlayNext: autoPlayNext ?? b.autoPlayNext,
-  anime4kForAnime: anime4kForAnime ?? b.anime4kForAnime, anime4kForOther: anime4kForOther ?? b.anime4kForOther,
-  subtitleLanguages: subtitleLanguages ?? b.subtitleLanguages,
-  autoSelectChineseSubtitle: autoSelectChineseSubtitle ?? b.autoSelectChineseSubtitle,
-  subtitleSources: subtitleSources ?? b.subtitleSources,
-  translationBaseUrl: translationBaseUrl ?? b.translationBaseUrl, translationModel: translationModel ?? b.translationModel,
-  monthlyBudgetMicros: monthlyBudgetMicros ?? b.monthlyBudgetMicros, mediaFolder: mediaFolder ?? b.mediaFolder, zones: zones ?? b.zones,
-);
 
 String evTechFilterLabel(TechFilter tech) => switch (tech) {
   TechFilter.uhd4k => '4K', TechFilter.dolbyVision => '杜比视界', TechFilter.hdr => 'HDR', TechFilter.surround51 => '5.1',

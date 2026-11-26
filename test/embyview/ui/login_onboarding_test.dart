@@ -11,7 +11,6 @@ import 'package:moonfin/embyview/prefs/machine_preferences.dart';
 import 'package:moonfin/embyview/subtitles/ai/local_subtitle_asr.dart';
 import 'package:moonfin/embyview/ui/home/ev_home_page.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
-import 'package:moonfin/embyview/ui/settings/ev_settings_widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 Widget _wrap(ThemeMode mode, Widget child, {bool disableAnimations = true}) {
@@ -53,8 +52,7 @@ class _FakePrefs implements EmbyViewPreferences {
   @override
   Future<bool> authorizeMediaFolder({required String embyRoot}) async {
     authorizeCalls.add(embyRoot);
-    _current = evCopyPreferences(
-      _current,
+    _current = _current.copyWith(
       mediaFolder: MediaFolderStatus(
         state: MediaFolderState.authorized,
         embyRoot: embyRoot,
@@ -788,7 +786,7 @@ void main() {
         '$embyViewHomePath/users',
       );
       await prefsTrue.update(
-        evCopyPreferences(prefsTrue.current, chooseUserOnStartup: false),
+        prefsTrue.current.copyWith(chooseUserOnStartup: false),
       );
       expect(
         resolveEmbyViewColdStartRoute(
@@ -897,5 +895,223 @@ void main() {
         }
       },
     );
+
+    testWidgets('pass step prefilled with initialPassword collapses selection to end without selecting all text', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        _wrap(
+          ThemeMode.cinema,
+          EvLoginPage(
+            initialStep: EvLoginStep.pass,
+            initialServer: EvLoginDemoData.server,
+            initialUsers: EvLoginDemoData.users,
+            initialSelectedUser: EvLoginDemoData.users.first,
+            initialPassword: 'demo-password',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final editable = tester.widget<EditableText>(
+        find.byKey(const Key('ev_login_password_input')),
+      );
+      expect(editable.controller.text, 'demo-password');
+      expect(editable.controller.selection.isCollapsed, isTrue);
+      expect(editable.controller.selection.baseOffset, 'demo-password'.length);
+    });
+
+    testWidgets('cold start /embyview/users switches to another user and navigates to /embyview, and preserves password form on auth failure', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const alice = AccountProfile(id: 'srv/alice', displayName: 'Alice', serverId: 'srv');
+      const bob = AccountProfile(id: 'srv/bob', displayName: 'Bob', serverId: 'srv');
+      final prefs = _FakePrefs(const LocalPreferences(onboardingDismissed: true));
+      var failBobWithoutPassword = true;
+      var seq = 1;
+      Completer<void>? switchGate;
+      late _SwitchableAccounts accounts;
+      accounts = _SwitchableAccounts(
+        const AccountSnapshot(
+          phase: AccountPhase.signedIn,
+          current: alice,
+          profiles: [alice, bob],
+          serverName: '家里的 Emby',
+          serverAddress: 'http://nas.local:8096',
+          sessionId: 'sess-alice-1',
+        ),
+        onSwitchTo: (profileId, {password}) async {
+          accounts.emit(
+            const AccountSnapshot(
+              phase: AccountPhase.switching,
+              profiles: [alice, bob],
+              serverName: '家里的 Emby',
+              serverAddress: 'http://nas.local:8096',
+            ),
+          );
+          if (switchGate != null) {
+            await switchGate.future;
+          }
+          if (profileId == bob.id && failBobWithoutPassword && password != 'ok-pass') {
+            const failure = EmbyViewFailure(
+              '登录失败，请检查用户名、密码和服务器权限。',
+              code: 'sign_in_failed',
+            );
+            accounts.emit(
+              AccountSnapshot(
+                phase: AccountPhase.signedIn,
+                current: alice,
+                profiles: const [alice, bob],
+                serverName: '家里的 Emby',
+                serverAddress: 'http://nas.local:8096',
+                sessionId: 'sess-alice-${++seq}',
+                failure: failure,
+              ),
+            );
+            throw failure;
+          }
+          final target = profileId == bob.id ? bob : alice;
+          accounts.emit(
+            AccountSnapshot(
+              phase: AccountPhase.signedIn,
+              current: target,
+              profiles: const [alice, bob],
+              serverName: '家里的 Emby',
+              serverAddress: 'http://nas.local:8096',
+              sessionId: 'sess-${target.id}-${++seq}',
+            ),
+          );
+        },
+      );
+
+      final entry = EmbyViewEntry(
+        preferences: prefs,
+        accounts: accounts,
+        createSession: (account) => EmbyViewSessionServices(
+          data: _FakeData(),
+          playback: _FakePlayback(),
+          immersion: _FakeImmersion(),
+          dispose: () async {},
+        ),
+      );
+      await entry.ready;
+      installEmbyViewEntry(entry);
+
+      final router = GoRouter(
+        initialLocation: '$embyViewHomePath/users',
+        routes: buildEmbyViewRoutes(
+          legacyHome: (_) => const SizedBox.shrink(),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MediaQuery(
+          data: const MediaQueryData(size: Size(1440, 900), disableAnimations: true),
+          child: WidgetsApp.router(
+            color: const Color(0xFF09090B),
+            routerConfig: router,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      try {
+        expect(find.byKey(const Key('ev_users_page')), findsOneWidget);
+
+        // 1. Wrong/missing password keeps EvUsersPage mounted during switching,
+        //    stays on /embyview/users, and shows password form + error.
+        switchGate = Completer<void>();
+        await tester.tap(find.byKey(const Key('ev_users_profile_srv/bob')));
+        await tester.pump();
+        expect(accounts.snapshot.phase, AccountPhase.switching);
+        expect(find.byKey(const Key('ev_users_page')), findsOneWidget);
+
+        switchGate.complete();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(router.routerDelegate.currentConfiguration.uri.path, '$embyViewHomePath/users');
+        expect(find.byKey(const Key('ev_users_password_form')), findsOneWidget);
+        expect(find.byKey(const Key('ev_users_error')), findsOneWidget);
+
+        // 2. Submitting valid password stays mounted during switching and navigates to /embyview home.
+        failBobWithoutPassword = false;
+        switchGate = Completer<void>();
+        await tester.enterText(find.byKey(const Key('ev_users_password_field')), 'ok-pass');
+        await tester.tap(find.byKey(const Key('ev_users_form_submit_btn')));
+        await tester.pump();
+        expect(accounts.snapshot.phase, AccountPhase.switching);
+        expect(find.byKey(const Key('ev_users_page')), findsOneWidget);
+
+        switchGate.complete();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(router.routerDelegate.currentConfiguration.uri.path, embyViewHomePath);
+        expect(find.byType(EvHomePage), findsOneWidget);
+        expect(accounts.snapshot.current?.id, bob.id);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        router.dispose();
+        installEmbyViewEntry(null);
+        var closed = false;
+        unawaited(entry.close().whenComplete(() => closed = true));
+        await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+        await tester.pump();
+        expect(closed, isTrue);
+        entry.dispose();
+        await tester.runAsync(() async {
+          await accounts.close();
+          await prefs.close();
+        });
+      }
+    });
   });
+}
+
+class _SwitchableAccounts implements EmbyViewAccounts {
+  _SwitchableAccounts(this._snapshot, {required this.onSwitchTo});
+
+  AccountSnapshot _snapshot;
+  final Future<void> Function(String profileId, {String? password}) onSwitchTo;
+  final _changes = StreamController<AccountSnapshot>.broadcast(sync: true);
+  final _notices = StreamController<ConnectionNoticeEvent>.broadcast();
+
+  void emit(AccountSnapshot next) {
+    _snapshot = next;
+    _changes.add(next);
+  }
+
+  @override
+  AccountSnapshot get snapshot => _snapshot;
+
+  @override
+  Stream<AccountSnapshot> get changes => _changes.stream;
+
+  @override
+  Stream<ConnectionNoticeEvent> get connectionNotices => _notices.stream;
+
+  @override
+  Future<void> switchTo(String profileId, {String? password}) =>
+      onSwitchTo(profileId, password: password);
+
+  @override
+  Future<Uri?> probeAndFailover({Duration timeout = const Duration(seconds: 5)}) async => null;
+
+  @override
+  Future<void> retryConnection() async {}
+
+  Future<void> close() async {
+    await _changes.close();
+    await _notices.close();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

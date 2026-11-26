@@ -75,7 +75,7 @@ class PlaybackThumbnails {
       Uri.parse(url),
       headers,
       tile.sourceRect,
-      '$scope:$item:$_source:${tile.imageIndex}:${tile.sourceRect}',
+      '${client.baseUrl}:$scope:$item:$_source:${tile.imageIndex}:${tile.sourceRect}',
     );
     return ThumbnailFrame(
       image: _ThumbnailArtwork(image, info.width, info.height),

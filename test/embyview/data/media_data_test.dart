@@ -855,4 +855,32 @@ void main() {
     };
     expect((await f.data.customZoneFacets()).technologies.map((e) => e.value), TechFilter.values);
   });
+
+  test('switching server baseUrl on same session keeps EmbyMediaData working with new artwork/preview base URL', () async {
+    final f = Fixture();
+    addTearDown(f.dispose);
+    f.hook = (o) async => o.path.endsWith('/Items/b') ? f.items.firstWhere((e) => e['Id'] == 'b') : null;
+
+    final before = await f.data.detail('b');
+    final beforeImg = before.card.art.poster.layers.first.source.image as NetworkImage;
+    expect(beforeImg.url, startsWith('http://example.test/emby/'));
+
+    // Simulate multi-address failover to a backup address on the same server/user session.
+    f.client.baseUrl = 'https://backup.ts.net/emby';
+
+    final after = await f.data.detail('b');
+    final afterImg = after.card.art.poster.layers.first.source.image as NetworkImage;
+    expect(afterImg.url, startsWith('https://backup.ts.net/emby/'));
+    expect(after.card.art.poster.layers.first.source.cacheKey, contains('https://backup.ts.net/emby'));
+
+    final home = await f.data.home(seriesSort: ShelfSort.added);
+    expect(home.zones, isNotEmpty);
+
+    // Changing userId or accessToken still invalidates the session.
+    f.client.accessToken = 'other-token';
+    await expectLater(
+      f.data.detail('b'),
+      throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'session_changed')),
+    );
+  });
 }

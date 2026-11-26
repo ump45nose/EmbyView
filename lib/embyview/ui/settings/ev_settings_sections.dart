@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/widgets.dart' hide ConnectionState, Page;
 import 'package:moonfin/embyview/data/build_info.dart';
 import 'package:moonfin/embyview/data/diagnostics_exporter.dart';
@@ -421,7 +420,7 @@ class _EvAccountSettingsPaneState extends State<EvAccountSettingsPane> {
           '连不上时自动换下一个地址',
           '按上面的顺序试，可拖动调整；换地址时顶部提示一下',
           prefs.autoSwitchServerAddress,
-          (v) => widget.onUpdatePrefs(evCopyPreferences(prefs, autoSwitchServerAddress: v)),
+          (v) => widget.onUpdatePrefs(prefs.copyWith(autoSwitchServerAddress: v)),
         ),
       ]),
       EvSettingsGroup(title: '这台 Mac 上保存的账号', children: [
@@ -445,12 +444,12 @@ class _EvAccountSettingsPaneState extends State<EvAccountSettingsPane> {
                     selected: isCurrent,
                     label: p.displayName,
                     onTap: () => widget.onSwitchProfile(p.id),
-                    builder: (_, hovered, focused) => Row(children: [
+                    builder: (_, _, _) => Row(children: [
                       EvAvatarButton(profile: p, size: s.rem(2.5), colorIndex: i),
                       SizedBox(width: s.rem(1.0)),
                       Expanded(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
                         Text(p.displayName, maxLines: 1, overflow: TextOverflow.ellipsis,
-                          style: t.bodyStyle(s.font(1.0), fontWeight: FontWeight.w500, color: (hovered || focused) ? t.ink : t.ink)),
+                          style: t.bodyStyle(s.font(1.0), fontWeight: FontWeight.w500, color: t.ink)),
                         SizedBox(height: s.rem(0.25)),
                         Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis,
                           style: t.bodyStyle(s.font(0.875), color: t.ink3, height: 1.45)),
@@ -515,7 +514,7 @@ class _EvAccountSettingsPaneState extends State<EvAccountSettingsPane> {
           '打开时询问“谁在看”',
           '多人共用这台 Mac 时开启；关着就直接进上次的账号',
           prefs.chooseUserOnStartup,
-          (v) => widget.onUpdatePrefs(evCopyPreferences(prefs, chooseUserOnStartup: v)),
+          (v) => widget.onUpdatePrefs(prefs.copyWith(chooseUserOnStartup: v)),
         ),
       ]),
       EvSettingsGroup(children: [
@@ -595,7 +594,7 @@ class EvLookSettingsPane extends StatelessWidget {
       ]),
       EvSettingsGroup(title: '顶栏导航', children: [
         EvSettingsRow(title: '导航样式', subtitle: '图标：平时只显示图标，当前页展开名称，悬停显示提示',
-          trailing: EvSegmentedControl<NavigationStyle>(value: prefs.navigation, onChanged: (v) => onUpdatePrefs(evCopyPreferences(prefs, navigation: v)),
+          trailing: EvSegmentedControl<NavigationStyle>(value: prefs.navigation, onChanged: (v) => onUpdatePrefs(prefs.copyWith(navigation: v)),
             options: const [
               EvSegmentOption(key: Key('ev_nav_style_icon'), value: NavigationStyle.icon, label: '图标'),
               EvSegmentOption(key: Key('ev_nav_style_iconAndText'), value: NavigationStyle.iconAndText, label: '图标 + 文字'),
@@ -604,7 +603,7 @@ class EvLookSettingsPane extends StatelessWidget {
       ]),
       EvSettingsGroup(title: '首页', children: [
         EvSettingsRow(title: '番剧、剧集两排的顺序', subtitle: '默认最近添加，新番和新剧一入库就排在最前',
-          trailing: EvSegmentedControl<ShelfSort>(value: prefs.seriesSort, onChanged: (v) => onUpdatePrefs(evCopyPreferences(prefs, seriesSort: v)),
+          trailing: EvSegmentedControl<ShelfSort>(value: prefs.seriesSort, onChanged: (v) => onUpdatePrefs(prefs.copyWith(seriesSort: v)),
             options: const [
               EvSegmentOption(key: Key('ev_shelf_sort_added'), value: ShelfSort.added, label: '最近添加'),
               EvSegmentOption(key: Key('ev_shelf_sort_score'), value: ShelfSort.score, label: '评分最高'),
@@ -618,7 +617,7 @@ class EvLookSettingsPane extends StatelessWidget {
     final sel = prefs.theme == mode;
     return EvInteractive(
       key: Key('ev_theme_card_${mode.name}'), selected: sel, label: title,
-      onTap: () => onUpdatePrefs(evCopyPreferences(prefs, theme: mode)),
+      onTap: () => onUpdatePrefs(prefs.copyWith(theme: mode)),
       builder: (_, hovered, focused) => AnimatedSlide(
         offset: hovered ? const Offset(0, -0.015) : Offset.zero, duration: EvDurations.normal, curve: EvCurves.spring,
         child: Container(
@@ -744,10 +743,10 @@ class EvPlaySettingsPane extends StatelessWidget {
       evPaneTitle(t, s, '播放'),
       EvSettingsGroup(title: '起播', children: [
         _toggleRow('ev_toggle_preresolve115', '115 起播预解析', '提前用播放器同一 UA 取得跳转后的地址，目标 2 秒内出画面',
-          prefs.preResolve115, (v) => onUpdatePrefs(evCopyPreferences(prefs, preResolve115: v))),
+          prefs.preResolve115, (v) => onUpdatePrefs(prefs.copyWith(preResolve115: v))),
         EvSettingsRow(title: '预读缓存', subtitle: '拖动进度条后更快续上',
           trailing: EvSegmentedControl<int>(value: _nearest(prefs.readAheadBytes, const [_mb64, _mb256, _gb1]),
-            onChanged: (v) => onUpdatePrefs(evCopyPreferences(prefs, readAheadBytes: v)),
+            onChanged: (v) => onUpdatePrefs(prefs.copyWith(readAheadBytes: v)),
             options: const [
               EvSegmentOption(key: Key('ev_readahead_64mb'), value: _mb64, label: '64 MB'),
               EvSegmentOption(key: Key('ev_readahead_256mb'), value: _mb256, label: '256 MB'),
@@ -759,7 +758,7 @@ class EvPlaySettingsPane extends StatelessWidget {
         EvSettingsRow(title: '回传 Emby', subtitle: '播放进度与已看状态自动同步到所有设备', trailing: evValueText(t, s, '自动同步')),
         EvSettingsRow(title: '看完判定', subtitle: '播放到片尾字幕前标为已看', trailing: evValueText(t, s, '90%')),
         _toggleRow('ev_toggle_autoplay_next', '片尾自动下一集', '片尾时正片缩到角落，5 秒后播放下一集',
-          prefs.autoPlayNext, (v) => onUpdatePrefs(evCopyPreferences(prefs, autoPlayNext: v))),
+          prefs.autoPlayNext, (v) => onUpdatePrefs(prefs.copyWith(autoPlayNext: v))),
       ]),
     ]);
   }
@@ -778,22 +777,22 @@ class EvImmerseSettingsPane extends StatelessWidget {
       evPaneTitle(t, s, '沉浸'),
       EvSettingsGroup(title: '浏览', children: [
         _toggleRow('ev_toggle_bg_video', '停留后播放背景视频', '卡片选中停留后，背景淡入这部片的静音视频；没有视频时剧照慢速推拉',
-          prefs.backgroundVideo, (v) => onUpdatePrefs(evCopyPreferences(prefs, backgroundVideo: v))),
+          prefs.backgroundVideo, (v) => onUpdatePrefs(prefs.copyWith(backgroundVideo: v))),
         EvSettingsRow(title: '停留时长',
           trailing: EvSegmentedControl<int>(value: _nearest(prefs.backgroundVideoDelay.inMilliseconds, const [1000, 1700, 2000]),
-            onChanged: (ms) => onUpdatePrefs(evCopyPreferences(prefs, backgroundVideoDelay: Duration(milliseconds: ms))),
+            onChanged: (ms) => onUpdatePrefs(prefs.copyWith(backgroundVideoDelay: Duration(milliseconds: ms))),
             options: const [
               EvSegmentOption(key: Key('ev_bg_delay_1000'), value: 1000, label: '1 秒'),
               EvSegmentOption(key: Key('ev_bg_delay_1700'), value: 1700, label: '1.7 秒'),
               EvSegmentOption(key: Key('ev_bg_delay_2000'), value: 2000, label: '2 秒'),
             ])),
         _toggleRow('ev_toggle_quicklook', '空格一瞥', '选中卡片按空格，弹出片段、画质与字幕情况',
-          prefs.quickLook, (v) => onUpdatePrefs(evCopyPreferences(prefs, quickLook: v))),
+          prefs.quickLook, (v) => onUpdatePrefs(prefs.copyWith(quickLook: v))),
       ]),
       EvSettingsGroup(title: '详情页', children: [
         EvSettingsRow(title: '停留后转入预告', subtitle: '详情页停留这么久，剧照换成静音预告片；没有预告的剧集改为播放一段正片',
           trailing: EvSegmentedControl<int>(value: (trailer == null || trailer <= Duration.zero) ? 0 : _nearest(trailer.inSeconds, const [8, 12, 20]),
-            onChanged: (sec) => onUpdatePrefs(evCopyPreferences(prefs, detailTrailerDelay: sec == 0 ? null : Duration(seconds: sec))),
+            onChanged: (sec) => onUpdatePrefs(prefs.copyWith(detailTrailerDelay: sec == 0 ? null : Duration(seconds: sec))),
             options: const [
               EvSegmentOption(key: Key('ev_trailer_delay_0'), value: 0, label: '关闭'),
               EvSegmentOption(key: Key('ev_trailer_delay_8'), value: 8, label: '8 秒'),
@@ -801,17 +800,17 @@ class EvImmerseSettingsPane extends StatelessWidget {
               EvSegmentOption(key: Key('ev_trailer_delay_20'), value: 20, label: '20 秒'),
             ])),
         _toggleRow('ev_toggle_theme_music', '主题曲', '进入详情页淡入主题曲，离开淡出',
-          prefs.themeMusic, (v) => onUpdatePrefs(evCopyPreferences(prefs, themeMusic: v))),
+          prefs.themeMusic, (v) => onUpdatePrefs(prefs.copyWith(themeMusic: v))),
         EvSettingsRow(title: '主题曲音量',
           trailing: EvSegmentedControl<double>(value: _nearest(prefs.themeVolume, const [0.2, 0.35, 0.6]),
-            onChanged: (v) => onUpdatePrefs(evCopyPreferences(prefs, themeVolume: v)),
+            onChanged: (v) => onUpdatePrefs(prefs.copyWith(themeVolume: v)),
             options: const [
               EvSegmentOption(key: Key('ev_theme_vol_low'), value: 0.2, label: '低'),
               EvSegmentOption(key: Key('ev_theme_vol_mid'), value: 0.35, label: '中'),
               EvSegmentOption(key: Key('ev_theme_vol_high'), value: 0.6, label: '高'),
             ])),
         _toggleRow('ev_toggle_hide_overview', '未看剧集隐藏简介', '防剧透：停留在集卡上才展开',
-          prefs.hideUnwatchedOverview, (v) => onUpdatePrefs(evCopyPreferences(prefs, hideUnwatchedOverview: v))),
+          prefs.hideUnwatchedOverview, (v) => onUpdatePrefs(prefs.copyWith(hideUnwatchedOverview: v))),
       ]),
     ]);
   }
@@ -869,14 +868,14 @@ class _EvSubtitlesSettingsPaneState extends State<EvSubtitlesSettingsPane> {
       EvSettingsGroup(title: '偏好', children: [
         EvSettingsRow(title: '首选语言', trailing: evValueText(t, s, langs)),
         _toggleRow('ev_toggle_auto_zh_sub', '自动选择', '有中文字幕时自动打开',
-          prefs.autoSelectChineseSubtitle, (v) => widget.onUpdatePrefs(evCopyPreferences(prefs, autoSelectChineseSubtitle: v))),
+          prefs.autoSelectChineseSubtitle, (v) => widget.onUpdatePrefs(prefs.copyWith(autoSelectChineseSubtitle: v))),
       ]),
       EvSettingsGroup(title: '在线检索来源', children: [
         for (final (src, title, sub) in sources)
           _toggleRow('ev_toggle_sub_${src.name}', title, sub, prefs.subtitleSources.contains(src), (v) {
             final next = {...prefs.subtitleSources};
             v ? next.add(src) : next.remove(src);
-            widget.onUpdatePrefs(evCopyPreferences(prefs, subtitleSources: Set.unmodifiable(next)));
+            widget.onUpdatePrefs(prefs.copyWith(subtitleSources: Set.unmodifiable(next)));
           }),
       ]),
       EvSettingsGroup(title: '保存位置', children: [
@@ -951,7 +950,7 @@ class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
       _modelError = model.isEmpty ? '请输入翻译模型名称' : null;
     });
     if (valid && model.isNotEmpty) {
-      widget.onUpdatePrefs(evCopyPreferences(widget.prefs, translationBaseUrl: address, translationModel: model));
+      widget.onUpdatePrefs(widget.prefs.copyWith(translationBaseUrl: address, translationModel: model));
     }
   }
 
@@ -959,7 +958,7 @@ class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
     final v = double.tryParse(_budgetCtrl.text.trim().replaceFirst(RegExp(r'^\$'), ''));
     if (v == null || v < 0 || v > 1000000) { setState(() => _budgetError = '请输入有效的美元金额'); return; }
     setState(() => _budgetError = null);
-    widget.onUpdatePrefs(evCopyPreferences(widget.prefs, monthlyBudgetMicros: (v * 1000000).round()));
+    widget.onUpdatePrefs(widget.prefs.copyWith(monthlyBudgetMicros: (v * 1000000).round()));
   }
 
   @override
@@ -999,7 +998,7 @@ class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
           trailing: EvSegmentedControl<int>(
             value: _presets.contains(prefs.monthlyBudgetMicros) ? prefs.monthlyBudgetMicros : null,
             options: [for (final p in _presets) EvSegmentOption(key: Key('ev_ai_budget_${p ~/ 1000000}'), value: p, label: evFormatMicros(p, trimZeroCents: true))],
-            onChanged: (v) { setState(() => _budgetError = null); widget.onUpdatePrefs(evCopyPreferences(prefs, monthlyBudgetMicros: v)); },
+            onChanged: (v) { setState(() => _budgetError = null); widget.onUpdatePrefs(prefs.copyWith(monthlyBudgetMicros: v)); },
           )),
         EvSettingsRow(title: '自定义金额（美元）', subtitle: _budgetError, subtitleColor: _budgetError != null ? evDangerColor : null,
           trailing: SizedBox(width: s.rem(13.0), child: Row(children: [
@@ -1163,7 +1162,7 @@ class EvVideoSettingsPane extends StatelessWidget {
       evPaneTitle(t, s, '画面增强'),
       EvSettingsGroup(title: 'Anime4K', children: [
         _toggleRow('ev_toggle_anime4k_anime', '番剧库自动开启', '仅 Mac；1080p 放大到 4K 输出',
-          prefs.anime4kForAnime, (v) => onUpdatePrefs(evCopyPreferences(prefs, anime4kForAnime: v))),
+          prefs.anime4kForAnime, (v) => onUpdatePrefs(prefs.copyWith(anime4kForAnime: v))),
         EvSettingsRow(title: '档位', subtitle: 'M1 Pro 实测轻量档每帧 9 ms，更高档位会掉帧',
           trailing: EvSegmentedControl<String>(value: 'lite', onChanged: (_) {}, options: const [
             EvSegmentOption(value: 'lite', label: '轻量'),
@@ -1171,7 +1170,7 @@ class EvVideoSettingsPane extends StatelessWidget {
             EvSegmentOption(value: 'high', label: '高', enabled: false),
           ])),
         _toggleRow('ev_toggle_anime4k_other', '其他片库', '真人影像不建议开启',
-          prefs.anime4kForOther, (v) => onUpdatePrefs(evCopyPreferences(prefs, anime4kForOther: v))),
+          prefs.anime4kForOther, (v) => onUpdatePrefs(prefs.copyWith(anime4kForOther: v))),
       ]),
     ]);
   }
@@ -1421,19 +1420,10 @@ class _EvAboutSettingsPaneState extends State<EvAboutSettingsPane> {
       if (widget.onExportDiagnostics != null) {
         result = await widget.onExportDiagnostics!();
       } else {
-        final ts = DateTime.now().toIso8601String().replaceAll(':', '').split('.').first;
-        final path = await FilePicker.saveFile(
-          dialogTitle: '导出诊断日志',
-          fileName: 'EmbyView-diagnostics-$ts.log',
-          type: FileType.custom,
-          allowedExtensions: const ['log', 'txt'],
+        result = await evExportDiagnosticsViaDialog(
+          exporter: widget.diagnosticsExporter,
+          buildInfo: widget.buildInfo,
         );
-        if (path != null && path.isNotEmpty) {
-          result = await widget.diagnosticsExporter.exportSanitizedBundle(
-            destinationPath: path,
-            buildInfo: widget.buildInfo,
-          );
-        }
       }
       if (!mounted) return;
       if (result != null) {

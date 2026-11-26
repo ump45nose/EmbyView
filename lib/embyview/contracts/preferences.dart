@@ -49,6 +49,8 @@ class MediaFolderStatus {
   final String? reason;
 }
 
+const Object _keepPreferenceField = Object();
+
 class LocalPreferences {
   const LocalPreferences({
     this.theme = ThemeMode.cinema,
@@ -116,6 +118,69 @@ class LocalPreferences {
   final int monthlyBudgetMicros;
   final MediaFolderStatus mediaFolder;
   final List<ZonePreference> zones;
+
+  LocalPreferences copyWith({
+    ThemeMode? theme,
+    NavigationStyle? navigation,
+    ShelfSort? seriesSort,
+    bool? chooseUserOnStartup,
+    bool? onboardingDismissed,
+    bool? autoSwitchServerAddress,
+    Map<String, List<ServerAddressEntry>>? serverAddresses,
+    bool? backgroundVideo,
+    Duration? backgroundVideoDelay,
+    Object? detailTrailerDelay = _keepPreferenceField,
+    bool? themeMusic,
+    double? themeVolume,
+    bool? quickLook,
+    bool? hideUnwatchedOverview,
+    bool? preResolve115,
+    int? readAheadBytes,
+    bool? autoPlayNext,
+    bool? anime4kForAnime,
+    bool? anime4kForOther,
+    List<String>? subtitleLanguages,
+    bool? autoSelectChineseSubtitle,
+    Set<SubtitleSource>? subtitleSources,
+    String? translationBaseUrl,
+    String? translationModel,
+    int? monthlyBudgetMicros,
+    MediaFolderStatus? mediaFolder,
+    List<ZonePreference>? zones,
+  }) => LocalPreferences(
+    theme: theme ?? this.theme,
+    navigation: navigation ?? this.navigation,
+    seriesSort: seriesSort ?? this.seriesSort,
+    chooseUserOnStartup: chooseUserOnStartup ?? this.chooseUserOnStartup,
+    onboardingDismissed: onboardingDismissed ?? this.onboardingDismissed,
+    autoSwitchServerAddress:
+        autoSwitchServerAddress ?? this.autoSwitchServerAddress,
+    serverAddresses: serverAddresses ?? this.serverAddresses,
+    backgroundVideo: backgroundVideo ?? this.backgroundVideo,
+    backgroundVideoDelay: backgroundVideoDelay ?? this.backgroundVideoDelay,
+    detailTrailerDelay: identical(detailTrailerDelay, _keepPreferenceField)
+        ? this.detailTrailerDelay
+        : detailTrailerDelay as Duration?,
+    themeMusic: themeMusic ?? this.themeMusic,
+    themeVolume: themeVolume ?? this.themeVolume,
+    quickLook: quickLook ?? this.quickLook,
+    hideUnwatchedOverview:
+        hideUnwatchedOverview ?? this.hideUnwatchedOverview,
+    preResolve115: preResolve115 ?? this.preResolve115,
+    readAheadBytes: readAheadBytes ?? this.readAheadBytes,
+    autoPlayNext: autoPlayNext ?? this.autoPlayNext,
+    anime4kForAnime: anime4kForAnime ?? this.anime4kForAnime,
+    anime4kForOther: anime4kForOther ?? this.anime4kForOther,
+    subtitleLanguages: subtitleLanguages ?? this.subtitleLanguages,
+    autoSelectChineseSubtitle:
+        autoSelectChineseSubtitle ?? this.autoSelectChineseSubtitle,
+    subtitleSources: subtitleSources ?? this.subtitleSources,
+    translationBaseUrl: translationBaseUrl ?? this.translationBaseUrl,
+    translationModel: translationModel ?? this.translationModel,
+    monthlyBudgetMicros: monthlyBudgetMicros ?? this.monthlyBudgetMicros,
+    mediaFolder: mediaFolder ?? this.mediaFolder,
+    zones: zones ?? this.zones,
+  );
 }
 
 abstract interface class EmbyViewPreferences {

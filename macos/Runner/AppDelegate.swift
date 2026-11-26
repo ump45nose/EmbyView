@@ -4,6 +4,32 @@ import FlutterMacOS
 @main
 class AppDelegate: FlutterAppDelegate {
   private var menuChannel: FlutterMethodChannel?
+  private var appearanceObservation: NSKeyValueObservation?
+
+  override func applicationDidFinishLaunching(_ notification: Notification) {
+    super.applicationDidFinishLaunching(notification)
+    updateDockIconForAppearance()
+    appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+      DispatchQueue.main.async {
+        self?.updateDockIconForAppearance()
+      }
+    }
+  }
+
+  override func applicationWillTerminate(_ notification: Notification) {
+    appearanceObservation?.invalidate()
+    appearanceObservation = nil
+    super.applicationWillTerminate(notification)
+  }
+
+  private func updateDockIconForAppearance() {
+    let match = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+    if match == .darkAqua, let darkIcon = NSImage(named: NSImage.Name("AppIconDarkDock")) {
+      NSApp.applicationIconImage = darkIcon
+    } else {
+      NSApp.applicationIconImage = nil
+    }
+  }
 
   func bindMenuChannel(_ channel: FlutterMethodChannel) {
     menuChannel = channel

@@ -304,13 +304,13 @@ class _EvCommandPaletteOverlayState extends State<EvCommandPaletteOverlay>
     return [
       cmd('cmd_theme', theme.isPaper ? '换成影院主题' : '换成纸面主题', EvIcons.palette, hint: '外观',
         kw: '换主题 主题 外观 影院 纸面 zhuti huanzhuti zt yingyuan zhimian theme paper cinema',
-        _closeThen(() { if (scope != null) unawaited(scope.services.preferences.update(_copyPreferences(scope.services.preferences.current, theme: nextTheme))); })),
+        _closeThen(() { if (scope != null) unawaited(scope.services.preferences.update(scope.services.preferences.current.copyWith(theme: nextTheme))); })),
       cmd('cmd_add_zone', '添加分区', EvIcons.zones, hint: '分区',
         kw: '添加分区 分区 管理 tianjiafenqu fenqu tjfq fq zone add',
         _closeThen(widget.onAddZone ?? scope?.shell.onManageZones)),
       cmd('cmd_nav', '导航样式改为「${_navLabel(nextNav)}」', EvIcons.grid, hint: '外观',
         kw: '导航样式 顶栏 导航 外观 图标 文字 daohangyangshi daohang dhys dh nav',
-        _closeThen(() { if (scope != null) unawaited(scope.services.preferences.update(_copyPreferences(scope.services.preferences.current, navigation: nextNav))); })),
+        _closeThen(() { if (scope != null) unawaited(scope.services.preferences.update(scope.services.preferences.current.copyWith(navigation: nextNav))); })),
       cmd('cmd_search', '搜索片库', EvIcons.search, hint: '⌘ F',
         kw: '搜索片库 搜索 找片 sousuo ss search', _closeThen(widget.onOpenSearch ?? scope?.shell.onOpenSearch)),
       cmd('cmd_settings', '打开设置', EvIcons.gear, hint: '⌘ ,',
@@ -553,16 +553,3 @@ String? _formatMovieSubtitle(MediaCard card, String? groupName) {
   });
   return [if (card.year != null) '${card.year}', kind].join(' · ');
 }
-
-LocalPreferences _copyPreferences(LocalPreferences b, {ThemeMode? theme, NavigationStyle? navigation}) => LocalPreferences(
-  theme: theme ?? b.theme, navigation: navigation ?? b.navigation, seriesSort: b.seriesSort,
-  chooseUserOnStartup: b.chooseUserOnStartup, onboardingDismissed: b.onboardingDismissed,
-  autoSwitchServerAddress: b.autoSwitchServerAddress, serverAddresses: b.serverAddresses,
-  backgroundVideo: b.backgroundVideo, backgroundVideoDelay: b.backgroundVideoDelay,
-  detailTrailerDelay: b.detailTrailerDelay, themeMusic: b.themeMusic, themeVolume: b.themeVolume, quickLook: b.quickLook,
-  hideUnwatchedOverview: b.hideUnwatchedOverview, preResolve115: b.preResolve115, readAheadBytes: b.readAheadBytes,
-  autoPlayNext: b.autoPlayNext, anime4kForAnime: b.anime4kForAnime, anime4kForOther: b.anime4kForOther,
-  subtitleLanguages: b.subtitleLanguages, autoSelectChineseSubtitle: b.autoSelectChineseSubtitle,
-  subtitleSources: b.subtitleSources, translationBaseUrl: b.translationBaseUrl, translationModel: b.translationModel,
-  monthlyBudgetMicros: b.monthlyBudgetMicros, mediaFolder: b.mediaFolder, zones: b.zones,
-);

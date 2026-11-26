@@ -35,6 +35,9 @@ class EvSplashPage extends StatefulWidget {
 class _EvSplashPageState extends State<EvSplashPage>
     with TickerProviderStateMixin {
   late final AnimationController _enterCtrl;
+  late final CurvedAnimation _iconAnim;
+  late final CurvedAnimation _wordmarkAnim;
+  late final CurvedAnimation _footerAnim;
   AnimationController? _barCtrl;
 
   String get _effectiveStatus {
@@ -51,6 +54,18 @@ class _EvSplashPageState extends State<EvSplashPage>
     _enterCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1100),
+    );
+    _iconAnim = CurvedAnimation(
+      parent: _enterCtrl,
+      curve: const Interval(0.0, 0.82, curve: EvCurves.spring),
+    );
+    _wordmarkAnim = CurvedAnimation(
+      parent: _enterCtrl,
+      curve: const Interval(0.14, 0.86, curve: EvCurves.out),
+    );
+    _footerAnim = CurvedAnimation(
+      parent: _enterCtrl,
+      curve: const Interval(0.27, 1.0, curve: EvCurves.out),
     );
   }
 
@@ -78,6 +93,9 @@ class _EvSplashPageState extends State<EvSplashPage>
 
   @override
   void dispose() {
+    _iconAnim.dispose();
+    _wordmarkAnim.dispose();
+    _footerAnim.dispose();
     _enterCtrl.dispose();
     _barCtrl?.dispose();
     super.dispose();
@@ -88,19 +106,6 @@ class _EvSplashPageState extends State<EvSplashPage>
     final t = EvTheme.of(context);
     final s = EvScale.of(context);
 
-    final iconAnim = CurvedAnimation(
-      parent: _enterCtrl,
-      curve: const Interval(0.0, 0.82, curve: EvCurves.spring),
-    );
-    final wordmarkAnim = CurvedAnimation(
-      parent: _enterCtrl,
-      curve: const Interval(0.14, 0.86, curve: EvCurves.out),
-    );
-    final footerAnim = CurvedAnimation(
-      parent: _enterCtrl,
-      curve: const Interval(0.27, 1.0, curve: EvCurves.out),
-    );
-
     final barWidth = s.rem(10.0);
 
     return EvBrandBackground(
@@ -109,11 +114,11 @@ class _EvSplashPageState extends State<EvSplashPage>
           mainAxisSize: MainAxisSize.min,
           children: [
             AnimatedBuilder(
-              animation: iconAnim,
+              animation: _iconAnim,
               builder: (_, child) => Opacity(
-                opacity: iconAnim.value.clamp(0.0, 1.0),
+                opacity: _iconAnim.value.clamp(0.0, 1.0),
                 child: Transform.scale(
-                  scale: 0.8 + 0.2 * iconAnim.value,
+                  scale: 0.8 + 0.2 * _iconAnim.value,
                   child: child,
                 ),
               ),
@@ -125,7 +130,7 @@ class _EvSplashPageState extends State<EvSplashPage>
             ),
             SizedBox(height: s.rem(1.0)),
             _RiseTransition(
-              animation: wordmarkAnim,
+              animation: _wordmarkAnim,
               offsetY: s.rem(0.75),
               child: Text(
                 'EmbyView',
@@ -135,7 +140,7 @@ class _EvSplashPageState extends State<EvSplashPage>
             ),
             SizedBox(height: s.rem(2.0)),
             _RiseTransition(
-              animation: footerAnim,
+              animation: _footerAnim,
               offsetY: s.rem(0.75),
               child: Container(
                 key: const Key('ev_splash_progress'),
@@ -184,7 +189,7 @@ class _EvSplashPageState extends State<EvSplashPage>
             ),
             SizedBox(height: s.rem(1.0)),
             _RiseTransition(
-              animation: footerAnim,
+              animation: _footerAnim,
               offsetY: s.rem(0.75),
               child: Text(
                 _effectiveStatus,

@@ -84,6 +84,15 @@ class _FakeAccounts implements EmbyViewAccounts {
   @override
   Stream<AccountSnapshot> get changes => _changes.stream;
 
+  @override
+  Stream<ConnectionNoticeEvent> get connectionNotices => const Stream.empty();
+
+  @override
+  Future<Uri?> probeAndFailover({Duration timeout = const Duration(seconds: 5)}) async => null;
+
+  @override
+  Future<void> retryConnection() async {}
+
   Future<void> close() => _changes.close();
 
   @override

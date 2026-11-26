@@ -22,16 +22,21 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
   EmbyViewStreamResolver({
     required this.delegate,
     required this.cache,
-    required this.server,
+    String? server,
+    String Function()? serverUrl,
     required this.user,
     required this.userAgent,
     this.prefetchEnabled = true,
     this.onResolved,
     this.onError,
-  });
+  }) : assert(server != null || serverUrl != null, 'Either server or serverUrl is required.'),
+       _fixedServer = server,
+       _serverUrl = serverUrl;
   final MediaStreamResolver delegate;
   final PlaybackRedirectCache cache;
-  final String server;
+  final String? _fixedServer;
+  final String Function()? _serverUrl;
+  String get server => _serverUrl?.call() ?? _fixedServer!;
   final String user;
   final String userAgent;
   bool prefetchEnabled;
@@ -71,8 +76,9 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
       enableTranscoding: enableTranscoding,
     );
     final infoTime = watch.elapsed;
+    final currentServer = server;
     final source = Uri.parse(result.streamUrl);
-    final serverUri = Uri.parse(server);
+    final serverUri = Uri.parse(currentServer);
     final remote =
         result.playMethod == StreamPlayMethod.directPlay &&
         !result.isLocalMedia &&
@@ -83,7 +89,7 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
     PlaybackSourceKey? key;
     if (remote) {
       key = PlaybackSourceKey(
-        server: server,
+        server: currentServer,
         user: user,
         item: MediaStreamResolver.extractItemId(mediaItem),
         mediaSource: result.mediaSourceId,

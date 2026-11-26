@@ -52,10 +52,24 @@ List<String> embySubtitleQualifiers(Json stream) {
 }
 
 class MediaMapper {
-  MediaMapper({required this.server, required this.user, required this.token});
-  final String server;
+  MediaMapper({
+    String? server,
+    String Function()? serverUrl,
+    String? serverId,
+    required this.user,
+    required this.token,
+  }) : assert(server != null || serverUrl != null, 'Either server or serverUrl is required.'),
+       _fixedServer = server,
+       _serverUrl = serverUrl,
+       _serverId = serverId;
+
+  final String? _fixedServer;
+  final String Function()? _serverUrl;
+  final String? _serverId;
   final String user;
   final String token;
+
+  String get server => _serverUrl?.call() ?? _fixedServer!;
   String get scope => '$server|$user';
 
   ArtworkRef? image(Json item, String type, {int index = 0}) {
@@ -63,10 +77,11 @@ class MediaMapper {
     final backdrops = item['BackdropImageTags'] as List? ?? const [];
     final tag = type == 'Backdrop' ? (index < backdrops.length ? backdrops[index] : null) : tags[type];
     if (tag == null) return null;
+    final currentServer = server;
     final id = item['Id'].toString();
     final suffix = type == 'Backdrop' ? '/$index' : '';
     final uri =
-        Uri.parse('${server.replaceFirst(RegExp(r'/$'), '')}/Items/${Uri.encodeComponent(id)}/Images/$type$suffix')
+        Uri.parse('${currentServer.replaceFirst(RegExp(r'/$'), '')}/Items/${Uri.encodeComponent(id)}/Images/$type$suffix')
             .replace(
               queryParameters: {
                 'tag': tag.toString(),
@@ -76,7 +91,7 @@ class MediaMapper {
                 'UserId': user,
               },
             );
-    final key = '$scope|$id|$type|$index|$tag';
+    final key = '$currentServer|$user|$id|$type|$index|$tag';
     return AuthorizedArtworkRef(
       id: '$id:$type:$index',
       cacheKey: key,
@@ -147,7 +162,8 @@ class MediaMapper {
     );
   }
 
-  AggregatedItem aggregate(Json item) => AggregatedItem(id: item['Id'].toString(), serverId: server, rawData: item);
+  AggregatedItem aggregate(Json item) =>
+      AggregatedItem(id: item['Id'].toString(), serverId: _serverId ?? server, rawData: item);
 
   MediaQuality? quality(Json item) {
     final streams = records(records(item['MediaSources']).firstOrNull?['MediaStreams'] ?? item['MediaStreams']);

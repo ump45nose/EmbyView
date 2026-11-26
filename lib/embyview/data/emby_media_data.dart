@@ -18,25 +18,38 @@ import 'title_index.dart';
 class EmbyMediaData implements EmbyViewData {
   EmbyMediaData({
     required EmbyMediaServerClient client,
+    String? serverId,
+    String? Function()? activeServerId,
     List<ZonePreference> Function()? zonePreferences,
     Transliterate? transliterate,
     DateTime Function()? now,
     SharedPreferences? indexStorage,
   }) : _client = client,
+       _serverId = serverId,
+       _activeServerId = activeServerId,
        _user = client.userId,
-       _server = client.baseUrl,
+       _initialServer = client.baseUrl,
+       _lastBaseUrl = client.baseUrl,
        _token = client.accessToken,
        _zonePreferences = zonePreferences ?? (() => const []),
        _transliterate = transliterate ?? MacPinyin.transliterate,
        _now = now ?? DateTime.now,
        _providedStorage = indexStorage {
     _check();
-    _mapper = MediaMapper(server: _server, user: _user!, token: _token!);
+    _mapper = MediaMapper(
+      serverUrl: () => _client.baseUrl,
+      serverId: _serverId,
+      user: _user!,
+      token: _token!,
+    );
   }
 
   final EmbyMediaServerClient _client;
+  final String? _serverId;
+  final String? Function()? _activeServerId;
   final String? _user;
-  final String _server;
+  final String _initialServer;
+  String _lastBaseUrl;
   final String? _token;
   final List<ZonePreference> Function() _zonePreferences;
   final Transliterate _transliterate;
@@ -46,7 +59,8 @@ class EmbyMediaData implements EmbyViewData {
   Future<SharedPreferences> get _storage =>
       _storageLoad ??= _providedStorage == null ? SharedPreferences.getInstance() : Future.value(_providedStorage);
   Future<void>? _restoreLoad;
-  String get _cacheKey => "embyview.index.v1.${base64Url.encode(utf8.encode(jsonEncode([_server, _user])))}";
+  String get _cacheIdentity => _serverId ?? _initialServer;
+  String get _cacheKey => "embyview.index.v1.${base64Url.encode(utf8.encode(jsonEncode([_cacheIdentity, _user])))}";
   final CancelToken _cancel = CancelToken();
   late final MediaMapper _mapper;
   bool _disposed = false;
@@ -80,15 +94,28 @@ class EmbyMediaData implements EmbyViewData {
     _revision++;
   }
 
+  bool get _sessionMatches =>
+      !_disposed &&
+      _user != null &&
+      _token != null &&
+      _client.userId == _user &&
+      _client.accessToken == _token &&
+      (_serverId == null || _activeServerId == null || _activeServerId() == _serverId);
+
+  void _syncBaseUrlIfChanged() {
+    final current = _client.baseUrl;
+    if (current == _lastBaseUrl) return;
+    _lastBaseUrl = current;
+    _viewLoad = null;
+    _collectionArt.clear();
+    _collectionIndexReady = false;
+  }
+
   void _check() {
-    if (_disposed ||
-        _user == null ||
-        _token == null ||
-        _client.userId != _user ||
-        _client.baseUrl != _server ||
-        _client.accessToken != _token) {
+    if (!_sessionMatches) {
       throw const EmbyViewFailure('用户会话已改变，请重新打开页面', code: 'session_changed');
     }
+    _syncBaseUrlIfChanged();
   }
 
   Future<dynamic> _get(String resource, {String? id, Json params = const {}}) async {
@@ -224,7 +251,7 @@ class EmbyMediaData implements EmbyViewData {
   /// Playback uses only a visible library identity already known to browsing.
   /// Unknown ownership stays unknown; item type, genre and language are not evidence.
   bool? isAnimePlaybackItem(Map<String, dynamic> item) {
-    if (_disposed || _client.userId != _user || _client.baseUrl != _server || _client.accessToken != _token) {
+    if (!_sessionMatches) {
       return null;
     }
     final library =

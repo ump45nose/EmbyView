@@ -57,7 +57,7 @@ class DeepLinkService {
   /// link those ask for the PIN or the login rather than staying on the
   /// signed-in user.
   static String? routeForDeepLink(Uri uri) {
-    if (uri.scheme != 'moonfin') return null;
+    if (uri.scheme != 'moonfin' && uri.scheme != 'embyview') return null;
     if (uri.host == 'party') {
       final code = uri.queryParameters['code'];
       if (code == null || code.isEmpty) return null;

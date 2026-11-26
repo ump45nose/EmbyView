@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:get_it/get_it.dart';
 import 'package:server_core/server_core.dart';
 import 'package:uuid/uuid.dart';
@@ -76,9 +77,12 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
       : null;
 
   final _changes = StreamController<AccountSnapshot>.broadcast(sync: true);
-  final _connectionNotices = StreamController<ConnectionNoticeEvent>.broadcast(
-    sync: true,
-  );
+  late final StreamController<ConnectionNoticeEvent> _connectionNotices =
+      StreamController<ConnectionNoticeEvent>.broadcast(
+        sync: true,
+        onListen: _flushPendingColdStartNotice,
+      );
+  ConnectionNoticeEvent? _pendingColdStartNotice;
   final Map<String, List<ServerAddressEntry>> _localAddressesByServer = {};
 
   Future<void> _pending = Future.value();
@@ -269,14 +273,58 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     if (!_changes.isClosed) _changes.add(value);
   }
 
-  void _emitNotice(ConnectionNoticeEvent event) {
-    if (!_connectionNotices.isClosed) _connectionNotices.add(event);
+  void _emitNotice(ConnectionNoticeEvent event, {bool replayIfUnobserved = false}) {
+    if (_connectionNotices.isClosed) return;
+    if (_connectionNotices.hasListener) {
+      _pendingColdStartNotice = null;
+      _connectionNotices.add(event);
+    } else if (replayIfUnobserved) {
+      _pendingColdStartNotice = event;
+    }
+  }
+
+  void _flushPendingColdStartNotice() {
+    final pending = _pendingColdStartNotice;
+    if (pending == null || _connectionNotices.isClosed) return;
+    _pendingColdStartNotice = null;
+    scheduleMicrotask(() {
+      if (!_connectionNotices.isClosed && _connectionNotices.hasListener) {
+        _connectionNotices.add(pending);
+      }
+    });
   }
 
   Future<void> _serialize(Future<void> Function() operation) {
     final result = _pending.then((_) => operation());
     _pending = result.catchError((_) {});
     return result;
+  }
+
+  Future<void> _syncServerCandidateAddresses(
+    String serverId,
+    List<ServerAddressEntry> entries,
+  ) async {
+    final server = servers.getServer(serverId) ?? store.getServer(serverId);
+    if (server == null) return;
+    final urls = List<String>.unmodifiable(
+      entries.map((e) => e.url).where((u) => u.isNotEmpty),
+    );
+    if (listEquals(server.candidateAddresses, urls)) return;
+    final updated = server.copyWith(candidateAddresses: urls);
+    await servers.updateServer(updated);
+    if (!listEquals(store.getServer(serverId)?.candidateAddresses, urls)) {
+      await store.putServer(updated);
+    }
+  }
+
+  Future<void> _syncAllStoredCandidateAddresses() async {
+    final configured = preferences?.current.serverAddresses;
+    if (configured == null || configured.isEmpty) return;
+    for (final entry in configured.entries) {
+      if (entry.value.isNotEmpty) {
+        await _syncServerCandidateAddresses(entry.key, entry.value);
+      }
+    }
   }
 
   Future<void> _persistAddresses(
@@ -299,7 +347,12 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
       } else {
         map[serverId] = immutable;
       }
-      await prefs.update(_copyPrefsWithAddresses(prefs.current, map));
+      await prefs.update(
+        prefs.current.copyWith(serverAddresses: Map.unmodifiable(map)),
+      );
+    }
+    if (immutable.isNotEmpty) {
+      await _syncServerCandidateAddresses(serverId, immutable);
     }
   }
 
@@ -389,21 +442,84 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     }
   }
 
+  Future<ConnectionNoticeEvent?> _failoverOnRestoreIfNeeded({
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    if (!_autoSwitchEnabled) return null;
+    final server = _resolveServer();
+    if (server == null) return null;
+    final addresses = _addressesForServer(server);
+    if (addresses.length < 2) return null;
+    final currentEntry = _activeEntryForServer(server, addresses)!;
+    final candidates = <ServerAddressEntry>[
+      currentEntry,
+      ...addresses.where((e) => e.id != currentEntry.id),
+    ];
+    var tried = 0;
+    for (final candidate in candidates) {
+      final uri = parseEmbyServerAddress(candidate.url);
+      tried++;
+      if (uri == null) continue;
+      AddressProbeResult result;
+      try {
+        result = await _probeAddress(uri, timeout);
+      } catch (_) {
+        result = const AddressProbeResult(reachable: false);
+      }
+      if (!result.reachable) continue;
+      final switched = _urlKey(candidate.url) != _urlKey(currentEntry.url);
+      if (switched) {
+        await _applyServerActiveAddress(
+          server,
+          uri.toString(),
+          serverVersion: result.serverVersion,
+        );
+      }
+      _connectionOverride = ConnectionState.connected;
+      _latencyMs = result.latencyMs;
+      _triedAddressCount = tried;
+      if (!switched) return null;
+      return ConnectionNoticeEvent.switched(
+        serverName: server.name,
+        fromLabel: _addressLabel(currentEntry),
+        toLabel: _addressLabel(candidate),
+        activeAddress: uri.toString(),
+        triedAddressCount: tried,
+      );
+    }
+    _connectionOverride = ConnectionState.disconnected;
+    _latencyMs = null;
+    _triedAddressCount = tried;
+    return null;
+  }
+
   @override
   Future<void> restore() => _serialize(() async {
     await servers.loadStoredServers();
     _lastServerId ??= _firstEmbyServer()?.id;
-    if (sessions.activeUserId != null ||
-        chooseUserOnStartup() ||
-        _users.isEmpty) {
+    await _syncAllStoredCandidateAddresses();
+    if (sessions.activeUserId != null) {
+      final switched = await _failoverOnRestoreIfNeeded();
+      _publish(_readCurrent());
+      if (switched != null) {
+        _emitNotice(switched, replayIfUnobserved: true);
+      }
+      return;
+    }
+    if (chooseUserOnStartup() || _users.isEmpty) {
       _publish(_readCurrent());
       return;
     }
+    ConnectionNoticeEvent? switched;
     await _transition(AccountPhase.restoring, () async {
+      switched = await _failoverOnRestoreIfNeeded();
       if (!await sessions.restoreSession()) {
         throw const EmbyViewFailure('请选择用户重新登录。', code: 'restore_failed');
       }
     });
+    if (switched != null) {
+      _emitNotice(switched!, replayIfUnobserved: true);
+    }
   });
 
   @override
@@ -527,7 +643,9 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
         () async {
           await sessions.destroyCurrentSession();
           await store.removeUser(serverId, user.id);
-          await credentials?.deleteToken(serverId);
+          if (store.getUsers(serverId).isEmpty) {
+            await credentials?.deleteToken(serverId);
+          }
         },
         postPhase: store.getServer(serverId) != null
             ? AccountPhase.choosing
@@ -940,41 +1058,9 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     }
   }
 
-  static LocalPreferences _copyPrefsWithAddresses(
-    LocalPreferences p,
-    Map<String, List<ServerAddressEntry>> addresses,
-  ) => LocalPreferences(
-    theme: p.theme,
-    navigation: p.navigation,
-    seriesSort: p.seriesSort,
-    chooseUserOnStartup: p.chooseUserOnStartup,
-    onboardingDismissed: p.onboardingDismissed,
-    autoSwitchServerAddress: p.autoSwitchServerAddress,
-    serverAddresses: Map.unmodifiable(addresses),
-    backgroundVideo: p.backgroundVideo,
-    backgroundVideoDelay: p.backgroundVideoDelay,
-    detailTrailerDelay: p.detailTrailerDelay,
-    themeMusic: p.themeMusic,
-    themeVolume: p.themeVolume,
-    quickLook: p.quickLook,
-    hideUnwatchedOverview: p.hideUnwatchedOverview,
-    preResolve115: p.preResolve115,
-    readAheadBytes: p.readAheadBytes,
-    autoPlayNext: p.autoPlayNext,
-    anime4kForAnime: p.anime4kForAnime,
-    anime4kForOther: p.anime4kForOther,
-    subtitleLanguages: p.subtitleLanguages,
-    autoSelectChineseSubtitle: p.autoSelectChineseSubtitle,
-    subtitleSources: p.subtitleSources,
-    translationBaseUrl: p.translationBaseUrl,
-    translationModel: p.translationModel,
-    monthlyBudgetMicros: p.monthlyBudgetMicros,
-    mediaFolder: p.mediaFolder,
-    zones: p.zones,
-  );
-
   Future<void> close() async {
     _connectivity?.removeListener(_connectionChanged);
+    _pendingColdStartNotice = null;
     await _pending;
     await _changes.close();
     await _connectionNotices.close();
