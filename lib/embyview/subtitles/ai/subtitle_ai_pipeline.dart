@@ -21,7 +21,7 @@ extension SubtitleAiPipeline on SubtitleAiProcessor {
   }) async {
     var pending = <SubtitleAiSegment>[];
     var cueCount = 0, failedBatches = 0;
-    var firstLive = realtime;
+    var liveWindowCount = 0, liveBatchSize = 1;
     final inFlight = <Future<void>>{};
     final stopped = Completer<void>();
     Object? fatal;
@@ -100,18 +100,24 @@ extension SubtitleAiPipeline on SubtitleAiProcessor {
         final piece = await _transcribe(segment, cancellation, language);
         if (piece.cues.isEmpty) {
           onResult(piece);
-          continue;
+        } else {
+          // Keep complete windows together, picking the side closest to 60 lines.
+          final remaining = _cueBatch - cueCount;
+          if (!realtime && cueCount > 0 && piece.cues.length - remaining > remaining) {
+            await flush();
+          }
+          pending.add(piece);
+          cueCount += piece.cues.length;
         }
-        // Keep complete windows together, picking the side closest to 60 lines.
-        final remaining = _cueBatch - cueCount;
-        if (!realtime && cueCount > 0 && piece.cues.length - remaining > remaining) {
+        if (realtime) {
+          if (++liveWindowCount >= liveBatchSize) {
+            // Silent windows contribute to the deadline, but need no request.
+            if (pending.isNotEmpty) liveBatchSize = 2;
+            await flush();
+            liveWindowCount = 0;
+          }
+        } else if (cueCount >= _cueBatch) {
           await flush();
-        }
-        pending.add(piece);
-        cueCount += piece.cues.length;
-        if (firstLive || (realtime ? pending.length >= 2 : cueCount >= _cueBatch)) {
-          await flush();
-          firstLive = false;
         }
       }
       cancellation.check();

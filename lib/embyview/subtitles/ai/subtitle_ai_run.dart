@@ -13,6 +13,7 @@ final class SubtitleAiRunController {
   final SubtitleAiProcessor processor;
   final _changes = StreamController<AiRun?>.broadcast();
   AiRun? _run;
+  SubtitleAiOutput? _checkpoint;
   _ActiveRun? _active;
   Future<void> _audioReleased = Future.value();
   Duration _position = Duration.zero;
@@ -20,6 +21,10 @@ final class SubtitleAiRunController {
   bool _closed = false;
 
   AiRun? get run => _run;
+
+  /// Includes confirmed silent coverage; available until this timeline is cleared.
+  SubtitleAiOutput? get checkpoint => _checkpoint;
+  SubtitleAiOutput? get _subtitles => _checkpoint?.cues.isNotEmpty == true ? _checkpoint : null;
   Stream<AiRun?> get changes => _changes.stream;
 
   /// [timelineGeneration] belongs to the caller's playback timeline. The audio
@@ -35,10 +40,16 @@ final class SubtitleAiRunController {
     String? language,
     String mediaContext = '',
     SubtitleAiCancellation? cancellation,
+    SubtitleAiOutput? initialOutput,
   }) async {
     if (_closed) throw StateError('The subtitle run controller is closed');
     _active?.cancellation.cancel();
     final work = _ActiveRun(generation, position, isCurrent, cancellation ?? SubtitleAiCancellation());
+    if (initialOutput != null) {
+      work.coverage = initialOutput.coverage;
+      work.cues.addAll(initialOutput.cues);
+      work.language = initialOutput.language;
+    }
     _active = work;
     _timelineGeneration = timelineGeneration;
     _position = position;
@@ -83,14 +94,14 @@ final class SubtitleAiRunController {
         throw const EmbyViewFailure('未读到可用于听写的音频。', retryable: true, code: 'subtitle_audio_empty');
       }
       _publish(work, AiRunState.completed);
-      return work.output;
+      return _subtitles;
     } catch (error) {
       if (_current(work)) {
         final failure = error is EmbyViewFailure
             ? error
             : const EmbyViewFailure('无法继续生成字幕。', retryable: true, code: 'subtitle_ai_failed');
         _publish(work, AiRunState.failed, failure: failure);
-        return work.output;
+        return _subtitles;
       }
       return null;
     } finally {
@@ -129,8 +140,12 @@ final class SubtitleAiRunController {
 
   SubtitleAiOutput? cancel() {
     final work = _active;
-    if (work == null) return null;
-    final output = _current(work) ? work.output : null;
+    if (work == null) {
+      _checkpoint = null;
+      return null;
+    }
+    final output = _current(work) ? _subtitles : null;
+    _checkpoint = null;
     _active = null;
     work.cancellation.cancel();
     _emit(AiRun(generation: work.generation, state: AiRunState.cancelled, startedAt: work.startedAt));
@@ -140,6 +155,7 @@ final class SubtitleAiRunController {
   void invalidate() {
     _active?.cancellation.cancel();
     _active = null;
+    _checkpoint = null;
     _timelineGeneration = null;
     _emit(null);
   }
@@ -161,6 +177,9 @@ final class SubtitleAiRunController {
   }
 
   void _publish(_ActiveRun work, AiRunState state, {EmbyViewFailure? failure}) {
+    _checkpoint = work.coverage.isEmpty
+        ? null
+        : SubtitleAiOutput(coverage: work.coverage, cues: work.cues, language: work.language);
     final range = _coverageAtPosition(work.coverage);
     _emit(
       AiRun(
@@ -170,7 +189,7 @@ final class SubtitleAiRunController {
         coverageStart: range?.start,
         coverageEnd: range?.end,
         coverage: work.coverage,
-        cues: work.output?.cues ?? const [],
+        cues: _checkpoint?.cues ?? const [],
         failure: failure,
       ),
     );
@@ -193,9 +212,6 @@ final class _ActiveRun {
   final cues = <SubtitleCue>[];
   List<TimeRange> coverage = const [];
   String? language;
-
-  SubtitleAiOutput? get output =>
-      cues.isEmpty ? null : SubtitleAiOutput(coverage: coverage, cues: cues, language: language);
 }
 
 /// Load up to three windows while the current window is in the cloud. Bound

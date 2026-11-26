@@ -216,6 +216,33 @@ void main() {
     expect(charges, [('invalid-lines', 59)]);
   });
 
+  for (final invalidJson in [false, true]) {
+    test(
+      'HTTP 200 with ${invalidJson ? "invalid JSON" : "missing lines"} is charged but reports invalidResponse',
+      () async {
+        final events = <SubtitleAiTiming>[];
+        final subscription = subtitleAiTimings.listen(events.add);
+        addTearDown(subscription.cancel);
+        final charges = <(String?, int)>[];
+        final processor = _processor((_) async {
+          if (invalidJson) return http.Response('not JSON', 200, headers: {'x-request-id': 'bad'});
+          return _openAiTranslation([
+            {'id': 0, 'text': '你好'},
+          ], id: 'missing');
+        }, charges: charges);
+        await expectLater(
+          processor.translate(_srt([2, 5]), cancellation: SubtitleAiCancellation()),
+          throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'subtitle_ai_response')),
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(charges.single.$1, invalidJson ? 'bad' : 'missing');
+        expect(charges.single.$2, greaterThan(0));
+        final event = events.singleWhere((event) => event.stage == 'translation');
+        expect((event.httpStatus, event.status, event.attempt, event.retryDelay), (200, 'invalidResponse', 1, null));
+      },
+    );
+  }
+
   test('seek invalidates a pending result and keeps its late charge', () async {
     final firstRequest = Completer<void>();
     final oldResponse = Completer<http.Response>();
@@ -360,6 +387,101 @@ void main() {
     expect((await result)!.cues.map((c) => c.start.inSeconds), [0, 1, 2, 3, 4, 5]);
     expect(sizes.first, 1);
     expect(sizes.skip(1).where((v) => v >= 2 && v <= 3).length, greaterThanOrEqualTo(2));
+  });
+
+  test(
+    'live silence counts toward the next batch and publishes coverage without waiting for the stream to end',
+    () async {
+      final audio = StreamController<SubtitleAudioSegment>();
+      final requests = <int>[];
+      var window = 0;
+      messenger.setMockMethodCallHandler(
+        asr,
+        (_) async => switch (window++) {
+          0 || 1 || 4 => _transcript('speech'),
+          _ => {'language': 'en', 'segments': []},
+        },
+      );
+      final controller = SubtitleAiRunController(
+        _processor((request) async {
+          final lines = _lines(request);
+          requests.add(lines.length);
+          return _openAiTranslation(lines);
+        }),
+      );
+      addTearDown(controller.close);
+      final pending = controller.start(
+        generation: 3,
+        timelineGeneration: 1,
+        position: Duration.zero,
+        audio: audio.stream,
+        followsPlayhead: true,
+        isCurrent: () => true,
+      );
+      final second = controller.changes.firstWhere((r) => r?.cues.length == 2);
+      for (var i = 0; i <= 2; i++) {
+        audio.add(_audio(i));
+      }
+      await second.timeout(const Duration(seconds: 2));
+      expect(requests, [1, 1]);
+      final third = controller.changes.firstWhere((r) => r?.cues.length == 3);
+      for (var i = 3; i <= 4; i++) {
+        audio.add(_audio(i));
+      }
+      await third.timeout(const Duration(seconds: 2));
+      final silent = controller.changes.firstWhere((r) => r?.coverage.last.end.inSeconds == 7);
+      audio.add(_audio(5));
+      audio.add(_audio(6));
+      await silent;
+      expect(requests, [1, 1, 1]);
+      await audio.close();
+      expect((await pending)!.coverage.single.end, const Duration(seconds: 7));
+    },
+  );
+
+  test('a restaged run includes its checkpoint immediately and retains its language after completion', () async {
+    final controller = SubtitleAiRunController(_processor((request) async => _openAiTranslation(_lines(request))));
+    addTearDown(controller.close);
+    final seed = SubtitleAiOutput(
+      coverage: const [TimeRange(start: Duration(seconds: 2), end: Duration(seconds: 3))],
+      cues: const [
+        SubtitleCue(
+          id: 'known',
+          start: Duration(seconds: 2),
+          end: Duration(seconds: 3),
+          text: 'known',
+          translation: '已保存',
+        ),
+      ],
+      language: 'ja',
+    );
+    final result = controller.start(
+      generation: 3,
+      timelineGeneration: 2,
+      position: Duration.zero,
+      audio: Stream.value(_audio(0)),
+      followsPlayhead: false,
+      isCurrent: () => true,
+      initialOutput: seed,
+    );
+    expect(controller.checkpoint?.cues.single.id, 'known');
+    expect(controller.run?.cues.single.translation, '已保存');
+    final completed = await result;
+    expect(completed?.cues.map((c) => c.start.inSeconds), [0, 2]);
+    expect(controller.checkpoint?.language, 'ja');
+    controller.invalidate();
+    expect(controller.checkpoint, isNull);
+    messenger.setMockMethodCallHandler(asr, (_) async => {'language': 'en', 'segments': []});
+    await controller.start(
+      generation: 3,
+      timelineGeneration: 3,
+      position: Duration.zero,
+      audio: Stream.value(_audio(10)),
+      followsPlayhead: false,
+      isCurrent: () => true,
+    );
+    expect(controller.checkpoint?.coverage.single.start.inSeconds, 10);
+    expect(controller.checkpoint?.cues, isEmpty);
   });
 
   test('episode ASR overlaps three translations, preserving timelines on out-of-order completion', () async {

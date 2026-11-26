@@ -198,7 +198,7 @@ final class SubtitleAiProcessor {
       final price = config.price;
       int cost(int input, int output) => price == null ? 0 : (input * price.input + output * price.output).ceil();
       final estimate = cost(utf8.encode(input).length + utf8.encode(instructions).length + 128, _maxOutputTokens);
-      final response = await _withSlot(
+      final translations = await _withSlot(
         cancellation,
         () => _call(
           cancellation,
@@ -215,27 +215,9 @@ final class SubtitleAiProcessor {
           cueCount: batch.length,
         ),
       );
-      final content = _translationContent(response);
-      final rows = _decodeObject(content)['lines'];
-      if (rows is! List || rows.length != batch.length) throw _malformed;
-      final returned = <int, String>{};
-      for (final raw in rows) {
-        final row = _object(raw);
-        final id = row['id'];
-        final text = row['text'];
-        if (id is! int ||
-            id < 0 ||
-            id >= batch.length ||
-            returned.containsKey(id) ||
-            text is! String ||
-            text.trim().isEmpty) {
-          throw _malformed;
-        }
-        returned[id] = text.trim();
-      }
       for (final (index, cue) in batch.indexed) {
         output.add(
-          SubtitleCue(id: cue.id, start: cue.start, end: cue.end, text: cue.text, translation: returned[index]),
+          SubtitleCue(id: cue.id, start: cue.start, end: cue.end, text: cue.text, translation: translations[index]),
         );
       }
     }
@@ -243,7 +225,7 @@ final class SubtitleAiProcessor {
     return List.unmodifiable(output);
   }
 
-  Future<Map<String, dynamic>> _call(
+  Future<List<String>> _call(
     SubtitleAiCancellation cancellation,
     int estimate,
     http.BaseRequest Function() request,
@@ -257,7 +239,7 @@ final class SubtitleAiProcessor {
       cancellation.check();
       final backoff = attempt < 3 ? Duration(seconds: 1 << (attempt - 1)) : null;
       try {
-        final body = await meter(estimate, () async {
+        final lines = await meter<List<String>?>(estimate, () async {
           // The ledger has already admitted this request. Authorization stays bound to
           // the request's endpoint, model and key throughout this attempt.
           cancellation.check();
@@ -285,9 +267,17 @@ final class SubtitleAiProcessor {
             }
             final result = _decodeObject(utf8.decode(response.bodyBytes, allowMalformed: true));
             final id = response.headers['x-request-id'] ?? result['id'];
-            outcome = 'ok';
+            List<String>? translations;
+            try {
+              translations = _translationLines(result, cueCount);
+              outcome = 'ok';
+            } on EmbyViewFailure {
+              // The provider completed this call. Commit its usage even when the
+              // returned lines cannot be mapped safely to the original cues.
+              outcome = 'invalidResponse';
+            }
             return SubtitleAiCharge(
-              value: result,
+              value: translations,
               costMicros: cost(result, estimate),
               requestId: id is String ? id : null,
               unmetered: unmetered,
@@ -308,7 +298,7 @@ final class SubtitleAiProcessor {
               'translation',
               windows,
               watch.elapsed,
-              cancellation.isCancelled && outcome != 'ok' ? 'cancelled' : outcome,
+              cancellation.isCancelled && status == null ? 'cancelled' : outcome,
               batch: batch,
               attempt: attempt,
               httpStatus: status,
@@ -318,8 +308,8 @@ final class SubtitleAiProcessor {
           }
         });
         cancellation.check();
-        if (body.isEmpty) throw _malformed;
-        return body;
+        if (lines == null) throw _malformed;
+        return lines;
       } on _RequestFailure catch (error) {
         cancellation.check();
         if (!error.retryable || backoff == null) rethrow;
@@ -375,6 +365,22 @@ http.Request _translationRequest(
         {'role': 'user', 'content': input},
       ],
     });
+}
+
+List<String> _translationLines(Map<String, dynamic> response, int count) {
+  final rows = _decodeObject(_translationContent(response))['lines'];
+  if (rows is! List || rows.length != count) throw _malformed;
+  final returned = <int, String>{};
+  for (final raw in rows) {
+    final row = _object(raw);
+    final id = row['id'];
+    final text = row['text'];
+    if (id is! int || id < 0 || id >= count || returned.containsKey(id) || text is! String || text.trim().isEmpty) {
+      throw _malformed;
+    }
+    returned[id] = text.trim();
+  }
+  return [for (var i = 0; i < count; i++) returned[i]!];
 }
 
 String _translationContent(Map<String, dynamic> response) {
