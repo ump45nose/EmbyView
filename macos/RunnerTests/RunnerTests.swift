@@ -509,3 +509,97 @@ final class ExternalASSRenderingTests: XCTestCase {
         }
     }
 }
+
+final class EmbyViewAsrTests: XCTestCase {
+    func testResamplePreservesSpeechBandAndRejectsFrequenciesAboveNyquist() throws {
+        let input = (0..<48_000).map { index -> Float in
+            let time = 2 * Double.pi * Double(index) / 48_000
+            return Float(0.5 * sin(1_000 * time) + 0.4 * sin(12_000 * time))
+        }
+        let pcm = input.withUnsafeBytes { Data($0) }
+        let output = try AsrAudio.resample(pcm, sampleRate: 48_000)
+        XCTAssertEqual(output.count, 16_000)
+        for index in stride(from: 64, to: output.count - 64, by: 17) {
+            let expected = Float(0.5 * sin(2 * Double.pi * 1_000 * Double(index) / 16_000))
+            XCTAssertEqual(output[index], expected, accuracy: 0.015)
+        }
+        XCTAssertThrowsError(try AsrAudio.resample(Data([0]), sampleRate: 48_000))
+        XCTAssertThrowsError(try AsrAudio.resample(pcm, sampleRate: 44_100))
+    }
+
+    func testSegmentsUseTenMillisecondTicksRelativeToTheChunkAndClampPadding() {
+        let segment = AsrAudio.segment(start: 13, end: 65, text: "  Hello! ", durationUs: 600_000)
+        XCTAssertEqual(segment?["startUs"] as? Int64, 130_000)
+        XCTAssertEqual(segment?["endUs"] as? Int64, 600_000)
+        XCTAssertEqual(segment?["text"] as? String, "Hello!")
+        XCTAssertNil(AsrAudio.segment(start: 65, end: 99, text: "padding", durationUs: 600_000))
+    }
+
+    func testInterruptedDownloadResumesFromDiskAndChecksHashBeforeReady() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = model(directory, source: "disconnect")
+        first.download()
+        try waitFor(first, "failed")
+        XCTAssertEqual(first.status()["receivedBytes"] as? Int64, 3)
+        // A new store simulates quitting between downloads. The fixture accepts
+        // only the exact remaining range and returns the last three bytes.
+        let resumed = model(directory, source: "resume")
+        resumed.download()
+        try waitFor(resumed, "ready")
+        XCTAssertEqual(try Data(contentsOf: resumed.modelURL), Data("abcdef".utf8))
+        try resumed.delete()
+        XCTAssertEqual(resumed.status()["state"] as? String, "notDownloaded")
+    }
+
+    func testChecksumMismatchRemovesPartialAndNeverPublishesModel() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = model(directory, source: "corrupt")
+        store.download()
+        try waitFor(store, "failed")
+        XCTAssertTrue((store.status()["error"] as? String)?.contains("SHA-256") == true)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+    }
+
+    private func model(_ directory: URL, source: String) -> AsrModelStore {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AsrModelURLProtocol.self]
+        return AsrModelStore(directory: directory, sources: [URL(string: "https://asr.invalid/" + source)!],
+            size: 6, digest: "bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721",
+            configuration: configuration)
+    }
+
+    private func temporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func waitFor(_ store: AsrModelStore, _ state: String) throws {
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            store.status()["state"] as? String == state
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed, "\(store.status())")
+    }
+}
+
+private final class AsrModelURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let url = request.url!
+        let resume = url.lastPathComponent == "resume"
+        let correctRange = request.value(forHTTPHeaderField: "Range") == "bytes=3-"
+        let code = resume ? (correctRange ? 206 : 416) : 200
+        let headers = resume ? ["Content-Range": "bytes 3-5/6"] : [:]
+        let response = HTTPURLResponse(url: url, statusCode: code, httpVersion: nil, headerFields: headers)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        let body = resume ? "def" : (url.lastPathComponent == "corrupt" ? "wrong!" : "abc")
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        // The disconnect endpoint closes the body after just three of six
+        // expected bytes, as a server with a truncated stream would.
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}

@@ -373,6 +373,7 @@ class MainFlutterWindow: NSWindow {
     self.aetherVideoChannel = aetherChannel
     self.embyViewAudioChannel = EmbyViewAudioChannel(messenger: messenger,
       wrapperProvider: { [weak aetherChannel] in aetherChannel?.player ?? AetherPlayerWrapper() })
+    EmbyViewAsrChannel.register(messenger: messenger)
     registerMediaFolderChannel(messenger: messenger)
     let aetherRegistrar = flutterViewController.registrar(forPlugin: "moonfin_aether_video")
     aetherRegistrar.register(
