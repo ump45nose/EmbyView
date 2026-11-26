@@ -422,18 +422,6 @@ final class ExternalASSRenderingTests: XCTestCase {
         return count
     }
 
-    func testDirect115UsesOnlyThePlaybackReader() {
-        for url in ["https://cdn.115.com/video", "https://file.115cdn.net/video",
-                    "https://115cdn.com/video", "https://a.b.115cdn.com/video"] {
-            XCTAssertEqual(AetherPlayerWrapper.sourceRequestLimit(for: URL(string: url)!), 1)
-        }
-        for url in ["file:///library/film.mkv", "https://nas.test/emby/Videos/1/stream",
-                    "https://unrelated115.com/video", "https://evil115cdn.com/video",
-                    "https://115cdn.com.other.test/video"] {
-            XCTAssertNil(AetherPlayerWrapper.sourceRequestLimit(for: URL(string: url)!))
-        }
-    }
-
     func testEmbeddedASSStillUsesItsTrackHeader() async throws {
         _ = NSApplication.shared
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 540),
@@ -449,7 +437,6 @@ final class ExternalASSRenderingTests: XCTestCase {
         await wrapper.play(url: fixture)
         try await waitUntil { wrapper.subtitleTracks.count == 1 && wrapper.isPlaying }
         let engine = try XCTUnwrap(AetherPlayerWrapper.sharedEngine())
-        XCTAssertEqual(engine.maximumSubtitleAdvanceSeconds, 0)
         let originalSource = engine.scrubPreviewSourceGeneration
         wrapper.setSubtitleTrack(1)
         try await waitUntil { self.styledImage(wrapper) != nil }

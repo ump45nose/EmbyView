@@ -121,7 +121,7 @@ void main() {
     await expectLater(cache.resolve(key, uri), throwsStateError);
   });
 
-  test('HTTP transport does not follow 302 or forward authentication', () async {
+  test('HTTP transport requests a fresh redirect even when the server returns the same address', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     var requests = 0;
     server.listen((request) {
@@ -138,9 +138,16 @@ void main() {
       mediaSource: 's',
       userAgent: 'same-ua',
     );
-    final result = await cache.resolve(key, Uri.parse('http://127.0.0.1:${server.port}/source'));
+    final source = Uri.parse('http://127.0.0.1:${server.port}/source');
+    final result = await cache.resolve(key, source);
     expect(result.uri.path, '/destination');
+    expect((await cache.resolve(key, source)).cacheHit, isTrue);
     expect(requests, 1);
+    cache.invalidate(key);
+    final refreshed = await cache.resolve(key, source);
+    expect(refreshed.uri, result.uri);
+    expect(refreshed.cacheHit, isFalse);
+    expect(requests, 2);
     cache.close();
     await server.close(force: true);
   });

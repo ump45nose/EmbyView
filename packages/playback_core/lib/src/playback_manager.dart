@@ -4260,6 +4260,7 @@ class PlaybackManager implements AudioOwnable {
           _waitAndApplyTrackSelections(
             sessionToken,
             restorePosition: useNativeStart ? startPosition : null,
+            expectedSeekRevision: trackOpenSeekRevision,
           );
         } else {
           unawaited(_applyExternalSubtitleWhenReady(sessionToken));

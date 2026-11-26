@@ -652,6 +652,46 @@ void main() {
     expect(backend.seeks, [const Duration(minutes: 2)]);
     expect(backend.at, const Duration(minutes: 2));
   });
+  for (final (codec, target) in [('ass', const Duration(minutes: 2)), ('ssa', const Duration(minutes: 8))]) {
+    test('transcoded $codec keeps the latest seek during audio reopen', () async {
+      final backend = _Backend(), client = _Client();
+      final manager = PlaybackManager()..setBackend(backend);
+      final native = _Native(backend);
+      client.playbackApi.sourcePatch = {
+        'IsRemote': false, 'SupportsDirectPlay': false, 'SupportsDirectStream': false,
+        'SupportsTranscoding': true, 'TranscodingUrl': '/Videos/movie/master.m3u8',
+        'DefaultSubtitleStreamIndex': 3,
+      };
+      client.playbackApi.subtitles.addAll([
+        {'Type': 'Audio', 'Index': 2, 'Language': 'en'},
+        {
+          'Type': 'Subtitle', 'Index': 3, 'Codec': codec, 'IsExternal': true,
+          'DeliveryMethod': 'External', 'DeliveryUrl': '/Videos/movie/source/Subtitles/3/Stream.$codec',
+        },
+      ]);
+      final adapter = MoonfinPlaybackAdapter(manager: manager, client: client, native: native, audioInput: _Audio());
+      addTearDown(() async { await adapter.dispose(); await native.events.close(); manager.dispose(); });
+      final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 5)));
+      await pumpEventQueue(times: 30);
+      expect(manager.currentResolution?.playMethod, StreamPlayMethod.transcode);
+      await session.selectSubtitle(session.snapshot.subtitleTracks.single.id);
+      expect(manager.subtitleStreamIndex, 3);
+      backend.opening = Completer();
+      backend.releaseOpen = Completer();
+      final change = session.selectAudio(session.snapshot.audioTracks.last.id);
+      await backend.opening!.future;
+      await session.seek(const Duration(minutes: 1));
+      await session.seek(target);
+      backend.releaseOpen!.complete();
+      await change;
+      await Future<void>.delayed(const Duration(milliseconds: 230));
+      expect(manager.currentResolution?.playMethod, StreamPlayMethod.transcode);
+      expect(manager.subtitleStreamIndex, 3);
+      expect(backend.subtitlePicks.last.$2, contains('/Subtitles/3/'));
+      expect(backend.seeks, [target]);
+      expect(backend.at, target);
+    });
+  }
   for (final method in ['direct', 'remux']) {
     test('a refused sidecar cannot steal the mounted bitmap or select another ordinal on $method', () async {
       final backend = _Backend()..refusedExternal = 2;
