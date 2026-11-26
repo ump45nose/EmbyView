@@ -14,6 +14,7 @@ import 'package:moonfin/embyview/playback/playback_subtitle_input.dart';
 import 'package:moonfin/embyview/subtitles/ai/subtitle_ai_processor.dart';
 import 'package:moonfin/embyview/subtitles/ai/subtitle_ai_types.dart';
 import 'package:moonfin/embyview/subtitles/audio/subtitle_audio.dart';
+import 'package:moonfin/embyview/subtitles/audio/subtitle_timing.dart';
 import 'package:moonfin/embyview/subtitles/jobs/subtitle_jobs.dart';
 import 'package:moonfin/embyview/subtitles/store/subtitle_store.dart';
 
@@ -91,6 +92,158 @@ void main() {
     );
     final other = await ledger('mac-air').usage();
     expect([refreshed.usedMicros, refreshed.unmeteredCalls, other.usedMicros, other.unmeteredCalls], [5, 1, 5, 1]);
+  });
+
+  test('parallel calls reserve paid headroom and merge unmetered responses without lost updates', () async {
+    final usage = ledger();
+    final gate = Completer<void>(), entered = Completer<void>();
+    Future<void> charge(int estimate, String id) => usage.charge(estimate, () async {
+      if (id == 'first') {
+        entered.complete();
+        await gate.future;
+      }
+      return SubtitleAiCharge(value: null, costMicros: estimate, requestId: id, unmetered: estimate == 0);
+    });
+    final paid = charge(12, 'first');
+    await entered.future;
+    final blocked = expectLater(charge(1, 'no-headroom'), throwsA(isA<SubtitleBudgetBlocked>()));
+    await Future.wait([for (var i = 0; i < 3; i++) charge(0, 'free-$i')]);
+    gate.complete();
+    await Future.wait([paid, blocked]);
+    final snapshot = await usage.usage();
+    expect((snapshot.usedMicros, snapshot.unmeteredCalls), (12, 3));
+  });
+
+  test('failed middle batch keeps later translations on NAS and restart reads only the gap', () async {
+    final timings = <SubtitleAiTiming>[];
+    final sub = subtitleAiTimings.listen(timings.add);
+    addTearDown(sub.cancel);
+    final usage = ledger();
+    final media = await File('${nas.path}/Episode.mkv').create();
+    final store = SubtitleStore(
+      folderStatus: () async => MediaFolderStatus(state: MediaFolderState.authorized, localRoot: nas.path),
+      localDirectory: () async => scratch,
+    );
+    final context = SubtitleEpisodeContext(
+      source: PlaybackSubtitleSource(
+        generation: 1,
+        target: const PlayTarget(itemId: '1'),
+        mediaSourceId: 'source-1',
+        address: media.uri,
+        headers: const {},
+        userAgent: 'test',
+        itemFilePath: '/mnt/media/Episode.mkv',
+      ),
+      store: store,
+      duration: const Duration(seconds: 150),
+      authorizationId: 'root',
+      availability: const SubtitleAvailability(chinese: ChineseSubtitleState.canGenerate),
+    );
+    const channel = MethodChannel('test/season-resume'), asr = MethodChannel('embyview/asr');
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final reads = <int>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      final start = (call.arguments as Map)['startUs'] as int;
+      reads.add(start ~/ 1000000);
+      return [
+        {'startUs': start, 'sourceUs': start, 'pcm': Uint8List(30 * 48000 * 4)..first = start ~/ 1000000},
+      ];
+    });
+    messenger.setMockMethodCallHandler(asr, (call) async {
+      final start = ((call.arguments as Map)['pcm'] as Uint8List).first;
+      return {
+        'language': 'ja',
+        'segments': [
+          for (var i = 0; i < 30; i++) {'startUs': i * 1000000, 'endUs': (i + 1) * 1000000, 'text': 'w$start:$i'},
+        ],
+      };
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(asr, null));
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    var fail = true, failedAttempts = 0;
+    const prefs = LocalPreferences(translationBaseUrl: 'https://gateway.example/v1');
+    final generator = SubtitleSeasonGenerator(
+      reader: SubtitleAudioReader(channel: channel),
+      processor: SubtitleAiProcessor(
+        readTranslationKey: (_) async => 'fixture',
+        meter: usage.charge,
+        preferences: () => prefs,
+        waitForRetry: (_) async {},
+        clientFactory: () => MockClient((request) async {
+          final data = jsonDecode(request.body) as Map;
+          final lines = jsonDecode(data['messages'][1]['content'] as String) as List;
+          if (fail && lines.first['text'] == 'w60:0') {
+            failedAttempts++;
+            return http.Response('', 503);
+          }
+          return http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'finish_reason': 'stop',
+                  'message': {
+                    'content': jsonEncode({
+                      'lines': [
+                        for (final row in lines) {'id': row['id'], 'text': '译${row['text']}'},
+                      ],
+                    }),
+                  },
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json; charset=utf-8'},
+          );
+        }),
+      ),
+    );
+    Future<SubtitleSeasonQueue> open() => SubtitleSeasonQueue.open(
+      localDirectory: scratch,
+      ledger: usage,
+      preferences: () => prefs,
+      resolve: (_, _) async => context,
+      generate: generator.generate,
+    );
+    final request = SubtitleSeasonRequest(
+      accountId: 'a',
+      seriesId: 's',
+      seasonId: '1',
+      seasonName: 'Season',
+      episodes: const [SubtitleEpisodeRequest(episodeId: '1', name: 'episode')],
+    );
+    var queue = await open();
+    await queue.queueSeason(request, await queue.quoteSeason(request));
+    await queue.jobs.firstWhere((jobs) => jobs.first.episodes.first.state == EpisodeJobState.failed);
+    await queue.close();
+    final partial = (await store.scan(context.media)).nasTracks.singleWhere((t) => t.language == 'zh');
+    expect(partial.coverage!.map((v) => (v.start.inSeconds, v.end.inSeconds)), [(0, 60), (120, 150)]);
+    expect(partial.document.cues!.length, 90);
+    expect(failedAttempts, 3);
+    for (final stage in ['read', 'asr']) {
+      expect(timings.where((e) => e.stage == stage && e.status == 'ok').map((e) => e.windows.single.start.inSeconds), [
+        0,
+        30,
+        60,
+        90,
+        120,
+      ]);
+    }
+    expect(timings.where((e) => e.httpStatus == 503).map((e) => e.windows.map((w) => w.start.inSeconds).toList()), [
+      [60, 90],
+      [60, 90],
+      [60, 90],
+    ]);
+    reads.clear();
+    fail = false;
+    queue = await open();
+    await queue.queueSeason(request, await queue.quoteSeason(request));
+    await queue.jobs.firstWhere((jobs) => jobs.last.completedCount == 1);
+    await queue.close();
+    expect(reads, [60, 90]);
+    expect(
+      (await store.scan(context.media)).nasTracks.singleWhere((t) => t.language == 'zh').document.cues!.length,
+      150,
+    );
   });
 
   test('resumes through restart and budget pauses, retries twice, yields for strm and persists cancellation', () async {
@@ -270,6 +423,8 @@ void main() {
         const channel = MethodChannel('test/season-authorization');
         final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
         final windows = <int>[];
+        final sent = Completer<void>();
+        var asrCount = 0;
         messenger.setMockMethodCallHandler(channel, (call) async {
           final start = (call.arguments as Map)['startUs'] as int;
           windows.add(start);
@@ -280,26 +435,27 @@ void main() {
         });
         addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
         const asr = MethodChannel('embyview/asr');
-        messenger.setMockMethodCallHandler(
-          asr,
-          (_) async => {
+        messenger.setMockMethodCallHandler(asr, (_) async {
+          if (++asrCount > 1) await sent.future;
+          return {
             'language': 'ja',
             'segments': [
-              {'startUs': 0, 'endUs': 50000, 'text': '元の台詞'},
+              for (var i = 0; i < 60; i++) {'startUs': i * 1000, 'endUs': (i + 1) * 1000, 'text': '元の台詞'},
             ],
-          },
-        );
+          };
+        });
         addTearDown(() => messenger.setMockMethodCallHandler(asr, null));
         var revoked = false;
         var paidRequests = 0;
         final generator = SubtitleSeasonGenerator(
-          reader: SubtitleAudioReader(channel: channel),
+          reader: _NextReadAfterRequest(channel, sent.future),
           processor: SubtitleAiProcessor(
             readTranslationKey: (_) async => 'fixture',
             meter: usage.charge,
             clientFactory: () => MockClient((_) async {
               paidRequests++;
               revoked = true;
+              sent.complete();
               return http.Response(
                 jsonEncode({
                   'choices': [
@@ -308,7 +464,7 @@ void main() {
                       'message': {
                         'content': jsonEncode({
                           'lines': [
-                            {'id': 0, 'text': '你好'},
+                            for (var i = 0; i < 60; i++) {'id': i, 'text': '你好'},
                           ],
                         }),
                       },
@@ -361,6 +517,35 @@ void main() {
         expect(windows, [0]);
         expect((paidRequests, (await usage.usage()).usedMicros), (1, 12));
       },
+    );
+  }
+}
+
+// Hold the second read at the normal admission boundary until the test server
+// revokes authorization. Earlier reads may legitimately overlap translation.
+class _NextReadAfterRequest extends SubtitleAudioReader {
+  _NextReadAfterRequest(MethodChannel channel, this.sent) : super(channel: channel);
+  final Future<void> sent;
+
+  @override
+  Future<List<SubtitleAudioSegment>> read(
+    PlaybackSubtitleSource source, {
+    required Duration start,
+    required Duration end,
+    int? streamIndex,
+    bool background = false,
+    SubtitleAudioCancellation? cancellation,
+    Future<void> Function()? beforeRead,
+  }) async {
+    if (start > Duration.zero) await sent;
+    return super.read(
+      source,
+      start: start,
+      end: end,
+      streamIndex: streamIndex,
+      background: background,
+      cancellation: cancellation,
+      beforeRead: beforeRead,
     );
   }
 }

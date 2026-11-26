@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:uuid/uuid.dart';
 
 import '../../contracts/common.dart';
@@ -59,13 +61,14 @@ final class SubtitleSeasonGenerator {
     final beforeRead = context.checkAuthorization == null ? null : context.verifyAuthorization;
     run.cancellation.addListener(cancelAudio);
     var progressed = false;
-    try {
+    final rounded = <(Duration, Duration), TimeRange>{};
+    Stream<SubtitleAudioSegment> audio() async* {
       for (final gap in missingSubtitleCoverage(context.duration, coverage)) {
         for (var start = gap.start; start < gap.end;) {
           final next = start + const Duration(seconds: 30);
           final end = next < gap.end ? next : gap.end;
           run.setStage(EpisodeJobState.reading);
-          final audio = await _reader.read(
+          final segments = await _reader.read(
             context.source,
             start: start,
             end: end,
@@ -74,44 +77,63 @@ final class SubtitleSeasonGenerator {
             cancellation: audioCancellation,
             beforeRead: beforeRead,
           );
-          for (final segment in audio) {
+          for (final segment in segments) {
             if (segment.end <= segment.start) continue;
-            final piece = await processor.process(
-              segment,
-              cancellation: run.cancellation,
-              language: language,
-              translationPreferences: run.translationPreferences(),
-              mediaContext: context.mediaContext,
-              onStage: run.setStage,
-            );
-            language ??= piece.language;
             // The native 48 kHz reader rounds seek boundaries to a sample.
             const sample = Duration(microseconds: 22);
-            coverage.add(
-              TimeRange(
-                start: piece.coverage.start - start <= sample ? start : piece.coverage.start,
-                end: end - piece.coverage.end <= sample ? end : piece.coverage.end,
-              ),
+            rounded[(segment.start, segment.end)] = TimeRange(
+              start: segment.start - start <= sample ? start : segment.start,
+              end: end - segment.end <= sample ? end : segment.end,
             );
-            for (final cue in piece.cues) {
-              cues[(cue.start, cue.end, cue.translation ?? cue.text)] = cue;
-            }
-            progressed = true;
+            yield segment;
           }
           start = end;
         }
       }
+    }
+
+    final iterator = StreamIterator(audio());
+    try {
+      await processor.generate(
+        next: () async => await iterator.moveNext() ? iterator.current : null,
+        cancellation: run.cancellation,
+        realtime: false,
+        language: language,
+        mediaContext: context.mediaContext,
+        translationPreferences: run.translationPreferences,
+        onStage: run.setStage,
+        onResult: (piece) {
+          if (piece.cues.isNotEmpty) language ??= piece.language;
+          coverage.add(rounded.remove((piece.coverage.start, piece.coverage.end)) ?? piece.coverage);
+          for (final cue in piece.cues) {
+            cues[(cue.start, cue.end, cue.translation ?? cue.text)] = cue;
+          }
+          progressed = true;
+        },
+      );
     } on EmbyViewFailure catch (error) {
-      if (error is! SubtitleBudgetBlocked && error is! SubtitleQuotePriceIncreased) rethrow;
+      if (error is! SubtitleBudgetBlocked &&
+          error is! SubtitleQuotePriceIncreased &&
+          error is! SubtitleTranslationBatchFailure) {
+        rethrow;
+      }
       if (progressed && !run.cancellation.isCancelled) {
-        try {
+        // A translation gap is only resumable after the paired subtitles reach
+        // storage. Surface a failed save to the queue so it can retry the write.
+        if (error is SubtitleTranslationBatchFailure) {
           await _save(context, run, coverage, cues.values, language, partial: true);
-        } on Exception {
-          // Keep the budget wait even if the share has also stopped accepting writes.
+        } else {
+          try {
+            await _save(context, run, coverage, cues.values, language, partial: true);
+          } on Exception {
+            // Keep the budget wait even if the share also stopped accepting writes.
+          }
         }
       }
       rethrow;
     } finally {
+      audioCancellation.cancel();
+      await iterator.cancel();
       run.cancellation.removeListener(cancelAudio);
     }
     if (!progressed && missingSubtitleCoverage(context.duration, coverage).isNotEmpty) {

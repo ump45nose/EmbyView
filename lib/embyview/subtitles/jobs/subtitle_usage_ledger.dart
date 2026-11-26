@@ -44,6 +44,8 @@ final class SubtitleUsageLedger {
   final DateTime Function() _clock;
   final _serial = SubtitleJobSerial();
   final _episodeZoneKey = Object();
+  final _reserved = <String, int>{};
+  Completer<void> _settled = Completer<void>();
   Set<String>? _dirtyMonths;
 
   String get _month {
@@ -82,31 +84,64 @@ final class SubtitleUsageLedger {
   Future<T> duringEpisode<T>(String episode, Future<T> Function() run, {Future<void> Function()? checkAuthorization}) =>
       runZoned(run, zoneValues: {_episodeZoneKey: (id: episode, checkAuthorization: checkAuthorization)});
 
-  Future<T> charge<T>(int estimatedCostMicros, Future<SubtitleAiCharge<T>> Function() invoke) {
+  Future<T> charge<T>(int estimatedCostMicros, Future<SubtitleAiCharge<T>> Function() invoke) async {
     if (estimatedCostMicros < 0) throw ArgumentError.value(estimatedCostMicros);
     final episode = Zone.current[_episodeZoneKey] as ({String id, Future<void> Function()? checkAuthorization})?;
-    return _serial.run(() async {
-      final month = _month;
-      if (estimatedCostMicros > 0) {
-        // This machine admits one paid request at a time while any budget remains.
-        final (state, reason) = _budget(await _usage(month));
+    late String month;
+    while (true) {
+      Future<void>? wait;
+      await _serial.run(() async {
+        month = _month;
+        if (estimatedCostMicros == 0) {
+          await _readLocal(month);
+          return;
+        }
+        final usage = await _usage(month);
+        final (state, reason) = _budget(usage);
         if (state != BudgetState.available) throw SubtitleBudgetBlocked(reason!, state);
-      }
-      final own = await _readLocal(month);
-      final checkAuthorization = episode?.checkAuthorization;
-      if (checkAuthorization != null) await checkAuthorization();
+        final reserved = _reserved[month] ?? 0;
+        // The existing budget permits one final call to cross the limit. While
+        // others are outstanding, admit another only when both estimates fit.
+        if (reserved > 0 && usage.usedMicros! + reserved + estimatedCostMicros > usage.budgetMicros) {
+          wait = _settled.future;
+        } else {
+          _reserved[month] = reserved + estimatedCostMicros;
+        }
+      });
+      if (wait == null) break;
+      await wait;
+    }
+    try {
+      await episode?.checkAuthorization?.call();
       final response = await invoke();
-      final requestId = response.requestId?.trim();
-      final id = requestId == null || requestId.isEmpty ? const Uuid().v4() : requestId;
-      final key = response.unmetered ? 'unmetered:$id' : id;
-      own.calls.putIfAbsent(
-        key,
-        () => (response.costMicros >= 0 ? response.costMicros : estimatedCostMicros, episode?.id),
-      );
-      await _writeLocal(month, own);
-      await _sync();
+      await _serial.run(() async {
+        final own = await _readLocal(month);
+        final requestId = response.requestId?.trim();
+        final id = requestId == null || requestId.isEmpty ? const Uuid().v4() : requestId;
+        final key = response.unmetered ? 'unmetered:$id' : id;
+        own.calls.putIfAbsent(
+          key,
+          () => (response.costMicros >= 0 ? response.costMicros : estimatedCostMicros, episode?.id),
+        );
+        await _writeLocal(month, own);
+        await _sync();
+      });
       return response.value;
-    });
+    } finally {
+      if (estimatedCostMicros > 0) {
+        await _serial.run(() async {
+          final remaining = _reserved[month]! - estimatedCostMicros;
+          if (remaining == 0) {
+            _reserved.remove(month);
+          } else {
+            _reserved[month] = remaining;
+          }
+          final previous = _settled;
+          _settled = Completer<void>();
+          previous.complete();
+        });
+      }
+    }
   }
 
   Future<void> completeEpisode(String episode) => _serial.run(() async {

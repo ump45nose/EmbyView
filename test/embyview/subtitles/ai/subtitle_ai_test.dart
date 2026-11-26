@@ -330,6 +330,174 @@ void main() {
     await controller.close();
   });
 
+  test('live first window translates before the next arrives and later windows share requests', () async {
+    final audio = StreamController<SubtitleAudioSegment>();
+    final sizes = <int>[];
+    final first = Completer<void>();
+    final controller = SubtitleAiRunController(
+      _processor((request) async {
+        final lines = _lines(request);
+        sizes.add(lines.length);
+        if (!first.isCompleted) first.complete();
+        return _openAiTranslation(lines);
+      }),
+    );
+    addTearDown(controller.close);
+    final result = controller.start(
+      generation: 3,
+      timelineGeneration: 1,
+      position: Duration.zero,
+      audio: audio.stream,
+      followsPlayhead: false,
+      isCurrent: () => true,
+    );
+    audio.add(_audio(0));
+    await first.future;
+    for (var i = 1; i < 6; i++) {
+      audio.add(_audio(i));
+    }
+    await audio.close();
+    expect((await result)!.cues.map((c) => c.start.inSeconds), [0, 1, 2, 3, 4, 5]);
+    expect(sizes.first, 1);
+    expect(sizes.skip(1).where((v) => v >= 2 && v <= 3).length, greaterThanOrEqualTo(2));
+  });
+
+  test('episode ASR overlaps three translations, preserving timelines on out-of-order completion', () async {
+    final releases = List.generate(4, (_) => Completer<void>());
+    final third = Completer<void>();
+    var transcribed = 0, active = 0, peak = 0;
+    final sizes = <int>[];
+    messenger.setMockMethodCallHandler(asr, (_) async {
+      transcribed++;
+      return {
+        'language': 'ja',
+        'segments': [
+          for (var i = 0; i < 20; i++) {'startUs': i * 40000, 'endUs': (i + 1) * 40000, 'text': 'line'},
+        ],
+      };
+    });
+    final controller = SubtitleAiRunController(
+      _processor((request) async {
+        final lines = _lines(request);
+        final id = sizes.length;
+        sizes.add(lines.length);
+        peak = math.max(peak, ++active);
+        if (id == 2) third.complete();
+        await releases[id].future;
+        active--;
+        return _openAiTranslation(lines.reversed.toList());
+      }),
+    );
+    addTearDown(controller.close);
+    final pending = controller.start(
+      generation: 3,
+      timelineGeneration: 1,
+      position: Duration.zero,
+      audio: Stream.fromIterable(List.generate(12, (i) => _audio(i))),
+      followsPlayhead: false,
+      realtime: false,
+      isCurrent: () => true,
+    );
+    await third.future;
+    expect(transcribed, greaterThanOrEqualTo(9));
+    for (final release in releases.reversed) {
+      release.complete();
+    }
+    final output = (await pending)!;
+    expect(peak, 3);
+    expect(sizes, [60, 60, 60, 60]);
+    expect(output.coverage.single.end, const Duration(seconds: 12));
+    expect(output.cues.length, 240);
+    expect(
+      output.cues.map((c) => c.start.inMicroseconds).toList(),
+      orderedEquals([
+        for (var w = 0; w < 12; w++)
+          for (var i = 0; i < 20; i++) w * 1000000 + i * 40000,
+      ]),
+    );
+  });
+
+  for (final status in [429, 503, 408]) {
+    test('HTTP $status attempts twice more with backoff and records no content or credentials', () async {
+      final events = <Map<String, Object?>>[];
+      final sub = subtitleAiTimings.listen((e) => events.add(e.toJson()));
+      addTearDown(sub.cancel);
+      final waits = <Duration>[];
+      var requests = 0;
+      final processor = SubtitleAiProcessor(
+        readTranslationKey: (_) async => 'secret-sentinel',
+        meter: <T>(_, invoke) async => (await invoke()).value,
+        waitForRetry: (d) async => waits.add(d),
+        clientFactory: () => MockClient((request) async {
+          if (++requests <= 2) return http.Response('private upstream response', status);
+          return _openAiTranslation(_lines(request));
+        }),
+      );
+      expect(processor.requestTimeout, const Duration(seconds: 120));
+      await processor.process(_audio(1), cancellation: SubtitleAiCancellation());
+      await Future<void>.delayed(Duration.zero);
+      expect(waits, [const Duration(seconds: 1), const Duration(seconds: 2)]);
+      final translations = events.where((e) => e['stage'] == 'translation').toList();
+      expect(translations.map((e) => e['httpStatus']), [status, status, 200]);
+      expect(translations.map((e) => e['attempt']), [1, 2, 3]);
+      expect(translations.map((e) => e['batch']).toSet().length, 1);
+      expect(translations.last['windows'], [
+        [1000000, 2000000],
+      ]);
+      expect(
+        jsonEncode(events),
+        isNot(anyOf(contains('secret-sentinel'), contains('private upstream'), contains('new'))),
+      );
+    });
+  }
+  test('cancelling during backoff releases the run without submitting another request', () async {
+    final token = SubtitleAiCancellation();
+    final sleeping = Completer<void>();
+    final resume = Completer<void>();
+    var requests = 0;
+    final ai = SubtitleAiProcessor(
+      readTranslationKey: (_) async => 'fixture',
+      meter: <T>(_, invoke) async => (await invoke()).value,
+      waitForRetry: (_) {
+        sleeping.complete();
+        return resume.future;
+      },
+      clientFactory: () => MockClient((_) async {
+        requests++;
+        return http.Response('', 503);
+      }),
+    );
+    final task = ai.process(_audio(0), cancellation: token);
+    final expected = expectLater(task, throwsA(isA<SubtitleAiCancelled>()));
+    await sleeping.future;
+    token.cancel();
+    await expected;
+    resume.complete();
+    expect(requests, 1);
+  });
+
+  test('wall-clock timeout retries twice and a permanent bad request is sent just once', () async {
+    for (final timeout in [true, false]) {
+      var requests = 0;
+      final processor = SubtitleAiProcessor(
+        readTranslationKey: (_) async => 'key',
+        meter: <T>(_, invoke) async => (await invoke()).value,
+        requestTimeout: const Duration(milliseconds: 5),
+        waitForRetry: (_) async {},
+        clientFactory: () => MockClient((_) async {
+          requests++;
+          if (timeout) return Completer<http.Response>().future;
+          return http.Response('', 400);
+        }),
+      );
+      await expectLater(
+        processor.process(_audio(1), cancellation: SubtitleAiCancellation()),
+        throwsA(isA<EmbyViewFailure>()),
+      );
+      expect(requests, timeout ? 3 : 1);
+    }
+  });
+
   test('alignment fits shift and drift, keeps unmatched cues on the shift and preserves ASS', () async {
     const onsets = [2, 4, 9, 12, 19, 22, 28, 34];
     const header = '[Script Info]\nScriptType: v4.00+\n[V4+ Styles]\nStyle: Test,Arial,25\n[Events]\n';
@@ -456,3 +624,11 @@ http.Response _json(Object value, {String? id}) => http.Response(
   200,
   headers: {'content-type': 'application/json; charset=utf-8', 'x-request-id': ?id},
 );
+
+List<Map<String, Object>> _lines(http.Request request) {
+  final body = jsonDecode(request.body) as Map;
+  final lines = jsonDecode(body['messages'][1]['content'] as String) as List;
+  return [
+    for (final line in lines) {'id': line['id'] as int, 'text': '译文'},
+  ];
+}

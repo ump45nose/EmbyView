@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter/services.dart';
 
 import '../../contracts/common.dart';
+import 'subtitle_timing.dart';
 import '../../playback/native_playback.dart';
 import '../../playback/playback_subtitle_input.dart';
 
@@ -93,9 +94,16 @@ Stream<SubtitleAudioSegment> playbackSubtitleAudio(
   var sourceStart = Duration.zero;
   var timeline = -1;
   var discontinuity = true;
+  final gather = Stopwatch();
 
   void emit() {
     if (pcm.isEmpty) return;
+    SubtitleAiTiming(
+      'read',
+      [TimeRange(start: playbackStart, end: playbackStart + _elapsed(pcm.length ~/ _bytesPerFrame))],
+      gather.elapsed,
+      'ok',
+    ).emit();
     output.add(
       SubtitleAudioSegment(
         start: playbackStart,
@@ -147,6 +155,9 @@ Stream<SubtitleAudioSegment> playbackSubtitleAudio(
     var frame = _frames(start - packet.playbackTime).ceil().clamp(0, packet.frameCount);
     while (frame < packet.frameCount) {
       if (pcm.isEmpty) {
+        gather
+          ..reset()
+          ..start();
         playbackStart = packet.playbackTime + _elapsed(frame);
         sourceStart = packet.sourceTime + _elapsed(frame);
       }
@@ -272,6 +283,9 @@ class SubtitleAudioReader {
           if (waiting()) continue;
         }
         final reading = slot = _active = _ReadSlot(++_nextNativeId, background && strm);
+        final elapsed = Stopwatch()..start();
+        final window = [TimeRange(start: start, end: end)];
+        var status = 'failed';
         try {
           final rows = await _channel.invokeListMethod<Map>('readIndependent', {
             'address': source.address.toString(),
@@ -284,6 +298,7 @@ class SubtitleAudioReader {
           });
           checkCancelled();
           if (!reading.preempted) {
+            status = 'ok';
             return [
               for (final (index, row) in (rows ?? const <Map>[]).indexed)
                 SubtitleAudioSegment(
@@ -300,6 +315,16 @@ class SubtitleAudioReader {
           checkCancelled();
           if (!reading.preempted) rethrow;
         } finally {
+          SubtitleAiTiming(
+            'read',
+            window,
+            elapsed.elapsed,
+            cancellation?.isCancelled == true
+                ? 'cancelled'
+                : reading.preempted
+                ? 'preempted'
+                : status,
+          ).emit();
           slot = _active = null;
           _wake();
         }

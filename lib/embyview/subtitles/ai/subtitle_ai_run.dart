@@ -30,6 +30,7 @@ final class SubtitleAiRunController {
     required Duration position,
     required Stream<SubtitleAudioSegment> audio,
     required bool followsPlayhead,
+    bool realtime = true,
     required bool Function() isCurrent,
     String? language,
     String mediaContext = '',
@@ -63,21 +64,20 @@ final class SubtitleAiRunController {
       });
       _audioReleased = buffer.released;
       _publish(work, followsPlayhead ? AiRunState.catchingUp : AiRunState.generating);
-      while (_current(work)) {
-        final segment = await buffer.next();
-        if (!_current(work) || segment == null) break;
-        final result = await processor.process(
-          segment,
-          cancellation: work.cancellation,
-          language: language,
-          mediaContext: mediaContext,
-        );
-        if (!_current(work)) return null;
-        if (result.cues.isNotEmpty) work.language ??= result.language;
-        work.coverage = mergeSubtitleAiCoverage([...work.coverage, result.coverage]);
-        work.cues.addAll(result.cues);
-        _publish(work, _run!.state);
-      }
+      await processor.generate(
+        next: buffer.next,
+        cancellation: work.cancellation,
+        realtime: realtime,
+        language: language,
+        mediaContext: mediaContext,
+        onResult: (result) {
+          if (!_current(work)) return;
+          if (result.cues.isNotEmpty) work.language ??= result.language;
+          work.coverage = mergeSubtitleAiCoverage([...work.coverage, result.coverage]);
+          work.cues.addAll(result.cues);
+          _publish(work, _run!.state);
+        },
+      );
       if (!_current(work)) return null;
       if (work.coverage.isEmpty) {
         throw const EmbyViewFailure('未读到可用于听写的音频。', retryable: true, code: 'subtitle_audio_empty');

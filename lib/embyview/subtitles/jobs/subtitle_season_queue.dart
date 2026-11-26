@@ -400,7 +400,9 @@ final class SubtitleSeasonQueue {
           row.waiting = failure.reason;
         } else {
           row.failures++;
-          if (row.failures >= 3 || !failure.retryable) row.failure = failure;
+          if (failure is SubtitleTranslationBatchFailure || row.failures >= 3 || !failure.retryable) {
+            row.failure = failure;
+          }
         }
       });
       return !waiting;
