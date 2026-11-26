@@ -1,10 +1,12 @@
 /// Public UI kit export barrel for EmbyView pages.
 library;
 
+export 'home/ev_home_state_card.dart';
 export 'icons/ev_icons.dart';
 export 'login/ev_login_models.dart';
 export 'login/ev_login_page.dart';
 export 'onboard/ev_onboarding_card.dart';
+export 'player/open/ev_player_error_card.dart';
 export 'shelf/ev_artwork.dart';
 export 'shelf/ev_card.dart';
 export 'shelf/ev_shelf.dart';

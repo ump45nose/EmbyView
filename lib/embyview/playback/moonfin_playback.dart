@@ -53,6 +53,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
       userAgent: userAgent,
       prefetchEnabled: prefetch115,
       onResolved: _resolved,
+      onError: _resolutionError,
     );
   }
   late final _mapper = MediaMapper(server: _server, user: _user, token: client.accessToken ?? '');
@@ -189,6 +190,14 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
     session._resolved(item, result, generation, infoTime, address, subtitleSwitchFrom, disablesSubtitles);
   }
 
+  void _resolutionError(dynamic item, Object error, Uri source, {required bool remote}) {
+    final session = _active;
+    if (!_valid || session == null || session._closing || playbackItemId(item) != session._target.itemId) {
+      return;
+    }
+    session._recordSourceError(error, source: source, remote: remote);
+  }
+
   /// Called before replacing an authenticated client. This waits for the old
   /// manager's Stop and any late progress completion before releasing bindings.
   Future<void> dispose() => _dispose ??= () async {
@@ -260,6 +269,10 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   MediaQuality? _quality;
   PlaybackSubtitleSource? _subtitleSource;
   NativePlaybackSnapshot _native = const NativePlaybackSnapshot();
+  Object? _lastSourceError;
+  Uri? _lastSourceUri;
+  bool _lastSourceRemote = false;
+  Future<void>? _openingTask;
   bool get _closing => _close != null;
   bool get _current => !_closing && identical(_owner._active, this) && _owner._valid;
   @override
@@ -273,7 +286,21 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   @override
   NativePlaybackAudioInput get audioInput => _owner.audioInput;
 
-  Future<void> _start() async {
+  void _recordSourceError(Object? error, {Uri? source, bool remote = false}) {
+    _lastSourceError = error;
+    if (source != null) _lastSourceUri = source;
+    if (remote) _lastSourceRemote = true;
+  }
+
+  Future<void> _start({Duration? startPosition}) {
+    final task = _runStart(startPosition: startPosition);
+    _openingTask = task;
+    return task.whenComplete(() {
+      if (identical(_openingTask, task)) _openingTask = null;
+    });
+  }
+
+  Future<void> _runStart({Duration? startPosition}) async {
     _bind();
     try {
       final raw = await _owner.client.itemsApi.getItem(_target.itemId);
@@ -306,10 +333,18 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       }
       if (!_current) return;
       _navigationTime = _intent.elapsed;
-      await _manager.playItems(queue, startIndex: index, startPosition: _target.startAt ?? Duration.zero);
+      await _manager.playItems(
+        queue,
+        startIndex: index,
+        startPosition: startPosition ?? _target.startAt ?? Duration.zero,
+      );
       if (_current) _emit();
-    } catch (_) {
-      if (_current) _fail('播放无法打开，请重试。', 'openFailed');
+    } catch (error) {
+      if (_current) {
+        if (!_failed || (_snapshot.failure?.httpStatus == null && extractPlaybackHttpStatus(error) != null)) {
+          _fail('播放无法打开，请重试。', 'openFailed', error: error);
+        }
+      }
     }
   }
 
@@ -329,7 +364,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         if (!_current) return;
         if (bringup.phase == PlaybackBringupPhase.resolving) _acceptNativeEvents = false;
         if (bringup.phase == PlaybackBringupPhase.failed) {
-          _fail('播放中断，请重试。', 'engineFailed');
+          _fail('播放中断，请重试。', 'engineFailed', error: _lastSourceError ?? bringup.error);
         } else if (bringup.phase == PlaybackBringupPhase.ready) {
           if (_openingAt != null) _engineOpen = _intent.elapsed - _openingAt!;
           _record('ready');
@@ -565,6 +600,11 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   Future<bool?> _recoverSource(PlaybackSourceFailureContext context) async {
     if (!_current) return false;
     final key = _owner._resolver.keyFor(context.resolution);
+    _recordSourceError(
+      context.error,
+      source: Uri.tryParse(context.resolution.streamUrl),
+      remote: key != null,
+    );
     if (key == null || !isExpiringPlaybackAddress(context.error)) return null;
     if (context.position > Duration.zero) _reopenPosition = context.position;
     _owner._cache.invalidate(key);
@@ -593,11 +633,45 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     ),
   );
 
-  void _fail(String reason, String category) {
+  bool _isDirect115Source() {
+    if (_quality?.origin == MediaOrigin.direct115 || _item?.quality?.origin == MediaOrigin.direct115) {
+      return true;
+    }
+    if (_lastSourceUri != null && is115MediaHost(_lastSourceUri!.host)) {
+      return true;
+    }
+    final subUri = _subtitleSource?.address;
+    if (subUri != null && is115MediaHost(subUri.host)) {
+      return true;
+    }
+    if (_lastSourceRemote) return true;
+    final itemPath = (_raw['Path'] as String? ?? '').toLowerCase();
+    return itemPath.endsWith('.strm');
+  }
+
+  EmbyViewFailure _buildFailure(String reason, String category, {Object? error}) {
+    final effective = error ?? _lastSourceError;
+    final httpStatus = extractPlaybackHttpStatus(effective) ?? extractPlaybackHttpStatus(_lastSourceError);
+    final is115 = _isDirect115Source();
+    if (httpStatus == 403 && is115) {
+      return const EmbyViewFailure.rateLimited115();
+    }
+    return EmbyViewFailure(
+      reason,
+      retryable: true,
+      code: category,
+      httpStatus: httpStatus,
+      sourceLabel: is115 ? '115 网盘' : null,
+      isRateLimited: httpStatus == 403,
+    );
+  }
+
+  void _fail(String reason, String category, {Object? error}) {
     if (_closing) return;
     _failed = true;
-    _record('failed', failure: category);
-    _emit(failure: EmbyViewFailure(reason, retryable: true, code: category));
+    final failure = _buildFailure(reason, category, error: error);
+    _record('failed', failure: failure.code ?? category);
+    _emit(failure: failure);
   }
 
   void _emit({EmbyViewFailure? failure}) {
@@ -1062,6 +1136,59 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
 
   @override
   Future<ThumbnailFrame?> thumbnailAt(Duration position) async => _current ? _thumbnails.at(position) : null;
+
+  @override
+  Future<void> retryOpen() async {
+    if (!_current || _openingTask != null) return;
+    _owner._cache.invalidateForItem(
+      server: _owner._server,
+      user: _owner._user,
+      item: _target.itemId,
+    );
+    if (_subtitleSource case final currentSource?) {
+      _owner._cache.invalidate(
+        PlaybackSourceKey(
+          server: _owner._server,
+          user: _owner._user,
+          item: _target.itemId,
+          mediaSource: currentSource.mediaSourceId,
+          userAgent: _owner.userAgent,
+        ),
+      );
+    }
+    _failed = false;
+    _ended = false;
+    _retryUsed = false;
+    _lastSourceError = null;
+    _lastSourceUri = null;
+    _lastSourceRemote = false;
+    _firstFrame = null;
+    _acceptNativeEvents = false;
+    _intent
+      ..reset()
+      ..start();
+    _snapshot = PlaybackSnapshot(
+      generation: _snapshot.generation,
+      target: _target,
+      item: _item,
+      phase: PlaybackPhase.preparing,
+      position: _reopenPosition ?? _target.startAt ?? Duration.zero,
+      duration: _snapshot.duration,
+      mediaSourceId: _subtitleSource?.mediaSourceId,
+      quality: _quality,
+      chapters: List.unmodifiable(_chapters),
+      volume: _snapshot.volume,
+      muted: _snapshot.muted,
+      nextEpisode: _next,
+      fullscreenSupported: _snapshot.fullscreenSupported,
+      fullscreen: _fullscreen,
+      pictureInPictureSupported: _snapshot.pictureInPictureSupported,
+      pictureInPicture: _snapshot.pictureInPicture,
+      anime4k: _snapshot.anime4k,
+    );
+    _changes.add(_snapshot);
+    await _start(startPosition: _reopenPosition ?? _target.startAt ?? Duration.zero);
+  }
   @override
   Future<String> registerExternalSubtitle(
     String url, {

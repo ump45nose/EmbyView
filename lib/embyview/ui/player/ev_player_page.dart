@@ -19,18 +19,32 @@ import 'package:moonfin/embyview/ui/player/panel/ev_player_panel.dart';
 /// OSD controls, overlays, and the three-tab side panel around [PlaybackSession].
 class EvPlayerPage extends StatefulWidget {
   const EvPlayerPage({
-    super.key, required this.session, this.origin, this.art, this.subtitles,
-    this.initialPanelOpen = false, this.initialPanelTab = 'subs', this.initialLowerTab,
-    this.initialScrubHoverFraction, this.initialCompareSplit, this.holdOpening = false,
-    this.autoTickCredits = true, this.pauseDelay = const Duration(milliseconds: 1500),
-    this.idleHideDelay = const Duration(milliseconds: 3200), this.clock = DateTime.now, this.onClose,
+    super.key,
+    required this.session,
+    this.origin,
+    this.art,
+    this.subtitles,
+    this.initialPanelOpen = false,
+    this.initialPanelTab = 'subs',
+    this.initialLowerTab,
+    this.initialScrubHoverFraction,
+    this.initialCompareSplit,
+    this.holdOpening = false,
+    this.autoTickCredits = true,
+    this.autoTickRetry = true,
+    this.retryCountdownSeconds = 30,
+    this.pauseDelay = const Duration(milliseconds: 1500),
+    this.idleHideDelay = const Duration(milliseconds: 3200),
+    this.clock = DateTime.now,
+    this.onClose,
   });
 
   final PlaybackSession session;
   final Rect? origin;
   final CardArtwork? art;
   final EmbyViewSubtitles? subtitles;
-  final bool initialPanelOpen, holdOpening, autoTickCredits;
+  final bool initialPanelOpen, holdOpening, autoTickCredits, autoTickRetry;
+  final int retryCountdownSeconds;
   final String initialPanelTab;
   final String? initialLowerTab;
   final double? initialScrubHoverFraction, initialCompareSplit;
@@ -44,6 +58,7 @@ class EvPlayerPage extends StatefulWidget {
 class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderStateMixin {
   late final AnimationController _openCtrl;
   late final EvFirstFrameTracker _firstFrame;
+  final _videoFrameKey = GlobalKey(debugLabel: 'ev_player_video_frame');
   final _focusNode = FocusNode(debugLabel: 'ev_player_page_focus');
 
   late PlaybackSnapshot _snap;
@@ -60,6 +75,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   bool _scrubHovering = false, _scrubbing = false, _bottomBarHover = false, _flashAuroraTip = false, _toastVisible = false;
   bool _autoCompareSwept = false;
   int _seekLeftNonce = 0, _seekRightNonce = 0, _compareSweepNonce = 0;
+  int _retryAttempt = 1, _retryNonce = 0;
   String _toastMessage = '';
   int _trackSelection = 0;
   EvIconData? _toastIcon;
@@ -143,6 +159,8 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     if (!identical(old.session, widget.session)) {
       unawaited(_sessionSub?.cancel());
       _snap = widget.session.snapshot;
+      _retryAttempt = 1;
+      _retryNonce = 0;
       _resetForGeneration(_snap);
       _sessionSub = widget.session.changes.listen(_onSessionSnapshot);
       _bindSubtitles(widget.subtitles ?? EvScope.maybeOf(context)?.services.subtitles);
@@ -187,8 +205,11 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     var closedPanel = false;
     setState(() {
       _snap = next;
+      if (next.target.itemId != prev.target.itemId || next.phase == PlaybackPhase.playing) {
+        _retryAttempt = 1;
+      }
       genChanged ? _resetForGeneration(next) : _observeFirstFrame(next);
-      if (nowCredits) {
+      if (nowCredits || next.phase == PlaybackPhase.failed) {
         closedPanel = _panelOpen;
         _panelOpen = _pauseCardVisible = _compareActive = false; _pauseTimer?.cancel(); _pauseTimer = null;
       }
@@ -321,6 +342,15 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
 
   void _handleClose() => widget.onClose != null ? widget.onClose!() : unawaited(Navigator.of(context).maybePop());
 
+  void _retryPlayback() {
+    setState(() {
+      _retryAttempt++;
+      _retryNonce++;
+      _openingDone = false;
+    });
+    unawaited(widget.session.retryOpen());
+  }
+
   bool _isTextInputFocused() {
     final ctx = FocusManager.instance.primaryFocus?.context;
     if (ctx == null) return false;
@@ -344,6 +374,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
       else { _handleClose(); }
       return KeyEventResult.handled;
     }
+    if (_snap.phase == PlaybackPhase.failed) return KeyEventResult.ignored;
     if (key == LogicalKeyboardKey.space && event is KeyDownEvent) { _togglePlayPause(); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.arrowLeft) { _seekBy(const Duration(seconds: -10)); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.arrowRight) { _seekBy(const Duration(seconds: 10)); return KeyEventResult.handled; }
@@ -372,20 +403,25 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   @override
   Widget build(BuildContext context) {
     final scale = EvScale.of(context), creditsActive = _creditsActive;
-    final openingDone = _openingDone && !widget.holdOpening;
-    final showControls = _controlsVisible && openingDone && !creditsActive;
+    final failed = _snap.phase == PlaybackPhase.failed;
+    final openingDone = _openingDone && !widget.holdOpening && !failed;
+    final showControls = _controlsVisible && openingDone && !creditsActive && !failed;
     final origSize = _snap.anime4k.originalSize;
     final videoAspectRatio = (origSize != null && origSize.width > 0 && origSize.height > 0)
         ? origSize.width / origSize.height
         : 16 / 9;
 
     final videoFrame = EvCreditsVideoFrame(
-      creditsActive: creditsActive, panelOpen: _panelOpen, videoAspectRatio: videoAspectRatio, onTapMiniVideo: _dismissCredits,
+      key: _videoFrameKey,
+      creditsActive: creditsActive && !failed, panelOpen: _panelOpen, videoAspectRatio: videoAspectRatio, onTapMiniVideo: _dismissCredits,
       child: Stack(fit: StackFit.expand, children: [
         Positioned.fill(child: widget.session.videoSurface(key: ValueKey('ev_video_${_snap.generation}'))),
         Positioned.fill(child: EvPlayerOpeningOverlay(
           snapshot: _snap, art: widget.art, uiFirstFrameLatency: _firstFrame.uiFirstFrameLatency,
-          done: openingDone, holdVisible: widget.holdOpening, onBack: _handleClose, onRetry: () => unawaited(widget.session.resume()),
+          done: openingDone, holdVisible: widget.holdOpening || failed,
+          retryAttempt: _retryAttempt, retryNonce: _retryNonce,
+          retryCountdownSeconds: widget.retryCountdownSeconds, autoTickRetry: widget.autoTickRetry,
+          onBack: _handleClose, onRetry: _retryPlayback,
         )),
       ]),
     );
@@ -398,7 +434,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
           key: const Key('ev_player_page'), color: const Color(0xFF000000),
           child: Stack(fit: StackFit.expand, children: [
             Positioned.fill(child: EvCreditsOverlay(
-              visible: creditsActive, snapshot: _snap, autoTick: widget.autoTickCredits,
+              visible: creditsActive && !failed, snapshot: _snap, autoTick: widget.autoTickCredits,
               onPlayNext: () => unawaited(widget.session.playNext(finishCurrent: true)),
               onStay: _dismissCredits,
             )),
@@ -407,11 +443,12 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
               builder: (_, child) => EvPlayerOpeningClip(origin: widget.origin, expandProgress: EvCurves.out.transform(_openCtrl.value), cornerRadius: scale.rem(1.25), child: child!),
               child: videoFrame,
             )),
-            EvLiveSubtitleLayer(
-              snapshot: _snap, subtitleSnapshot: _activeSubSnap, controlsVisible: showControls, panelOpen: _panelOpen,
-              scrubHovering: _scrubHovering || _scrubbing || widget.initialScrubHoverFraction != null, paused: _pauseCardVisible, creditsActive: creditsActive,
-            ),
-            Positioned.fill(child: EvPauseOverlay(visible: _pauseCardVisible && !creditsActive, snapshot: _snap, art: widget.art, clock: widget.clock, onResume: _togglePlayPause)),
+            if (!failed)
+              EvLiveSubtitleLayer(
+                snapshot: _snap, subtitleSnapshot: _activeSubSnap, controlsVisible: showControls, panelOpen: _panelOpen,
+                scrubHovering: _scrubHovering || _scrubbing || widget.initialScrubHoverFraction != null, paused: _pauseCardVisible, creditsActive: creditsActive,
+              ),
+            Positioned.fill(child: EvPauseOverlay(visible: _pauseCardVisible && !creditsActive && !failed, snapshot: _snap, art: widget.art, clock: widget.clock, onResume: _togglePlayPause)),
             Positioned.fill(child: EvPlayerControls(
               snapshot: _snap, art: widget.art, aiRun: _activeSubSnap?.ai, flashAuroraTip: _flashAuroraTip, visible: showControls,
               panelOpen: _panelOpen, activePanelTab: _panelTab, pauseCardVisible: _pauseCardVisible,

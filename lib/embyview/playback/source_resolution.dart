@@ -189,6 +189,25 @@ class PlaybackRedirectCache {
     _pending.remove(key);
   }
 
+  /// Invalidates every cached and in-flight redirect entry belonging to [item]
+  /// on [server] for [user], ensuring the next open fetches a fresh URL.
+  void invalidateForItem({
+    required String server,
+    required String user,
+    required String item,
+  }) {
+    final keys = <PlaybackSourceKey>{
+      ..._cache.keys,
+      ..._pending.keys,
+      ..._epochs.keys,
+    };
+    for (final key in keys) {
+      if (key.server == server && key.user == user && key.item == item) {
+        invalidate(key);
+      }
+    }
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;
@@ -206,19 +225,39 @@ class PlaybackAddressException implements Exception {
   String toString() => 'Media address unavailable (HTTP $status)';
 }
 
+/// Returns `true` when [host] belongs to a 115 direct-link domain.
+bool is115MediaHost(String host) {
+  final lower = host.toLowerCase();
+  return const ['115.com', '115cdn.net', '115cdn.com']
+      .any((domain) => lower == domain || lower.endsWith('.$domain'));
+}
+
+/// Extracts a typed HTTP status code from a playback/redirect error if present.
+int? extractPlaybackHttpStatus(Object? error) {
+  if (error == null) return null;
+  if (error is PlaybackAddressException) return error.status;
+  if (error is Map) {
+    for (final key in const ['status', 'statusCode', 'httpStatus']) {
+      final value = error[key];
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) {
+        final parsed = int.tryParse(value);
+        if (parsed != null) return parsed;
+      }
+    }
+    return extractPlaybackHttpStatus(error['message'] ?? error['kind']);
+  }
+  final match = RegExp(r'\b([45]\d{2})\b').firstMatch(error.toString());
+  return match != null ? int.tryParse(match.group(1)!) : null;
+}
+
 /// Retry eligibility uses typed status first; log strings are never retained.
 bool isExpiringPlaybackAddress(Object? error) {
   if (error == null || error is TimeoutException) return true;
-  if (error is PlaybackAddressException) return error.status == 403;
-  if (error is Map) {
-    if (error['status'] == 403 || error['statusCode'] == 403 || error['httpStatus'] == 403) {
-      return true;
-    }
-    return isExpiringPlaybackAddress(error['message'] ?? error['kind'] ?? '');
-  }
+  if (extractPlaybackHttpStatus(error) == 403) return true;
   final text = error.toString().toLowerCase();
-  return RegExp(r'\b403\b').hasMatch(text) ||
-      text.contains('timed out') ||
+  return text.contains('timed out') ||
       text.contains('timeout') ||
       text.contains('time-out');
 }

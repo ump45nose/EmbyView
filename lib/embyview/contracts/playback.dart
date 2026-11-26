@@ -192,6 +192,10 @@ abstract interface class PlaybackSession {
   Future<void> playNext({bool finishCurrent = false});
   Future<void> dismissCreditsPrompt();
   Future<ThumbnailFrame?> thumbnailAt(Duration position);
+
+  /// Discards any cached playback address for the current item and re-resolves
+  /// a fresh stream URL before reopening playback (e.g. after a 115 HTTP 403).
+  Future<void> retryOpen();
   Future<void> close();
 }
 

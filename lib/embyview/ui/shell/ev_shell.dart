@@ -55,6 +55,7 @@ class _EvShellState extends State<EvShell> {
   late bool _ownsShell;
   late EvShellDestination _lastDestination;
   late List<ZoneTile> _lastZones;
+  late bool _lastHasVisibleLibraries;
   late bool _lastShortcutsOpen;
   EvNoticeState? _lastNotice;
 
@@ -98,6 +99,7 @@ class _EvShellState extends State<EvShell> {
     _shell = widget.controller ?? EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
     _lastDestination = _shell.current;
     _lastZones = _shell.zones;
+    _lastHasVisibleLibraries = _shell.hasVisibleLibraries;
     _lastShortcutsOpen = _shell.shortcutsOpen;
     _lastNotice = _shell.notice;
     _shell.onCloseAvatarMenu = _closeMenuIfOpen;
@@ -140,6 +142,7 @@ class _EvShellState extends State<EvShell> {
       _shell.onCloseAvatarMenu = _closeMenuIfOpen;
       _lastDestination = _shell.current;
       _lastZones = _shell.zones;
+      _lastHasVisibleLibraries = _shell.hasVisibleLibraries;
       _lastShortcutsOpen = _shell.shortcutsOpen;
       _lastNotice = _shell.notice;
       _scheduleStageSyncForDestination(_lastDestination, allowSync: false);
@@ -162,6 +165,10 @@ class _EvShellState extends State<EvShell> {
     }
     if (!identical(old.services, widget.services) || old.services.sessionId != widget.services.sessionId) {
       final next = widget.services;
+      if (old.services.sessionId != next.sessionId) {
+        _shell.clearHomeCache();
+        _shell.hasVisibleLibraries = true;
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) unawaited(_immersion.rebind(next)); });
       _attachServices(next, initial: false);
     }
@@ -240,11 +247,13 @@ class _EvShellState extends State<EvShell> {
     if (!mounted) return;
     final destChanged = _shell.current != _lastDestination;
     final zonesChanged = !identical(_shell.zones, _lastZones);
+    final libsChanged = _shell.hasVisibleLibraries != _lastHasVisibleLibraries;
     final shortcutsChanged = _shell.shortcutsOpen != _lastShortcutsOpen;
     final noticeChanged = _shell.notice != _lastNotice;
-    if (!destChanged && !zonesChanged && !shortcutsChanged && !noticeChanged) return;
+    if (!destChanged && !zonesChanged && !libsChanged && !shortcutsChanged && !noticeChanged) return;
     _lastDestination = _shell.current;
     _lastZones = _shell.zones;
+    _lastHasVisibleLibraries = _shell.hasVisibleLibraries;
     _lastShortcutsOpen = _shell.shortcutsOpen;
     _lastNotice = _shell.notice;
     if (destChanged) {
@@ -436,6 +445,7 @@ class _EvShellState extends State<EvShell> {
                                   onImageBackdrop: _stage.mode != EvStageMode.ambient,
                                   showBack: _shell.showBack, titlePlate: _shell.titlePlate,
                                   rightActions: _shell.rightActions, hideTabs: _shell.hideTabs,
+                                  hideZoneTabs: !_shell.hasVisibleLibraries,
                                   hideAvatar: _shell.hideAvatar, showSearchTab: _shell.onOpenSearch != null,
                                   currentProfile: _account.current, avatarMenuOpen: _avatarMenuOpen,
                                   enableWindowDrag: widget.configureWindow,
@@ -466,8 +476,8 @@ class _EvShellState extends State<EvShell> {
                               child: EvNoticeCapsule(
                                 notice: _shell.notice!,
                                 onRetry: () {
-                                  if (_shell.onRetryConnection != null) {
-                                    _shell.onRetryConnection!();
+                                  if (_shell.onRetryConnection != null || _shell.onRetryHome != null) {
+                                    _shell.triggerConnectionRetry();
                                   } else {
                                     try {
                                       unawaited(widget.services.accounts.retryConnection());

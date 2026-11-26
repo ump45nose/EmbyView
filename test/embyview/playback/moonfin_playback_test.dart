@@ -1286,4 +1286,87 @@ void main() {
     await native.events.close();
     manager.dispose();
   });
+
+  test('115 HTTP 403 redirect failure exposes structured rate-limit metadata and retryOpen fetches fresh address', () async {
+    final backend = _Backend();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final client = _Client();
+    var redirects = 0;
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(
+        request: (_, _) async {
+          redirects++;
+          if (redirects == 1) return const RedirectReply(403);
+          return RedirectReply(302, Uri.parse('https://cdn.115.com/fresh-$redirects'));
+        },
+      ),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+
+    final session = adapter.open(const PlayTarget(itemId: 'movie'));
+    await pumpEventQueue(times: 30);
+    expect(redirects, 1);
+    expect(session.snapshot.phase, PlaybackPhase.failed);
+    expect(session.snapshot.failure?.httpStatus, 403);
+    expect(session.snapshot.failure?.isRateLimited, isTrue);
+    expect(session.snapshot.failure?.sourceLabel, '115 网盘');
+    expect(session.snapshot.failure?.reason, '115 暂时限制了播放');
+
+    await session.retryOpen();
+    await pumpEventQueue(times: 30);
+    expect(redirects, 2);
+    expect(session.snapshot.phase, isNot(PlaybackPhase.failed));
+    expect(session.snapshot.failure, isNull);
+    expect(Uri.parse(backend.urls.last).host, 'cdn.115.com');
+    expect(Uri.parse(backend.urls.last).path, '/fresh-2');
+    expect(adapter.diagnostics.records.where((e) => e.event == 'resolved').last.cacheHit, isFalse);
+  });
+
+  test('retryOpen invalidates cached redirect after backend 403 exhaustion and re-resolves a new address', () async {
+    final backend = _Backend()..asyncFailureOpens = 2;
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final client = _Client();
+    var redirects = 0;
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(
+        request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.115.com/attempt-${++redirects}')),
+      ),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+
+    final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 4)));
+    await pumpEventQueue(times: 40);
+    expect(redirects, 2);
+    expect(session.snapshot.phase, PlaybackPhase.failed);
+    expect(session.snapshot.failure?.httpStatus, 403);
+    expect(session.snapshot.failure?.isRateLimited, isTrue);
+    expect(session.snapshot.failure?.sourceLabel, '115 网盘');
+
+    await session.retryOpen();
+    await pumpEventQueue(times: 40);
+    expect(redirects, 3);
+    expect(session.snapshot.phase, isNot(PlaybackPhase.failed));
+    expect(Uri.parse(backend.urls.last).host, 'cdn.115.com');
+    expect(Uri.parse(backend.urls.last).path, '/attempt-3');
+    expect(backend.starts.last, const Duration(minutes: 4));
+    expect(adapter.diagnostics.records.where((e) => e.event == 'resolved').last.cacheHit, isFalse);
+  });
 }

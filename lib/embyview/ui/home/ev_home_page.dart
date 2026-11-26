@@ -1,18 +1,32 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/widgets.dart' hide ConnectionState;
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/home/ev_feature_spread.dart';
 import 'package:moonfin/embyview/ui/home/ev_hero.dart';
 import 'package:moonfin/embyview/ui/home/ev_zone_strip.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
 
+/// Optional forced state for tests and the demo screenshot launcher.
+enum EvHomeForcedState { empty, error }
+
 /// Complete EmbyView home page following `.spec/mockups/proto.js` section order
 /// and coordinating with [EvStageController], [Immersion], and [EvShellController].
 class EvHomePage extends StatefulWidget {
-  const EvHomePage({super.key, this.enableAnimations = true});
+  const EvHomePage({
+    super.key,
+    this.enableAnimations = true,
+    this.enableAutoRetry = true,
+    this.autoRetryInterval = const Duration(seconds: 10),
+    this.forcedState,
+  });
+
   final bool enableAnimations;
+  final bool enableAutoRetry;
+  final Duration autoRetryInterval;
+  final EvHomeForcedState? forcedState;
 
   @override
   State<EvHomePage> createState() => _EvHomePageState();
@@ -27,6 +41,10 @@ class _EvHomePageState extends State<EvHomePage> {
   EmbyViewData? _attachedData;
   String? _attachedSessionId;
   StreamSubscription<LocalPreferences>? _prefsSub;
+  StreamSubscription<AccountSnapshot>? _accountsSub;
+  StreamSubscription<ConnectionNoticeEvent>? _noticeSub;
+  Timer? _autoRetryTimer;
+  AccountSnapshot _account = const AccountSnapshot(phase: AccountPhase.signedOut);
   ShelfSort _seriesSort = ShelfSort.added;
   String _zonesSig = '';
 
@@ -37,27 +55,61 @@ class _EvHomePageState extends State<EvHomePage> {
   String? _activeInteractionCardId;
   bool _wasHeroVisible = true;
   bool _loading = true;
+  bool _emptyLibraries = false;
   Object? _error;
+  EvHomeForcedState? _activeForcedState;
   int _loadToken = 0;
 
   @override
   void initState() {
     super.initState();
+    _activeForcedState = widget.forcedState;
     _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void didUpdateWidget(EvHomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.forcedState != widget.forcedState) {
+      _activeForcedState = widget.forcedState;
+      _applyForcedOrLoad();
+    } else if (oldWidget.enableAutoRetry != widget.enableAutoRetry ||
+        oldWidget.autoRetryInterval != widget.autoRetryInterval) {
+      if (_isShowingErrorCard) {
+        _restartAutoRetryTimer();
+      } else {
+        _cancelAutoRetryTimer();
+      }
+    }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final scope = EvScope.of(context);
-    final changed = _scope == null || !identical(_attachedData, scope.services.data) || _attachedSessionId != scope.services.sessionId;
+    final changed =
+        _scope == null ||
+        !identical(_attachedData, scope.services.data) ||
+        _attachedSessionId != scope.services.sessionId;
+    if (!identical(_scope?.shell, scope.shell)) {
+      if (identical(_scope?.shell.onRetryHome, _handleNoticeRetry)) {
+        _scope!.shell.onRetryHome = null;
+      }
+      scope.shell.onRetryHome = _handleNoticeRetry;
+    }
     _scope = scope;
     if (!changed) return;
+
+    final sessionChanged = _attachedSessionId != null && _attachedSessionId != scope.services.sessionId;
+    if (sessionChanged) {
+      scope.shell.clearHomeCache();
+    }
 
     if (_activeInteractionCardId != null) {
       scope.immersion.onCardHoverEnd(cardId: _activeInteractionCardId);
       _activeInteractionCardId = null;
     }
+    _cancelAutoRetryTimer();
     _hoveredCard = null;
     _focusedCard = null;
     _wasHeroVisible = true;
@@ -65,17 +117,101 @@ class _EvHomePageState extends State<EvHomePage> {
     _previewCard.value = null;
     _attachedData = scope.services.data;
     _attachedSessionId = scope.services.sessionId;
-    _home = null;
-    _activeHero = null;
-    _error = null;
-    _loading = scope.services.data != null;
+    _attachAccounts(scope.services.accounts);
     _attachPreferences(scope.services.preferences);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      scope.stage..setMode(EvStageMode.hero)..setScrollProgress(0.0);
-      scope.shell.setScrollOffset(0.0);
-    });
+
+    final cached = scope.shell.cachedHomeFor(scope.services.sessionId, scope.services.data);
+    _home = cached;
+    _activeHero = cached?.recommendations.firstOrNull;
+    _emptyLibraries = false;
+    _error = null;
+    _loading = _activeForcedState == null && cached == null && scope.services.data != null;
+
+    _applyForcedOrLoad(initial: true);
+  }
+
+  void _applyForcedOrLoad({bool initial = false}) {
+    final scope = _scope;
+    if (scope == null) return;
+    _cancelAutoRetryTimer();
+    if (_activeForcedState == EvHomeForcedState.empty) {
+      _loading = false;
+      _error = null;
+      _emptyLibraries = true;
+      _setHasVisibleLibraries(scope.shell, false);
+      _enterCalmStage(scope);
+      return;
+    }
+    if (_activeForcedState == EvHomeForcedState.error) {
+      _loading = false;
+      _emptyLibraries = false;
+      _error = const EmbyViewFailure('连不上服务器', retryable: true);
+      _setHasVisibleLibraries(scope.shell, true);
+      _enterCalmStage(scope);
+      _restartAutoRetryTimer();
+      return;
+    }
+    if (initial) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        scope.stage
+          ..setMode(EvStageMode.hero)
+          ..setScrollProgress(0.0);
+        scope.shell.setScrollOffset(0.0);
+      });
+    }
     unawaited(_loadHome());
+  }
+
+  void _enterCalmStage(EvScope scope) {
+    void apply() {
+      if (!mounted) return;
+      scope.stage
+        ..setMode(EvStageMode.ambient)
+        ..setBaseBackdrop(null)
+        ..setScrollProgress(0.0)
+        ..setVeilLifted(false);
+      scope.shell.setScrollOffset(0.0);
+    }
+    if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => apply());
+    } else {
+      apply();
+    }
+  }
+
+  void _setHasVisibleLibraries(EvShellController shell, bool visible) {
+    if (shell.hasVisibleLibraries == visible) return;
+    if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) shell.hasVisibleLibraries = visible;
+      });
+    } else {
+      shell.hasVisibleLibraries = visible;
+    }
+  }
+
+  void _attachAccounts(EmbyViewAccounts accounts) {
+    unawaited(_accountsSub?.cancel());
+    unawaited(_noticeSub?.cancel());
+    _noticeSub = null;
+    _account = accounts.snapshot;
+    _accountsSub = accounts.changes.listen((next) {
+      if (!mounted) return;
+      setState(() => _account = next);
+    });
+    try {
+      _noticeSub = accounts.connectionNotices.listen((event) {
+        if (!mounted || _activeForcedState != null) return;
+        if ((event.kind == ConnectionNoticeKind.recovered ||
+                event.kind == ConnectionNoticeKind.switched) &&
+            (_error != null || _home == null)) {
+          unawaited(_loadHome());
+        }
+      });
+    } on NoSuchMethodError catch (_) {
+      _noticeSub = null;
+    }
   }
 
   void _attachPreferences(EmbyViewPreferences prefs) {
@@ -88,7 +224,7 @@ class _EvHomePageState extends State<EvHomePage> {
       final reload = next.seriesSort != _seriesSort || nextSig != _zonesSig;
       _seriesSort = next.seriesSort;
       _zonesSig = nextSig;
-      if (reload) unawaited(_loadHome());
+      if (reload && _activeForcedState == null) unawaited(_loadHome());
     });
   }
 
@@ -101,34 +237,199 @@ class _EvHomePageState extends State<EvHomePage> {
       }}',
   ].join('|');
 
-  Future<void> _loadHome() async {
+  static bool _hasHomeContent(HomeData home) =>
+      home.zones.isNotEmpty ||
+      home.recommendations.isNotEmpty ||
+      home.continueWatching.isNotEmpty ||
+      (home.recentMovies?.items.isNotEmpty ?? false) ||
+      (home.anime?.items.isNotEmpty ?? false) ||
+      (home.series?.items.isNotEmpty ?? false) ||
+      (home.collections?.items.isNotEmpty ?? false) ||
+      (home.documentaries?.items.isNotEmpty ?? false) ||
+      (home.shortHighRated != null && home.shortHighRated!.total > 0) ||
+      (home.uhdDolbyVision != null && home.uhdDolbyVision!.total > 0);
+
+  bool _isEmptyLibraries(HomeData home) =>
+      !_hasHomeContent(home) ||
+      (_account.current?.visibleLibraryCount == 0 && home.zones.isEmpty);
+
+  int _triedAddressCount() {
+    if (_account.triedAddressCount > 0) return _account.triedAddressCount;
+    if (_account.addresses.isNotEmpty) return _account.addresses.length;
+    return 1;
+  }
+
+  bool get _isShowingEmptyCard =>
+      _activeForcedState == EvHomeForcedState.empty ||
+      (_activeForcedState == null &&
+          !_loading &&
+          _error == null &&
+          (_emptyLibraries || _home == null));
+
+  bool get _isShowingErrorCard =>
+      _activeForcedState == EvHomeForcedState.error ||
+      (_activeForcedState == null && _error != null && (_home == null || _emptyLibraries));
+
+  void _cancelAutoRetryTimer() {
+    _autoRetryTimer?.cancel();
+    _autoRetryTimer = null;
+  }
+
+  void _restartAutoRetryTimer() {
+    _cancelAutoRetryTimer();
+    if (!widget.enableAutoRetry) return;
+    final interval = widget.autoRetryInterval > Duration.zero
+        ? widget.autoRetryInterval
+        : const Duration(seconds: 10);
+    _autoRetryTimer = Timer.periodic(interval, (_) {
+      if (!mounted || !_isShowingErrorCard) {
+        _cancelAutoRetryTimer();
+        return;
+      }
+      unawaited(_loadHome());
+    });
+  }
+
+  void _handleNoticeRetry() {
+    if (!mounted) return;
+    _activeForcedState = null;
+    unawaited(_loadHome());
+  }
+
+  void _handleRecheck() {
+    _activeForcedState = null;
+    unawaited(_loadHome(refreshZones: true));
+  }
+
+  void _handleRetryError() {
+    _cancelAutoRetryTimer();
+    _activeForcedState = null;
+    final accounts = _scope?.services.accounts;
+    if (accounts != null && accounts.snapshot.connection == ConnectionState.disconnected) {
+      unawaited(() async {
+        try {
+          await accounts.retryConnection();
+        } catch (_) {}
+      }());
+    }
+    unawaited(_loadHome());
+  }
+
+  void _openServerSettings() {
+    final shell = _scope?.shell;
+    (shell?.onOpenServerSettings ?? shell?.onOpenSettings)?.call();
+  }
+
+  void _openUsers() => _scope?.shell.onOpenUsers?.call();
+
+  Future<void> _loadHome({bool refreshZones = false}) async {
     final scope = _scope, data = scope?.services.data;
     final token = ++_loadToken;
     if (scope == null || data == null) {
+      _cancelAutoRetryTimer();
+      if (scope != null) {
+        _setHasVisibleLibraries(scope.shell, false);
+        _enterCalmStage(scope);
+      }
       if (mounted) {
         _previewCard.value = null;
-        setState(() { _loading = false; _home = null; _activeHero = null; _error = null; });
+        setState(() {
+          _loading = false;
+          _home = null;
+          _activeHero = null;
+          _emptyLibraries = true;
+          _error = null;
+        });
       }
       return;
     }
-    if (_home == null && mounted) setState(() { _loading = true; _error = null; });
+    if (_home == null && mounted) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
       final result = await data.home(seriesSort: _seriesSort);
       if (!mounted || token != _loadToken) return;
+      _cancelAutoRetryTimer();
+      if (_isEmptyLibraries(result)) {
+        _previewCard.value = null;
+        scope.shell.clearHomeCache();
+        _setHasVisibleLibraries(scope.shell, false);
+        _enterCalmStage(scope);
+        if (scope.shell.notice?.kind == EvNoticeKind.offline) {
+          scope.shell.dismissNotice();
+        }
+        setState(() {
+          _home = result;
+          _activeHero = null;
+          _loading = false;
+          _emptyLibraries = true;
+          _error = null;
+        });
+        return;
+      }
+
       final initialHero = result.recommendations.firstOrNull;
       _previewCard.value = null;
-      setState(() { _home = result; _activeHero = initialHero; _loading = false; _error = null; });
+      scope.shell.cacheHome(scope.services.sessionId, data, result);
+      _setHasVisibleLibraries(scope.shell, true);
+      if (refreshZones) {
+        if (result.zones.isNotEmpty) {
+          scope.shell.setZones(result.zones);
+        } else {
+          unawaited(() async {
+            try {
+              final loaded = await data.zones();
+              if (mounted && loaded.isNotEmpty) scope.shell.setZones(loaded);
+            } catch (_) {}
+          }());
+        }
+      }
+      if (scope.shell.notice?.kind == EvNoticeKind.offline) {
+        scope.shell.dismissNotice();
+      }
+      setState(() {
+        _home = result;
+        _activeHero = initialHero;
+        _loading = false;
+        _emptyLibraries = false;
+        _error = null;
+      });
+      scope.stage.setMode(EvStageMode.hero);
       if (initialHero != null) scope.stage.setBaseBackdrop(initialHero.card.art.stage);
     } catch (e) {
       if (!mounted || token != _loadToken) return;
-      setState(() { _error = e; _loading = false; });
+      final hasCachedContent = _home != null && !_emptyLibraries;
+      if (hasCachedContent) {
+        _cancelAutoRetryTimer();
+        scope.shell.showOfflineNotice(
+          serverName: _account.serverName,
+          triedAddressCount: _triedAddressCount(),
+          autoTick: widget.enableAutoRetry,
+        );
+        setState(() {
+          _error = e;
+          _loading = false;
+        });
+      } else {
+        _enterCalmStage(scope);
+        setState(() {
+          _error = e;
+          _loading = false;
+        });
+        _restartAutoRetryTimer();
+      }
     }
   }
 
   bool get _isHeroVisible {
     if (!_scrollController.hasClients) return true;
     final pos = _scrollController.position;
-    final vh = pos.hasViewportDimension && pos.viewportDimension > 0 ? pos.viewportDimension : MediaQuery.sizeOf(context).height;
+    final vh = pos.hasViewportDimension && pos.viewportDimension > 0
+        ? pos.viewportDimension
+        : MediaQuery.sizeOf(context).height;
     return pos.pixels < vh * 0.2;
   }
 
@@ -211,9 +512,17 @@ class _EvHomePageState extends State<EvHomePage> {
 
   @override
   void dispose() {
+    _cancelAutoRetryTimer();
+    if (identical(_scope?.shell.onRetryHome, _handleNoticeRetry)) {
+      _scope!.shell.onRetryHome = null;
+    }
     unawaited(_prefsSub?.cancel());
+    unawaited(_accountsSub?.cancel());
+    unawaited(_noticeSub?.cancel());
     if (_activeInteractionCardId != null) _scope?.immersion.onCardHoverEnd(cardId: _activeInteractionCardId);
-    _scrollController..removeListener(_onScroll)..dispose();
+    _scrollController
+      ..removeListener(_onScroll)
+      ..dispose();
     _previewCard.dispose();
     _hoverPaused.dispose();
     super.dispose();
@@ -222,130 +531,80 @@ class _EvHomePageState extends State<EvHomePage> {
   @override
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context), home = _home;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        ScrollConfiguration(
-          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-          child: SingleChildScrollView(
-            key: const Key('ev_home_scroller'),
-            controller: _scrollController,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (_error != null && home == null)
-                  SizedBox(height: math.max(0.0, scale.vh(100)), child: Center(child: _buildError(theme, scale)))
-                else if (!_loading && home == null)
-                  SizedBox(height: math.max(0.0, scale.vh(100)), child: Center(child: _buildEmpty(theme, scale)))
-                else ...[
-                  if (_loading && home == null)
-                    SizedBox(height: math.max(0.0, scale.vh(100) - scale.peek))
-                  else
-                    ValueListenableBuilder<MediaCard?>(
-                      valueListenable: _previewCard,
-                      builder: (_, preview, _) => EvHero(
-                        recommendations: home?.recommendations ?? const [],
-                        previewCard: preview,
-                        defaultReasonLabel: '今日推荐',
-                        enableAutoRotate: widget.enableAnimations,
-                        pauseAutoRotate: _hoverPaused,
-                        onActiveChanged: (rec) {
-                          _activeHero = rec;
-                          _scope?.stage.setBaseBackdrop(rec.card.art.stage);
-                        },
-                        onDetail: () {
-                          final card = _previewCard.value ?? _activeHero?.card;
-                          if (card != null) _openDetail(card);
-                        },
-                        onPlay: (rec, origin) => _play(rec.resume?.target ?? PlayTarget(itemId: rec.card.id), rec.card.art, origin: origin),
-                      ),
-                    ),
-                  Padding(
-                    padding: EdgeInsets.only(bottom: scale.rem(6.0)),
-                    child: _loading && home == null
-                        ? const Column(
-                            key: Key('ev_home_skeletons'),
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              EvShelfSkeleton(style: EvCardStyle.landscape, count: 5),
-                              EvShelfSkeleton(style: EvCardStyle.poster, count: 9),
-                              EvShelfSkeleton(style: EvCardStyle.poster, count: 9),
-                            ],
-                          )
-                        : home != null
-                        ? _buildSections(theme, home)
-                        : const SizedBox.shrink(),
-                  ),
-                ],
-              ],
+
+    if (_isShowingErrorCard) {
+      return EvHomeStateCard.error(
+        serverName: _account.serverName,
+        triedAddressCount: _triedAddressCount(),
+        retryIntervalSeconds: math.max(1, widget.autoRetryInterval.inSeconds),
+        onRetry: _handleRetryError,
+        onServerSettings: _openServerSettings,
+        onSwitchUser: _openUsers,
+        animate: widget.enableAnimations,
+      );
+    }
+
+    if (_isShowingEmptyCard) {
+      return EvHomeStateCard.empty(
+        username: _account.current?.displayName ?? '',
+        onRecheck: _handleRecheck,
+        onSwitchUser: _openUsers,
+        animate: widget.enableAnimations,
+      );
+    }
+
+    return ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+      child: SingleChildScrollView(
+        key: const Key('ev_home_scroller'),
+        controller: _scrollController,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_loading && home == null)
+              SizedBox(height: math.max(0.0, scale.vh(100) - scale.peek))
+            else
+              ValueListenableBuilder<MediaCard?>(
+                valueListenable: _previewCard,
+                builder: (_, preview, _) => EvHero(
+                  recommendations: home?.recommendations ?? const [],
+                  previewCard: preview,
+                  defaultReasonLabel: '今日推荐',
+                  enableAutoRotate: widget.enableAnimations,
+                  pauseAutoRotate: _hoverPaused,
+                  onActiveChanged: (rec) {
+                    _activeHero = rec;
+                    _scope?.stage.setBaseBackdrop(rec.card.art.stage);
+                  },
+                  onDetail: () {
+                    final card = _previewCard.value ?? _activeHero?.card;
+                    if (card != null) _openDetail(card);
+                  },
+                  onPlay: (rec, origin) =>
+                      _play(rec.resume?.target ?? PlayTarget(itemId: rec.card.id), rec.card.art, origin: origin),
+                ),
+              ),
+            Padding(
+              padding: EdgeInsets.only(bottom: scale.rem(6.0)),
+              child: _loading && home == null
+                  ? const Column(
+                      key: Key('ev_home_skeletons'),
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        EvShelfSkeleton(style: EvCardStyle.landscape, count: 5),
+                        EvShelfSkeleton(style: EvCardStyle.poster, count: 9),
+                        EvShelfSkeleton(style: EvCardStyle.poster, count: 9),
+                      ],
+                    )
+                  : home != null
+                  ? _buildSections(theme, home)
+                  : const SizedBox.shrink(),
             ),
-          ),
+          ],
         ),
-        if (_error != null && home != null)
-          Positioned(
-            left: scale.gutter,
-            right: scale.gutter,
-            top: scale.rem(5.25),
-            child: _buildErrorBanner(theme, scale),
-          ),
-      ],
+      ),
     );
   }
-
-  Widget _buildError(EvTheme theme, EvScale scale) => Padding(
-    key: const Key('ev_home_error'),
-    padding: EdgeInsets.symmetric(horizontal: scale.gutter, vertical: scale.rem(4.0)),
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text('无法加载首页内容', style: theme.shelfStyle(scale.font(1.5))),
-        SizedBox(height: scale.rem(0.75)),
-        Text(_error.toString(), style: theme.bodyStyle(scale.font(0.9375), color: theme.ink3), textAlign: TextAlign.center),
-        SizedBox(height: scale.rem(1.5)),
-        EvButton.ghost(key: const Key('ev_home_retry_btn'), label: '重试', small: true, onPressed: () => unawaited(_loadHome())),
-      ],
-    ),
-  );
-
-  Widget _buildEmpty(EvTheme theme, EvScale scale) => Padding(
-    key: const Key('ev_home_empty'),
-    padding: EdgeInsets.symmetric(horizontal: scale.gutter, vertical: scale.rem(4.0)),
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text('暂未连接到媒体库', style: theme.shelfStyle(scale.font(1.5))),
-        SizedBox(height: scale.rem(0.75)),
-        Text('登录并选择服务器后将展示首页推荐与片库', style: theme.bodyStyle(scale.font(0.9375), color: theme.ink3), textAlign: TextAlign.center),
-      ],
-    ),
-  );
-
-  Widget _buildErrorBanner(EvTheme theme, EvScale scale) => EvGlass(
-    key: const Key('ev_home_error_banner'),
-    solid: true,
-    borderRadius: BorderRadius.circular(scale.rem(0.875)),
-    padding: EdgeInsets.symmetric(horizontal: scale.rem(1.0), vertical: scale.rem(0.625)),
-    child: Row(
-      children: [
-        Expanded(
-          child: Text(
-            '刷新首页失败：$_error',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: theme.bodyStyle(scale.font(0.9375), color: theme.ink),
-          ),
-        ),
-        SizedBox(width: scale.rem(0.75)),
-        EvButton.ghost(
-          key: const Key('ev_home_error_banner_retry'),
-          label: '重试',
-          small: true,
-          glass: false,
-          onPressed: () => unawaited(_loadHome()),
-        ),
-      ],
-    ),
-  );
 
   Widget _buildSections(EvTheme theme, HomeData home) {
     final sortLabel = switch (_seriesSort) {
@@ -358,8 +617,14 @@ class _EvHomePageState extends State<EvHomePage> {
     Widget shelf(Key key, HomeShelf s, EvCardStyle style, {String? title, String? badge}) {
       final resolvedTitle = title ?? (s.title.isNotEmpty ? s.title : '');
       return EvShelf(
-        key: key, title: resolvedTitle, badge: badge, items: s.items, style: style,
-        onMoreTap: s.more != null ? () => _scope?.shell.openWall(s.more!, title: s.title.isNotEmpty ? s.title : resolvedTitle) : null,
+        key: key,
+        title: resolvedTitle,
+        badge: badge,
+        items: s.items,
+        style: style,
+        onMoreTap: s.more != null
+            ? () => _scope?.shell.openWall(s.more!, title: s.title.isNotEmpty ? s.title : resolvedTitle)
+            : null,
         onCardTap: _openDetail,
         onCardPlay: (c) => _play(PlayTarget(itemId: c.id), c.art),
         onCardHoverChanged: _onCardHover,
@@ -368,7 +633,11 @@ class _EvHomePageState extends State<EvHomePage> {
     }
 
     Widget feature(Key key, FeatureSpread sp, String title, Color accent, EvIconData doodle) => EvFeatureSpread(
-      key: key, spread: sp, title: title, accentColor: accent, doodleIcon: doodle,
+      key: key,
+      spread: sp,
+      title: title,
+      accentColor: accent,
+      doodleIcon: doodle,
       enableAnimations: widget.enableAnimations,
       onTap: () => _scope?.shell.openWall(sp.query, title: title.replaceAll('\n', '')),
     );
@@ -379,8 +648,10 @@ class _EvHomePageState extends State<EvHomePage> {
       children: [
         if (home.continueWatching.isNotEmpty)
           EvShelf(
-            key: const Key('ev_home_section_continue'), title: '继续观看',
-            resumeItems: home.continueWatching, style: EvCardStyle.landscape,
+            key: const Key('ev_home_section_continue'),
+            title: '继续观看',
+            resumeItems: home.continueWatching,
+            style: EvCardStyle.landscape,
             onCardTap: _openDetail,
             onCardPlay: (c) => _play(resumeById[c.id]?.target ?? PlayTarget(itemId: c.id), c.art),
             onCardHoverChanged: _onCardHover,
@@ -388,27 +659,67 @@ class _EvHomePageState extends State<EvHomePage> {
           ),
         if (home.zones.isNotEmpty)
           EvZoneStrip(
-            key: const Key('ev_home_section_zones'), zones: home.zones,
+            key: const Key('ev_home_section_zones'),
+            zones: home.zones,
             onZoneTap: (z) => _scope?.shell.openZone(z.id),
             onManageZones: () => _scope?.shell.onManageZones?.call(),
           ),
         if (home.shortHighRated != null && home.shortHighRated!.total > 0)
-          feature(const Key('ev_home_section_short_feature'), home.shortHighRated!, '100 分钟以内\n的高分电影', theme.movie, EvIcons.illClock),
+          feature(
+            const Key('ev_home_section_short_feature'),
+            home.shortHighRated!,
+            '100 分钟以内\n的高分电影',
+            theme.movie,
+            EvIcons.illClock,
+          ),
         if (home.recentMovies != null && home.recentMovies!.items.isNotEmpty)
           shelf(
-            const Key('ev_home_section_recent'), home.recentMovies!, EvCardStyle.poster,
-            title: '最近添加', badge: home.recentMovies!.title.isNotEmpty && home.recentMovies!.title != '最近添加' ? home.recentMovies!.title : '电影',
+            const Key('ev_home_section_recent'),
+            home.recentMovies!,
+            EvCardStyle.poster,
+            title: '最近添加',
+            badge: home.recentMovies!.title.isNotEmpty && home.recentMovies!.title != '最近添加'
+                ? home.recentMovies!.title
+                : '电影',
           ),
         if (home.anime != null && home.anime!.items.isNotEmpty)
-          shelf(const Key('ev_home_section_anime'), home.anime!, EvCardStyle.poster, title: home.anime!.title.isNotEmpty ? home.anime!.title : '番剧', badge: sortLabel),
+          shelf(
+            const Key('ev_home_section_anime'),
+            home.anime!,
+            EvCardStyle.poster,
+            title: home.anime!.title.isNotEmpty ? home.anime!.title : '番剧',
+            badge: sortLabel,
+          ),
         if (home.uhdDolbyVision != null && home.uhdDolbyVision!.total > 0)
-          feature(const Key('ev_home_section_dv_feature'), home.uhdDolbyVision!, '4K 杜比视界', theme.tv, EvIcons.illTv),
+          feature(
+            const Key('ev_home_section_dv_feature'),
+            home.uhdDolbyVision!,
+            '4K 杜比视界',
+            theme.tv,
+            EvIcons.illTv,
+          ),
         if (home.series != null && home.series!.items.isNotEmpty)
-          shelf(const Key('ev_home_section_series'), home.series!, EvCardStyle.poster, title: home.series!.title.isNotEmpty ? home.series!.title : '剧集', badge: sortLabel),
+          shelf(
+            const Key('ev_home_section_series'),
+            home.series!,
+            EvCardStyle.poster,
+            title: home.series!.title.isNotEmpty ? home.series!.title : '剧集',
+            badge: sortLabel,
+          ),
         if (home.collections != null && home.collections!.items.isNotEmpty)
-          shelf(const Key('ev_home_section_collections'), home.collections!, EvCardStyle.collection, title: home.collections!.title.isNotEmpty ? home.collections!.title : '合集'),
+          shelf(
+            const Key('ev_home_section_collections'),
+            home.collections!,
+            EvCardStyle.collection,
+            title: home.collections!.title.isNotEmpty ? home.collections!.title : '合集',
+          ),
         if (home.documentaries != null && home.documentaries!.items.isNotEmpty)
-          shelf(const Key('ev_home_section_docs'), home.documentaries!, EvCardStyle.landscape, title: home.documentaries!.title.isNotEmpty ? home.documentaries!.title : '纪录片'),
+          shelf(
+            const Key('ev_home_section_docs'),
+            home.documentaries!,
+            EvCardStyle.landscape,
+            title: home.documentaries!.title.isNotEmpty ? home.documentaries!.title : '纪录片',
+          ),
       ],
     );
   }

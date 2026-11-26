@@ -70,6 +70,7 @@ class EvShellController extends ChangeNotifier {
   EvShellController({
     EvShellDestination initial = const EvHomeDestination(),
     List<ZoneTile> zones = const [],
+    bool hasVisibleLibraries = true,
     this.onOpenDetail,
     this.onOpenSearch,
     this.onOpenSettings,
@@ -87,11 +88,18 @@ class EvShellController extends ChangeNotifier {
     this.onOpenZoneById,
     this.onExportDiagnostics,
     this.onRetryConnection,
+    this.onRetryHome,
     this.activePlayerResolver,
-  }) : _stack = [initial], _zones = List<ZoneTile>.unmodifiable(zones);
+  }) : _stack = [initial],
+       _zones = List<ZoneTile>.unmodifiable(zones),
+       _hasVisibleLibraries = hasVisibleLibraries;
 
   final List<EvShellDestination> _stack;
   List<ZoneTile> _zones;
+  bool _hasVisibleLibraries;
+  HomeData? _cachedHome;
+  String? _cachedHomeSessionId;
+  Object? _cachedHomeDataOwner;
   bool _scrolled = false, _hideTabs = false, _hideAvatar = false;
   double _topFade = 0.0;
   EvChromeTitlePlate? _titlePlate;
@@ -104,7 +112,7 @@ class EvShellController extends ChangeNotifier {
   VoidCallback? onOpenSearch, onOpenSettings, onOpenAbout, onOpenServerSettings;
   VoidCallback? onOpenUsers, onManageZones;
   VoidCallback? onSignedOutToUserPicker, onSignOut, onSwitchServer, onAddAccount;
-  VoidCallback? onToggleCommandPalette, onGoHome, onRetryConnection;
+  VoidCallback? onToggleCommandPalette, onGoHome, onRetryConnection, onRetryHome;
   bool Function()? onBack;
   bool Function()? onCloseAvatarMenu;
   ValueChanged<String>? onOpenZoneById;
@@ -114,7 +122,9 @@ class EvShellController extends ChangeNotifier {
   EvShellDestination get current => _stack.last;
   List<EvShellDestination> get stack => List<EvShellDestination>.unmodifiable(_stack);
   bool get canPop => _stack.length > 1;
-  List<ZoneTile> get zones => _zones;
+  List<ZoneTile> get zones => _hasVisibleLibraries ? _zones : const [];
+  List<ZoneTile> get allZones => _zones;
+  bool get hasVisibleLibraries => _hasVisibleLibraries;
   bool get scrolled => _scrolled;
   double get topFade => _topFade;
   EvChromeTitlePlate? get titlePlate => _titlePlate;
@@ -164,8 +174,40 @@ class EvShellController extends ChangeNotifier {
 
   void setZones(List<ZoneTile> value) {
     _zones = List<ZoneTile>.unmodifiable(value);
-    unawaited(EvMenuChannel.instance.syncZones(_zones));
+    unawaited(EvMenuChannel.instance.syncZones(zones));
     notifyListeners();
+  }
+
+  set hasVisibleLibraries(bool v) {
+    if (_hasVisibleLibraries == v) return;
+    _hasVisibleLibraries = v;
+    unawaited(EvMenuChannel.instance.syncZones(zones));
+    notifyListeners();
+  }
+
+  HomeData? cachedHomeFor(String? sessionId, Object? dataOwner) {
+    if (_cachedHome == null) return null;
+    if (_cachedHomeSessionId != sessionId || !identical(_cachedHomeDataOwner, dataOwner)) {
+      return null;
+    }
+    return _cachedHome;
+  }
+
+  void cacheHome(String? sessionId, Object? dataOwner, HomeData home) {
+    _cachedHomeSessionId = sessionId;
+    _cachedHomeDataOwner = dataOwner;
+    _cachedHome = home;
+  }
+
+  void clearHomeCache() {
+    _cachedHome = null;
+    _cachedHomeSessionId = null;
+    _cachedHomeDataOwner = null;
+  }
+
+  void triggerConnectionRetry() {
+    onRetryConnection?.call();
+    onRetryHome?.call();
   }
 
   void setScrollOffset(double offset) {
@@ -283,9 +325,10 @@ class EvShellController extends ChangeNotifier {
 
     final zoneIndex = EvMenuAction.zoneIndexFor(action);
     if (zoneIndex != null) {
-      if (zoneIndex >= _zones.length) return false;
+      final activeZones = zones;
+      if (zoneIndex >= activeZones.length) return false;
       closeShortcuts();
-      final zoneId = _zones[zoneIndex].id;
+      final zoneId = activeZones[zoneIndex].id;
       if (onOpenZoneById != null) {
         onOpenZoneById!(zoneId);
       } else {

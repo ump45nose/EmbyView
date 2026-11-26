@@ -41,7 +41,7 @@ class _TestSession implements PlaybackSession {
   final List<bool> anime4kCalls = [];
   final List<double?> compareSplits = [];
   final List<bool> playNextFinish = [];
-  int pauseCalls = 0, resumeCalls = 0, dismissCreditsCalls = 0, closeCalls = 0;
+  int pauseCalls = 0, resumeCalls = 0, retryOpenCalls = 0, dismissCreditsCalls = 0, closeCalls = 0;
 
   @override PlaybackSnapshot get snapshot => _snapshot;
   @override Stream<PlaybackSnapshot> get changes => _ctrl.stream;
@@ -67,6 +67,7 @@ class _TestSession implements PlaybackSession {
   @override Future<void> playNext({bool finishCurrent = false}) async => playNextFinish.add(finishCurrent);
   @override Future<void> dismissCreditsPrompt() async { dismissCreditsCalls++; emit(_copy(creditsPrompt: CreditsPromptState.dismissed)); }
   @override Future<ThumbnailFrame?> thumbnailAt(Duration position) async => onThumbnail != null ? onThumbnail!(position) : null;
+  @override Future<void> retryOpen() async { retryOpenCalls++; emit(_copy(phase: PlaybackPhase.preparing)); }
   @override Future<void> close() async { closeCalls++; await _ctrl.close(); }
 
   PlaybackSnapshot _copy({

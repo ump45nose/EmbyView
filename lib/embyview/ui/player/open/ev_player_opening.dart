@@ -135,14 +135,25 @@ class _OpeningClipper extends CustomClipper<RRect> {
 /// first-frame status text, and failure retry/back actions.
 class EvPlayerOpeningOverlay extends StatefulWidget {
   const EvPlayerOpeningOverlay({
-    super.key, required this.snapshot, this.art, required this.uiFirstFrameLatency,
-    required this.done, this.holdVisible = false, this.onBack, this.onRetry,
+    super.key,
+    required this.snapshot,
+    this.art,
+    required this.uiFirstFrameLatency,
+    required this.done,
+    this.holdVisible = false,
+    this.retryAttempt = 1,
+    this.retryNonce = 0,
+    this.retryCountdownSeconds = 30,
+    this.autoTickRetry = true,
+    this.onBack,
+    this.onRetry,
   });
 
   final PlaybackSnapshot snapshot;
   final CardArtwork? art;
   final Duration? uiFirstFrameLatency;
-  final bool done, holdVisible;
+  final bool done, holdVisible, autoTickRetry;
+  final int retryAttempt, retryNonce, retryCountdownSeconds;
   final VoidCallback? onBack, onRetry;
 
   @override
@@ -154,12 +165,13 @@ class _EvPlayerOpeningOverlayState extends State<EvPlayerOpeningOverlay>
   late final AnimationController _shimmer;
   bool _logoFailed = false;
   bool get _hidden => widget.done && !widget.holdVisible;
+  bool get _shouldShimmer => !_hidden && widget.snapshot.phase != PlaybackPhase.failed;
 
   @override
   void initState() {
     super.initState();
     _shimmer = AnimationController(vsync: this, duration: const Duration(milliseconds: 1800));
-    if (!_hidden) _shimmer.repeat();
+    if (_shouldShimmer) _shimmer.repeat();
   }
 
   @override
@@ -169,7 +181,7 @@ class _EvPlayerOpeningOverlayState extends State<EvPlayerOpeningOverlay>
         (widget.art?.logo ?? widget.snapshot.item?.art.logo)?.cacheKey) {
       _logoFailed = false;
     }
-    if (_hidden) {
+    if (!_shouldShimmer) {
       if (_shimmer.isAnimating) _shimmer.stop();
     } else if (!_shimmer.isAnimating) {
       _shimmer.repeat();
@@ -286,25 +298,26 @@ class _EvPlayerOpeningOverlayState extends State<EvPlayerOpeningOverlay>
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       emblem,
-                      SizedBox(height: scale.rem(1.5)),
-                      Text(
-                        _status(), key: const Key('ev_player_opening_status'), textAlign: TextAlign.center,
-                        style: theme
-                            .bodyStyle(scale.rem(0.9375), color: Color.fromRGBO(255, 255, 255, failed ? 0.9 : 0.72))
-                            .copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
-                      ),
-                      if (failed && (widget.onBack != null || widget.onRetry != null)) ...[
+                      if (failed) ...[
+                        SizedBox(height: scale.rem(1.25)),
+                        EvPlayerErrorCard(
+                          failure: widget.snapshot.failure,
+                          retryAttempt: widget.retryAttempt,
+                          retryNonce: widget.retryNonce,
+                          countdownSeconds: widget.retryCountdownSeconds,
+                          autoTick: widget.autoTickRetry,
+                          onRetry: widget.onRetry,
+                          onBack: widget.onBack,
+                        ),
+                      ] else ...[
                         SizedBox(height: scale.rem(1.5)),
-                        EvOnImage(
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min, spacing: scale.rem(0.75),
-                            children: [
-                              if (widget.onRetry != null)
-                                EvButton.primary(key: const Key('ev_player_opening_retry'), small: true, label: '重试', onPressed: widget.onRetry),
-                              if (widget.onBack != null)
-                                EvButton.ghost(key: const Key('ev_player_opening_back'), small: true, icon: EvIcons.left, label: '返回', onPressed: widget.onBack),
-                            ],
-                          ),
+                        Text(
+                          _status(),
+                          key: const Key('ev_player_opening_status'),
+                          textAlign: TextAlign.center,
+                          style: theme
+                              .bodyStyle(scale.rem(0.9375), color: const Color.fromRGBO(255, 255, 255, 0.72))
+                              .copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
                         ),
                       ],
                     ],

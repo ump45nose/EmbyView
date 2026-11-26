@@ -1105,17 +1105,18 @@ void main() {
         await mouse.moveTo(const Offset(10, 10));
         await tester.pump(const Duration(milliseconds: 50));
 
-        // 5. Refresh failure keeps existing sections and shows retryable error banner.
+        // 5. Refresh failure keeps existing sections and triggers W7.4 offline notice capsule.
         failNext = true;
         await prefs.update(const LocalPreferences(theme: ThemeMode.paper, seriesSort: ShelfSort.score));
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('ev_home_sections')), findsOneWidget);
-        expect(find.byKey(const Key('ev_home_error_banner')), findsOneWidget);
+        expect(find.byKey(const Key('ev_home_error')), findsNothing);
+        expect(shell.notice?.kind, EvNoticeKind.offline);
 
         failNext = false;
-        await tester.tap(find.byKey(const Key('ev_home_error_banner_retry')));
+        shell.triggerConnectionRetry();
         await tester.pumpAndSettle();
-        expect(find.byKey(const Key('ev_home_error_banner')), findsNothing);
+        expect(shell.notice, isNull);
 
         // 6. Switching sessionId clears previous _home and enters loading skeletons immediately.
         final sess2Completer = Completer<HomeData>();

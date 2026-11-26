@@ -9,6 +9,13 @@ typedef ResolvedSourceCallback = void Function(
   ResolvedPlaybackAddress? address,
 );
 
+typedef SourceResolutionErrorCallback = void Function(
+  dynamic item,
+  Object error,
+  Uri source, {
+  required bool remote,
+});
+
 /// Decorates Moonfin's authenticated PlaybackInfo negotiation. Only the signed
 /// address is cached; each actual playback obtains its own Emby session ID.
 class EmbyViewStreamResolver extends MediaStreamResolver {
@@ -20,6 +27,7 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
     required this.userAgent,
     this.prefetchEnabled = true,
     this.onResolved,
+    this.onError,
   });
   final MediaStreamResolver delegate;
   final PlaybackRedirectCache cache;
@@ -28,6 +36,7 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
   final String userAgent;
   bool prefetchEnabled;
   ResolvedSourceCallback? onResolved;
+  SourceResolutionErrorCallback? onError;
   final _keys = <StreamResolutionResult, PlaybackSourceKey>{};
 
   PlaybackSourceKey? keyFor(StreamResolutionResult value) => _keys[value];
@@ -82,7 +91,12 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
       );
       if (freshAddress) cache.invalidate(key);
       if (prefetchEnabled || freshAddress) {
-        address = await cache.resolve(key, source, headers: result.requestHeaders);
+        try {
+          address = await cache.resolve(key, source, headers: result.requestHeaders);
+        } catch (error) {
+          onError?.call(mediaItem, error, source, remote: true);
+          rethrow;
+        }
       }
     }
     final uri = address?.uri ?? PlaybackRedirectCache.authorizedUri(source, serverUri);
