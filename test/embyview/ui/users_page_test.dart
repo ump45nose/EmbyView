@@ -67,13 +67,16 @@ class _FakeAccounts implements EmbyViewAccounts {
 
   AccountSnapshot _snapshot;
   final _changes = StreamController<AccountSnapshot>.broadcast();
+  final _notices = StreamController<ConnectionNoticeEvent>.broadcast();
   final Future<void> Function(String profileId, String? password)? onSwitch;
 
   final List<(String, String?)> switchCalls = [];
   final List<(Uri, String, String)> signInCalls = [];
+  final List<String> removeLocalAccountCalls = [];
 
   @override AccountSnapshot get snapshot => _snapshot;
   @override Stream<AccountSnapshot> get changes => _changes.stream;
+  @override Stream<ConnectionNoticeEvent> get connectionNotices => _notices.stream;
 
   void emit(AccountSnapshot next) {
     _snapshot = next;
@@ -126,7 +129,37 @@ class _FakeAccounts implements EmbyViewAccounts {
 
   @override Future<void> restore() async {}
   @override Future<void> signOut() async {}
-  Future<void> close() => _changes.close();
+  @override
+  Future<void> removeLocalAccount(String profileId) async {
+    removeLocalAccountCalls.add(profileId);
+    final remaining = _snapshot.profiles.where((p) => p.id != profileId).toList();
+    final isCur = _snapshot.current?.id == profileId;
+    emit(AccountSnapshot(
+      phase: isCur ? AccountPhase.choosing : _snapshot.phase,
+      current: isCur ? null : _snapshot.current,
+      profiles: remaining,
+      serverName: _snapshot.serverName,
+      serverAddress: _snapshot.serverAddress,
+      activeAddress: _snapshot.activeAddress,
+      addresses: _snapshot.addresses,
+      serverVersion: _snapshot.serverVersion,
+      connection: _snapshot.connection,
+      sessionId: isCur ? null : _snapshot.sessionId,
+    ));
+  }
+  @override Future<void> removeCurrentServer() async {}
+  @override Future<Uri?> probeAndFailover({Duration timeout = const Duration(seconds: 5)}) async => null;
+  @override Future<void> retryConnection() async {}
+  @override Future<void> setServerAddresses(List<ServerAddressEntry> entries) async {}
+  @override Future<void> addServerAddress(ServerAddressEntry entry) async {}
+  @override Future<void> updateServerAddress(ServerAddressEntry entry) async {}
+  @override Future<void> removeServerAddress(String addressId) async {}
+  @override Future<void> reorderServerAddresses(List<String> addressIds) async {}
+  @override Future<void> activateServerAddress(String addressId) async {}
+  Future<void> close() async {
+    await _changes.close();
+    await _notices.close();
+  }
 }
 
 class _FakeImmersionPlayback implements ImmersionPlayback {
@@ -393,12 +426,15 @@ void main() {
       onAddUser: () => addCalls++,
       onOpenSettings: () => settingsFallbackCalls++,
     );
-    await tester.tap(find.byKey(const Key('ev_users_manage_btn')));
     await tester.tap(find.byKey(const Key('ev_users_add_btn')));
+    await tester.tap(find.byKey(const Key('ev_users_manage_btn')));
     await tester.pump();
     expect(manageCalls, 1);
     expect(settingsFallbackCalls, 0);
     expect(addCalls, 1);
+    // Exit manage mode back to normal profile selection.
+    await tester.tap(find.byKey(const Key('ev_users_manage_btn')));
+    await tester.pump();
 
     // 2) Switch failure displays error and retry works; password_required opens obscured password EditableText.
     await tester.tap(find.byKey(const Key('ev_users_profile_family')));
@@ -423,7 +459,7 @@ void main() {
     expect(find.byKey(const Key('ev_users_error')), findsNothing);
     expect(find.byKey(const Key('ev_users_password_form')), findsNothing);
 
-    // 3) Fallback to shell.onOpenSettings + built-in inline sign-in form + in-flight status.
+    // 3) Manage mode toggle + built-in inline sign-in form + in-flight status.
     accounts.emit(const AccountSnapshot(
       phase: AccountPhase.signedIn,
       current: _kSfw,
@@ -434,7 +470,11 @@ void main() {
     await _pumpUsersPage(tester, accounts: accounts, prefs: prefs, onSelected: selected.add, onOpenSettings: () => settingsFallbackCalls++);
     await tester.tap(find.byKey(const Key('ev_users_manage_btn')));
     await tester.pump();
-    expect(settingsFallbackCalls, 1);
+    expect(find.text('管理这台 Mac 上的账号'), findsOneWidget);
+    expect(find.text('完成'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('ev_users_manage_btn')));
+    await tester.pump();
+    expect(find.text('谁在看？'), findsOneWidget);
 
     // Switching in-flight shows status hint.
     failMode = 'pending';

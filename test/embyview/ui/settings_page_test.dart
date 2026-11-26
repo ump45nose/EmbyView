@@ -112,6 +112,8 @@ class _FakePreferences implements EmbyViewPreferences {
     navigation: _current.navigation,
     seriesSort: _current.seriesSort,
     chooseUserOnStartup: _current.chooseUserOnStartup,
+    autoSwitchServerAddress: _current.autoSwitchServerAddress,
+    serverAddresses: _current.serverAddresses,
     backgroundVideo: _current.backgroundVideo,
     backgroundVideoDelay: _current.backgroundVideoDelay,
     detailTrailerDelay: _current.detailTrailerDelay,
@@ -254,6 +256,7 @@ class _FakeAccounts implements EmbyViewAccounts {
 
   AccountSnapshot _snapshot;
   final _changes = StreamController<AccountSnapshot>.broadcast();
+  final _notices = StreamController<ConnectionNoticeEvent>.broadcast();
   final List<String> switchCalls = [];
 
   @override
@@ -261,6 +264,9 @@ class _FakeAccounts implements EmbyViewAccounts {
 
   @override
   Stream<AccountSnapshot> get changes => _changes.stream;
+
+  @override
+  Stream<ConnectionNoticeEvent> get connectionNotices => _notices.stream;
 
   @override
   Future<void> switchTo(String profileId, {String? password}) async {
@@ -271,7 +277,10 @@ class _FakeAccounts implements EmbyViewAccounts {
         phase: AccountPhase.signedIn,
         current: next,
         profiles: _snapshot.profiles,
+        serverName: _snapshot.serverName,
         serverAddress: _snapshot.serverAddress,
+        activeAddress: _snapshot.activeAddress,
+        addresses: _snapshot.addresses,
         serverVersion: _snapshot.serverVersion,
         connection: _snapshot.connection,
         sessionId: 'sess_$profileId',
@@ -280,16 +289,24 @@ class _FakeAccounts implements EmbyViewAccounts {
     }
   }
 
-  @override
-  Future<void> restore() async {}
+  @override Future<void> restore() async {}
+  @override Future<void> signIn(Uri server, String username, String password) async {}
+  @override Future<void> signOut() async {}
+  @override Future<void> removeLocalAccount(String profileId) async {}
+  @override Future<void> removeCurrentServer() async {}
+  @override Future<Uri?> probeAndFailover({Duration timeout = const Duration(seconds: 5)}) async => null;
+  @override Future<void> retryConnection() async {}
+  @override Future<void> setServerAddresses(List<ServerAddressEntry> entries) async {}
+  @override Future<void> addServerAddress(ServerAddressEntry entry) async {}
+  @override Future<void> updateServerAddress(ServerAddressEntry entry) async {}
+  @override Future<void> removeServerAddress(String addressId) async {}
+  @override Future<void> reorderServerAddresses(List<String> addressIds) async {}
+  @override Future<void> activateServerAddress(String addressId) async {}
 
-  @override
-  Future<void> signIn(Uri server, String username, String password) async {}
-
-  @override
-  Future<void> signOut() async {}
-
-  Future<void> close() => _changes.close();
+  Future<void> close() async {
+    await _changes.close();
+    await _notices.close();
+  }
 }
 
 class _FakeData implements EmbyViewData {

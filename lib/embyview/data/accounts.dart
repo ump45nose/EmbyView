@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:get_it/get_it.dart';
 import 'package:server_core/server_core.dart';
 import 'package:uuid/uuid.dart';
@@ -11,13 +12,33 @@ import '../../auth/repositories/auth_repository.dart';
 import '../../auth/repositories/server_repository.dart';
 import '../../auth/repositories/session_repository.dart';
 import '../../auth/store/authentication_store.dart';
-import '../../data/services/media_server_client_factory.dart';
+import '../../auth/store/credential_store.dart';
 import '../../data/services/connectivity_service.dart';
+import '../../data/services/media_server_client_factory.dart';
 import '../contracts/accounts.dart';
 import '../contracts/common.dart';
+import '../contracts/preferences.dart';
+
+/// Result of probing a single Emby server address.
+class AddressProbeResult {
+  const AddressProbeResult({
+    required this.reachable,
+    this.latencyMs,
+    this.serverVersion,
+  });
+
+  final bool reachable;
+  final int? latencyMs;
+  final String? serverVersion;
+}
+
+typedef ServerAddressProbe = Future<AddressProbeResult> Function(
+  Uri address,
+  Duration timeout,
+);
 
 /// Keeps Moonfin's stored identities and authentication, with an awaited
-/// boundary before any client or token can change.
+/// boundary before any client or token can change, plus multi-address failover.
 class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
   MoonfinEmbyViewAccounts({
     required this.store,
@@ -27,7 +48,12 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     required this.clients,
     required this.beforeSessionChange,
     required this.chooseUserOnStartup,
-  }) {
+    this.preferences,
+    this.credentials,
+    this.autoSwitchServerAddress,
+    ServerAddressProbe? probeAddress,
+  }) : _probeAddress = probeAddress ?? _defaultProbeAddress {
+    _lastServerId = sessions.activeServerId ?? _firstEmbyServer()?.id;
     _snapshot = _readCurrent();
     _connectivity?.addListener(_connectionChanged);
   }
@@ -37,58 +63,176 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
   final AuthRepository auth;
   final ServerRepository servers;
   final MediaServerClientFactory clients;
+  final EmbyViewPreferences? preferences;
+  final CredentialStore? credentials;
 
   /// Release the old EmbyView scope, including Stop reporting and previews.
   final Future<void> Function() beforeSessionChange;
   final bool Function() chooseUserOnStartup;
+  final bool Function()? autoSwitchServerAddress;
+  final ServerAddressProbe _probeAddress;
   final _connectivity = GetIt.instance.isRegistered<ConnectivityService>()
       ? GetIt.instance<ConnectivityService>()
       : null;
+
   final _changes = StreamController<AccountSnapshot>.broadcast(sync: true);
+  final _connectionNotices = StreamController<ConnectionNoticeEvent>.broadcast(
+    sync: true,
+  );
+  final Map<String, List<ServerAddressEntry>> _localAddressesByServer = {};
+
   Future<void> _pending = Future.value();
+  Future<Uri?>? _inFlightProbe;
   late AccountSnapshot _snapshot;
+  String? _lastServerId;
+  ConnectionState? _connectionOverride;
+  int? _latencyMs;
+  int _triedAddressCount = 0;
+
   @override
   AccountSnapshot get snapshot => _snapshot;
+
   @override
   Stream<AccountSnapshot> get changes => _changes.stream;
 
+  @override
+  Stream<ConnectionNoticeEvent> get connectionNotices =>
+      _connectionNotices.stream;
+
+  bool get _autoSwitchEnabled =>
+      autoSwitchServerAddress?.call() ??
+      preferences?.current.autoSwitchServerAddress ??
+      true;
+
   String _profileId(PrivateUser user) =>
       '${Uri.encodeComponent(user.serverId)}/${Uri.encodeComponent(user.id)}';
+
   List<PrivateUser> get _users => [
     for (final server in store.getServers())
       if (server.serverType == ServerType.emby) ...store.getUsers(server.id),
   ];
+
+  Server? _firstEmbyServer() {
+    for (final server in store.getServers()) {
+      if (server.serverType == ServerType.emby) return server;
+    }
+    return null;
+  }
+
+  Server? _resolveServer({String? preferredServerId}) {
+    final activeId = sessions.activeServerId;
+    if (activeId != null && activeId.isNotEmpty) {
+      final server = store.getServer(activeId);
+      if (server != null && server.serverType == ServerType.emby) {
+        _lastServerId = server.id;
+        return server;
+      }
+    }
+    final preferred = preferredServerId ?? _lastServerId;
+    if (preferred != null && preferred.isNotEmpty) {
+      final server = store.getServer(preferred);
+      if (server != null && server.serverType == ServerType.emby) {
+        return server;
+      }
+    }
+    return _firstEmbyServer();
+  }
+
+  List<ServerAddressEntry> _addressesForServer(Server? server) {
+    if (server == null) return const [];
+    final fromPrefs = preferences?.current.serverAddresses[server.id];
+    if (fromPrefs != null && fromPrefs.isNotEmpty) {
+      return List.unmodifiable(fromPrefs);
+    }
+    final fromLocal = _localAddressesByServer[server.id];
+    if (fromLocal != null && fromLocal.isNotEmpty) {
+      return List.unmodifiable(fromLocal);
+    }
+    final raw = server.address.trim();
+    if (raw.isEmpty) return const [];
+    final migrated = ServerAddressEntry(
+      id: 'primary',
+      url: raw,
+      label: inferServerAddressLabel(raw),
+      subtitle: inferServerAddressSubtitle(raw),
+    );
+    return List.unmodifiable([migrated]);
+  }
+
+  ServerAddressEntry? _activeEntryForServer(
+    Server? server,
+    List<ServerAddressEntry> addresses,
+  ) {
+    if (server == null || addresses.isEmpty) return null;
+    final currentKey = _urlKey(server.address);
+    for (final entry in addresses) {
+      if (_urlKey(entry.url) == currentKey) return entry;
+    }
+    return addresses.first;
+  }
+
+  String _urlKey(String raw) =>
+      parseEmbyServerAddress(raw)?.toString().toLowerCase() ??
+      raw.trim().replaceFirst(RegExp(r'/+$'), '').toLowerCase();
+
+  String _addressLabel(ServerAddressEntry entry) =>
+      entry.label.trim().isNotEmpty
+          ? entry.label.trim()
+          : inferServerAddressLabel(entry.url);
+
   AccountProfile _profile(PrivateUser user) => AccountProfile(
     id: _profileId(user),
     displayName: user.name,
     serverId: user.serverId,
+    lastUsedAt: user.lastUsed,
   );
+
   AccountSnapshot _readCurrent({
     AccountPhase? phase,
     EmbyViewFailure? failure,
     String? sessionId,
+    String? preferredServerId,
+    bool allowFallbackServer = true,
   }) {
-    final server = store.getServer(sessions.activeServerId ?? '');
-    final user = server?.serverType == ServerType.emby
-        ? store.getUser(server!.id, sessions.activeUserId ?? '')
+    final activeServer = store.getServer(sessions.activeServerId ?? '');
+    final user = activeServer?.serverType == ServerType.emby
+        ? store.getUser(activeServer!.id, sessions.activeUserId ?? '')
         : null;
+    final server = activeServer?.serverType == ServerType.emby
+        ? activeServer
+        : (allowFallbackServer
+              ? _resolveServer(preferredServerId: preferredServerId)
+              : null);
+    final addresses = _addressesForServer(server);
+    final activeAddress = _activeEntryForServer(server, addresses);
+    final connection = _connectionOverride ??
+        (user == null || _connectivity == null
+            ? ConnectionState.unknown
+            : _connectivity.canReachServer
+            ? ConnectionState.connected
+            : ConnectionState.disconnected);
+
     return AccountSnapshot(
       phase:
           phase ??
           (user != null
               ? AccountPhase.signedIn
+              : _users.isEmpty && server == null
+              ? AccountPhase.signedOut
               : _users.isEmpty
               ? AccountPhase.signedOut
               : AccountPhase.choosing),
       current: user == null ? null : _profile(user),
       profiles: List.unmodifiable(_users.map(_profile)),
-      serverAddress: server?.displayAddress ?? server?.address,
-      serverVersion: server?.version,
-      connection: user == null || _connectivity == null
-          ? ConnectionState.unknown
-          : _connectivity.canReachServer
-          ? ConnectionState.connected
-          : ConnectionState.disconnected,
+      serverName: server?.name.isNotEmpty == true ? server!.name : null,
+      serverAddress:
+          activeAddress?.url ?? server?.displayAddress ?? server?.address,
+      activeAddress: activeAddress,
+      addresses: addresses,
+      serverVersion: server?.version.isNotEmpty == true ? server!.version : null,
+      latencyMs: _latencyMs,
+      triedAddressCount: _triedAddressCount,
+      connection: connection,
       sessionId:
           user == null || (phase != null && phase != AccountPhase.signedIn)
           ? null
@@ -98,18 +242,35 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
   }
 
   void _connectionChanged() {
-    if (_snapshot.phase == AccountPhase.signedIn) {
+    if (_snapshot.phase != AccountPhase.signedIn) return;
+    final reachable = _connectivity?.canReachServer ?? true;
+    if (!reachable) {
+      _connectionOverride = null;
       final account = _readCurrent(
         failure: _snapshot.failure,
         sessionId: _snapshot.sessionId,
       );
       if (account.current?.id == _snapshot.current?.id) _publish(account);
+      if (_autoSwitchEnabled && account.addresses.length > 1) {
+        unawaited(probeAndFailover());
+      }
+      return;
     }
+    _connectionOverride = ConnectionState.connected;
+    final account = _readCurrent(
+      failure: _snapshot.failure,
+      sessionId: _snapshot.sessionId,
+    );
+    if (account.current?.id == _snapshot.current?.id) _publish(account);
   }
 
   void _publish(AccountSnapshot value) {
     _snapshot = value;
-    _changes.add(value);
+    if (!_changes.isClosed) _changes.add(value);
+  }
+
+  void _emitNotice(ConnectionNoticeEvent event) {
+    if (!_connectionNotices.isClosed) _connectionNotices.add(event);
   }
 
   Future<void> _serialize(Future<void> Function() operation) {
@@ -118,21 +279,83 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     return result;
   }
 
+  Future<void> _persistAddresses(
+    String serverId,
+    List<ServerAddressEntry> entries,
+  ) async {
+    final immutable = List<ServerAddressEntry>.unmodifiable(entries);
+    if (immutable.isEmpty) {
+      _localAddressesByServer.remove(serverId);
+    } else {
+      _localAddressesByServer[serverId] = immutable;
+    }
+    final prefs = preferences;
+    if (prefs != null) {
+      final map = Map<String, List<ServerAddressEntry>>.from(
+        prefs.current.serverAddresses,
+      );
+      if (immutable.isEmpty) {
+        map.remove(serverId);
+      } else {
+        map[serverId] = immutable;
+      }
+      await prefs.update(_copyPrefsWithAddresses(prefs.current, map));
+    }
+  }
+
+  Future<void> _applyServerActiveAddress(
+    Server server,
+    String nextUrl, {
+    String? serverVersion,
+  }) async {
+    final updated = server.copyWith(
+      address: nextUrl,
+      clearDisplayAddress: true,
+      version: serverVersion != null && serverVersion.isNotEmpty
+          ? serverVersion
+          : server.version,
+      dateLastAccessed: DateTime.now(),
+    );
+    await servers.updateServer(updated);
+    if (store.getServer(server.id)?.address != updated.address) {
+      await store.putServer(updated);
+    }
+    final client = clients.getClientIfExists(server.id);
+    if (client != null) {
+      client.baseUrl = nextUrl;
+    }
+  }
+
   Future<void> _transition(
     AccountPhase phase,
-    Future<void> Function() operation,
-  ) async {
+    Future<void> Function() operation, {
+    AccountPhase? postPhase,
+    String? preferredServerId,
+    bool allowFallbackServer = true,
+  }) async {
     final old = store.getUser(
       sessions.activeServerId ?? '',
       sessions.activeUserId ?? '',
     );
-    _publish(_readCurrent(phase: phase));
+    _publish(
+      _readCurrent(
+        phase: phase,
+        preferredServerId: preferredServerId,
+        allowFallbackServer: allowFallbackServer,
+      ),
+    );
     var released = false;
     try {
       await beforeSessionChange();
       released = true;
       await operation();
-      _publish(_readCurrent());
+      _publish(
+        _readCurrent(
+          phase: postPhase,
+          preferredServerId: preferredServerId,
+          allowFallbackServer: allowFallbackServer,
+        ),
+      );
     } catch (error) {
       final failure = error is EmbyViewFailure
           ? error
@@ -153,13 +376,12 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
         _publish(_readCurrent(failure: failure));
       } else {
         _publish(
-          AccountSnapshot(
+          _readCurrent(
             phase: _users.isEmpty
                 ? AccountPhase.signedOut
                 : AccountPhase.choosing,
-            profiles: List.unmodifiable(_users.map(_profile)),
             failure: failure,
-            connection: ConnectionState.disconnected,
+            preferredServerId: preferredServerId,
           ),
         );
       }
@@ -170,6 +392,7 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
   @override
   Future<void> restore() => _serialize(() async {
     await servers.loadStoredServers();
+    _lastServerId ??= _firstEmbyServer()?.id;
     if (sessions.activeUserId != null ||
         chooseUserOnStartup() ||
         _users.isEmpty) {
@@ -197,6 +420,18 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
       if (saved == null || saved.serverType != ServerType.emby) {
         throw const EmbyViewFailure('无法连接 Emby 服务器，请检查地址。', retryable: true);
       }
+      _lastServerId = saved.id;
+      final existing = _addressesForServer(saved);
+      if (existing.isEmpty) {
+        await _persistAddresses(saved.id, [
+          ServerAddressEntry(
+            id: 'primary',
+            url: saved.address,
+            label: inferServerAddressLabel(saved.address),
+            subtitle: inferServerAddressSubtitle(saved.address),
+          ),
+        ]);
+      }
       await _activate(await _authenticate(saved, username, password), password);
     }),
   );
@@ -204,7 +439,9 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
   @override
   Future<void> switchTo(String profileId, {String? password}) => _serialize(
     () => _transition(AccountPhase.switching, () async {
-      var user = _users.where((u) => _profileId(u) == profileId).firstOrNull;
+      var user = _users
+          .where((u) => _profileId(u) == profileId || u.id == profileId)
+          .firstOrNull;
       if (user == null) throw const EmbyViewFailure('该用户已不在本机，请重新登录。');
       if (password != null) {
         user = await _authenticate(
@@ -254,19 +491,491 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     )) {
       throw const EmbyViewFailure('无法切换用户，请重新登录。', retryable: true);
     }
+    _lastServerId = user.serverId;
   }
 
   @override
-  Future<void> signOut() => _serialize(
-    () => _transition(
+  Future<void> signOut() => _serialize(() async {
+    final serverId = sessions.activeServerId ?? _lastServerId ?? _firstEmbyServer()?.id;
+    _lastServerId = serverId;
+    await _transition(
       AccountPhase.switching,
       () => sessions.destroyCurrentSession(),
-    ),
+      postPhase: serverId != null && store.getServer(serverId) != null
+          ? AccountPhase.choosing
+          : AccountPhase.signedOut,
+      preferredServerId: serverId,
+    );
+  });
+
+  /// Removes only this Mac's locally stored account record and token.
+  /// Never calls any Emby server user-deletion API.
+  @override
+  Future<void> removeLocalAccount(String profileId) => _serialize(() async {
+    final user = _users
+        .where((u) => _profileId(u) == profileId || u.id == profileId)
+        .firstOrNull;
+    if (user == null) return;
+    final serverId = user.serverId;
+    _lastServerId ??= serverId;
+    final isCurrent =
+        sessions.activeServerId == serverId && sessions.activeUserId == user.id;
+
+    if (isCurrent) {
+      await _transition(
+        AccountPhase.switching,
+        () async {
+          await sessions.destroyCurrentSession();
+          await store.removeUser(serverId, user.id);
+          await credentials?.deleteToken(serverId);
+        },
+        postPhase: store.getServer(serverId) != null
+            ? AccountPhase.choosing
+            : AccountPhase.signedOut,
+        preferredServerId: serverId,
+      );
+      return;
+    }
+
+    await store.removeUser(serverId, user.id);
+    if (store.getUsers(serverId).isEmpty) {
+      await credentials?.deleteToken(serverId);
+    }
+    _publish(
+      _readCurrent(
+        phase: _snapshot.phase,
+        sessionId: _snapshot.sessionId,
+        preferredServerId: serverId,
+      ),
+    );
+  });
+
+  /// Removes only this Mac's locally stored server configuration, address list,
+  /// and all associated local accounts/tokens. Never deletes server users.
+  @override
+  Future<void> removeCurrentServer() => _serialize(() async {
+    final server = _resolveServer();
+    if (server == null) {
+      _lastServerId = null;
+      _connectionOverride = null;
+      _latencyMs = null;
+      _triedAddressCount = 0;
+      _publish(
+        _readCurrent(
+          phase: AccountPhase.signedOut,
+          allowFallbackServer: false,
+        ),
+      );
+      return;
+    }
+
+    final serverId = server.id;
+    final isActiveServer = sessions.activeServerId == serverId;
+
+    if (isActiveServer) {
+      _publish(
+        _readCurrent(phase: AccountPhase.switching, preferredServerId: serverId),
+      );
+      await beforeSessionChange();
+      await sessions.destroyCurrentSession();
+    }
+
+    for (final user in [...store.getUsers(serverId)]) {
+      await store.removeUser(serverId, user.id);
+    }
+    await credentials?.deleteToken(serverId);
+    await servers.deleteServer(serverId);
+    if (store.getServer(serverId) != null) {
+      await store.removeServer(serverId);
+    }
+    await _persistAddresses(serverId, const []);
+
+    _lastServerId = null;
+    _connectionOverride = null;
+    _latencyMs = null;
+    _triedAddressCount = 0;
+    _publish(
+      _readCurrent(
+        phase: AccountPhase.signedOut,
+        allowFallbackServer: false,
+      ),
+    );
+  });
+
+  @override
+  Future<Uri?> probeAndFailover({
+    Duration timeout = const Duration(seconds: 5),
+  }) {
+    final existing = _inFlightProbe;
+    if (existing != null) return existing;
+    final future = _probeAndFailoverImpl(timeout: timeout);
+    _inFlightProbe = future;
+    future.whenComplete(() {
+      if (identical(_inFlightProbe, future)) _inFlightProbe = null;
+    });
+    return future;
+  }
+
+  Future<Uri?> _probeAndFailoverImpl({required Duration timeout}) async {
+    final server = _resolveServer();
+    if (server == null) return null;
+    final addresses = _addressesForServer(server);
+    if (addresses.isEmpty) return null;
+
+    final currentEntry = _activeEntryForServer(server, addresses)!;
+    final candidates = <ServerAddressEntry>[
+      currentEntry,
+      if (_autoSwitchEnabled)
+        ...addresses.where((e) => e.id != currentEntry.id),
+    ];
+
+    final wasOffline = _snapshot.connection == ConnectionState.disconnected;
+    var tried = 0;
+
+    for (final candidate in candidates) {
+      final uri = parseEmbyServerAddress(candidate.url);
+      tried++;
+      if (uri == null) continue;
+      AddressProbeResult result;
+      try {
+        result = await _probeAddress(uri, timeout);
+      } catch (_) {
+        result = const AddressProbeResult(reachable: false);
+      }
+      if (!result.reachable) continue;
+
+      final switched = _urlKey(candidate.url) != _urlKey(currentEntry.url);
+      if (switched) {
+        await _applyServerActiveAddress(
+          server,
+          uri.toString(),
+          serverVersion: result.serverVersion,
+        );
+      }
+      _connectionOverride = ConnectionState.connected;
+      _latencyMs = result.latencyMs;
+      _triedAddressCount = tried;
+
+      _publish(
+        _readCurrent(
+          phase: _snapshot.phase,
+          sessionId: _snapshot.sessionId,
+          preferredServerId: server.id,
+        ),
+      );
+
+      if (switched) {
+        _emitNotice(
+          ConnectionNoticeEvent.switched(
+            serverName: server.name,
+            fromLabel: _addressLabel(currentEntry),
+            toLabel: _addressLabel(candidate),
+            activeAddress: uri.toString(),
+            triedAddressCount: tried,
+          ),
+        );
+      } else if (wasOffline) {
+        _emitNotice(
+          ConnectionNoticeEvent.recovered(
+            serverName: server.name,
+            toLabel: _addressLabel(candidate),
+            activeAddress: uri.toString(),
+          ),
+        );
+      }
+      return uri;
+    }
+
+    _connectionOverride = ConnectionState.disconnected;
+    _latencyMs = null;
+    _triedAddressCount = tried;
+    _publish(
+      _readCurrent(
+        phase: _snapshot.phase,
+        sessionId: _snapshot.sessionId,
+        preferredServerId: server.id,
+      ),
+    );
+    _emitNotice(
+      ConnectionNoticeEvent.offline(
+        serverName: server.name,
+        triedAddressCount: tried,
+      ),
+    );
+    return null;
+  }
+
+  @override
+  Future<void> retryConnection() async {
+    await probeAndFailover();
+  }
+
+  @override
+  Future<void> setServerAddresses(List<ServerAddressEntry> entries) =>
+      _serialize(() async {
+        final server = _resolveServer();
+        if (server == null) {
+          throw const EmbyViewFailure('尚未配置 Emby 服务器。');
+        }
+        if (entries.isEmpty) {
+          throw const EmbyViewFailure('至少保留一条服务器地址。');
+        }
+        final normalized = <ServerAddressEntry>[];
+        final seenUrls = <String>{};
+        for (final entry in entries) {
+          final uri = parseEmbyServerAddress(entry.url);
+          if (uri == null) {
+            throw const EmbyViewFailure(
+              '请填写有效的服务器地址（如 http://nas.local:8096 或 https://emby.example.com）。',
+            );
+          }
+          final url = uri.toString();
+          if (!seenUrls.add(_urlKey(url))) {
+            throw const EmbyViewFailure('该服务器地址已存在。');
+          }
+          normalized.add(
+            ServerAddressEntry(
+              id: entry.id.trim().isEmpty ? const Uuid().v4() : entry.id.trim(),
+              url: url,
+              label: entry.label.trim().isEmpty
+                  ? inferServerAddressLabel(url)
+                  : entry.label.trim(),
+              subtitle: entry.subtitle.trim(),
+            ),
+          );
+        }
+        await _persistAddresses(server.id, normalized);
+        final currentKey = _urlKey(server.address);
+        if (normalized.every((e) => _urlKey(e.url) != currentKey)) {
+          await _applyServerActiveAddress(server, normalized.first.url);
+        }
+        _publish(
+          _readCurrent(
+            phase: _snapshot.phase,
+            sessionId: _snapshot.sessionId,
+            preferredServerId: server.id,
+          ),
+        );
+      });
+
+  @override
+  Future<void> addServerAddress(ServerAddressEntry entry) =>
+      _serialize(() async {
+        final server = _resolveServer();
+        if (server == null) {
+          throw const EmbyViewFailure('尚未配置 Emby 服务器。');
+        }
+        final uri = parseEmbyServerAddress(entry.url);
+        if (uri == null) {
+          throw const EmbyViewFailure(
+            '请填写有效的服务器地址（如 http://nas.local:8096 或 https://emby.example.com）。',
+          );
+        }
+        final url = uri.toString();
+        final current = _addressesForServer(server);
+        if (current.any((e) => _urlKey(e.url) == _urlKey(url))) {
+          throw const EmbyViewFailure('该服务器地址已存在。');
+        }
+        final created = ServerAddressEntry(
+          id: entry.id.trim().isEmpty ? const Uuid().v4() : entry.id.trim(),
+          url: url,
+          label: entry.label.trim().isEmpty
+              ? inferServerAddressLabel(url)
+              : entry.label.trim(),
+          subtitle: entry.subtitle.trim().isEmpty
+              ? inferServerAddressSubtitle(url)
+              : entry.subtitle.trim(),
+        );
+        await _persistAddresses(server.id, [...current, created]);
+        _publish(
+          _readCurrent(
+            phase: _snapshot.phase,
+            sessionId: _snapshot.sessionId,
+            preferredServerId: server.id,
+          ),
+        );
+      });
+
+  @override
+  Future<void> updateServerAddress(ServerAddressEntry entry) =>
+      _serialize(() async {
+        final server = _resolveServer();
+        if (server == null) {
+          throw const EmbyViewFailure('尚未配置 Emby 服务器。');
+        }
+        final uri = parseEmbyServerAddress(entry.url);
+        if (uri == null) {
+          throw const EmbyViewFailure(
+            '请填写有效的服务器地址（如 http://nas.local:8096 或 https://emby.example.com）。',
+          );
+        }
+        final url = uri.toString();
+        final current = [..._addressesForServer(server)];
+        final idx = current.indexWhere((e) => e.id == entry.id);
+        if (idx < 0) {
+          throw const EmbyViewFailure('未找到要修改的服务器地址。');
+        }
+        if (current.any((e) => e.id != entry.id && _urlKey(e.url) == _urlKey(url))) {
+          throw const EmbyViewFailure('该服务器地址已存在。');
+        }
+        final wasActive = _urlKey(current[idx].url) == _urlKey(server.address);
+        current[idx] = ServerAddressEntry(
+          id: entry.id,
+          url: url,
+          label: entry.label.trim().isEmpty
+              ? inferServerAddressLabel(url)
+              : entry.label.trim(),
+          subtitle: entry.subtitle.trim(),
+        );
+        await _persistAddresses(server.id, current);
+        if (wasActive) {
+          await _applyServerActiveAddress(server, url);
+        }
+        _publish(
+          _readCurrent(
+            phase: _snapshot.phase,
+            sessionId: _snapshot.sessionId,
+            preferredServerId: server.id,
+          ),
+        );
+      });
+
+  @override
+  Future<void> removeServerAddress(String addressId) => _serialize(() async {
+    final server = _resolveServer();
+    if (server == null) {
+      throw const EmbyViewFailure('尚未配置 Emby 服务器。');
+    }
+    final current = [..._addressesForServer(server)];
+    final idx = current.indexWhere((e) => e.id == addressId);
+    if (idx < 0) return;
+    if (current.length <= 1) {
+      throw const EmbyViewFailure('至少保留一条服务器地址。');
+    }
+    final removed = current.removeAt(idx);
+    await _persistAddresses(server.id, current);
+    if (_urlKey(removed.url) == _urlKey(server.address)) {
+      await _applyServerActiveAddress(server, current.first.url);
+    }
+    _publish(
+      _readCurrent(
+        phase: _snapshot.phase,
+        sessionId: _snapshot.sessionId,
+        preferredServerId: server.id,
+      ),
+    );
+  });
+
+  @override
+  Future<void> reorderServerAddresses(List<String> addressIds) =>
+      _serialize(() async {
+        final server = _resolveServer();
+        if (server == null) return;
+        final current = _addressesForServer(server);
+        if (current.isEmpty) return;
+        final remaining = {for (final a in current) a.id: a};
+        final ordered = <ServerAddressEntry>[];
+        for (final id in addressIds) {
+          final found = remaining.remove(id);
+          if (found != null) ordered.add(found);
+        }
+        ordered.addAll(remaining.values);
+        await _persistAddresses(server.id, ordered);
+        _publish(
+          _readCurrent(
+            phase: _snapshot.phase,
+            sessionId: _snapshot.sessionId,
+            preferredServerId: server.id,
+          ),
+        );
+      });
+
+  @override
+  Future<void> activateServerAddress(String addressId) => _serialize(() async {
+    final server = _resolveServer();
+    if (server == null) return;
+    final current = _addressesForServer(server);
+    final target = current.where((e) => e.id == addressId).firstOrNull;
+    if (target == null) return;
+    final uri = parseEmbyServerAddress(target.url);
+    final nextUrl = uri?.toString() ?? target.url;
+    await _applyServerActiveAddress(server, nextUrl);
+    _publish(
+      _readCurrent(
+        phase: _snapshot.phase,
+        sessionId: _snapshot.sessionId,
+        preferredServerId: server.id,
+      ),
+    );
+  });
+
+  static Future<AddressProbeResult> _defaultProbeAddress(
+    Uri address,
+    Duration timeout,
+  ) async {
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: timeout,
+        receiveTimeout: timeout,
+        sendTimeout: timeout,
+        followRedirects: false,
+        validateStatus: (status) => status != null && status < 400,
+      ),
+    );
+    configureServerDio(dio);
+    final sw = Stopwatch()..start();
+    try {
+      final result = await probeServerPublicInfo(dio, address.toString());
+      sw.stop();
+      if (result == null) return const AddressProbeResult(reachable: false);
+      return AddressProbeResult(
+        reachable: true,
+        latencyMs: sw.elapsedMilliseconds,
+        serverVersion: result.info['Version'] as String?,
+      );
+    } catch (_) {
+      return const AddressProbeResult(reachable: false);
+    } finally {
+      dio.close();
+    }
+  }
+
+  static LocalPreferences _copyPrefsWithAddresses(
+    LocalPreferences p,
+    Map<String, List<ServerAddressEntry>> addresses,
+  ) => LocalPreferences(
+    theme: p.theme,
+    navigation: p.navigation,
+    seriesSort: p.seriesSort,
+    chooseUserOnStartup: p.chooseUserOnStartup,
+    autoSwitchServerAddress: p.autoSwitchServerAddress,
+    serverAddresses: Map.unmodifiable(addresses),
+    backgroundVideo: p.backgroundVideo,
+    backgroundVideoDelay: p.backgroundVideoDelay,
+    detailTrailerDelay: p.detailTrailerDelay,
+    themeMusic: p.themeMusic,
+    themeVolume: p.themeVolume,
+    quickLook: p.quickLook,
+    hideUnwatchedOverview: p.hideUnwatchedOverview,
+    preResolve115: p.preResolve115,
+    readAheadBytes: p.readAheadBytes,
+    autoPlayNext: p.autoPlayNext,
+    anime4kForAnime: p.anime4kForAnime,
+    anime4kForOther: p.anime4kForOther,
+    subtitleLanguages: p.subtitleLanguages,
+    autoSelectChineseSubtitle: p.autoSelectChineseSubtitle,
+    subtitleSources: p.subtitleSources,
+    translationBaseUrl: p.translationBaseUrl,
+    translationModel: p.translationModel,
+    monthlyBudgetMicros: p.monthlyBudgetMicros,
+    mediaFolder: p.mediaFolder,
+    zones: p.zones,
   );
 
   Future<void> close() async {
     _connectivity?.removeListener(_connectionChanged);
     await _pending;
     await _changes.close();
+    await _connectionNotices.close();
   }
 }

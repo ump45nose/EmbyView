@@ -17,6 +17,7 @@ import '../auth/repositories/auth_repository.dart';
 import '../auth/repositories/server_repository.dart';
 import '../auth/repositories/session_repository.dart';
 import '../auth/store/authentication_store.dart';
+import '../auth/store/credential_store.dart';
 import '../data/offline/connectivity_aware_media_server_client.dart';
 import '../data/services/media_server_client_factory.dart';
 import '../data/services/theme_music_service.dart';
@@ -282,6 +283,8 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
       initial: widget.initialDestination ?? const EvHomeDestination(),
       onOpenDetail: _openDetail, onOpenSearch: _openSearch, onOpenSettings: _openSettings,
       onOpenUsers: _openUsers, onManageZones: () => _openSettings(section: EvSettingsSection.zones),
+      onSignedOutToUserPicker: _openUsers,
+      onAddAccount: _openUsers,
     )..addListener(_onShellChanged);
     _lastShellDest = _shell.current;
     if (widget.initialEntry != null) { _s4Stack.add((entry: widget.initialEntry!, saved: null, savedFocus: null)); _shellMounted = false; }
@@ -503,7 +506,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
       _S4Settings(:final id, :final section, :final openZoneEditor) => EvSettingsPage(
         key: ValueKey('s4_settings_$id'), initialSection: section, openZoneEditorOnMount: openZoneEditor, onOpenUsers: _openUsers),
       _S4Users(:final id) => EvUsersPage(
-        key: ValueKey('s4_users_$id'), onSelected: _onUserSelected, onManageUsers: () => _openSettings(section: EvSettingsSection.account)),
+        key: ValueKey('s4_users_$id'), onSelected: _onUserSelected),
     };
     return Builder(builder: (context) {
       final theme = EvTheme.of(context), scale = EvScale.of(context);
@@ -551,7 +554,9 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
                     child: EvAvatarMenu(
                       accounts: widget.services.accounts, onSwitchUsers: _openUsers,
                       onManageZones: () => _openSettings(section: EvSettingsSection.zones),
-                      onOpenSettings: _openSettings, onDismiss: () { if (_avatarMenuOpen) setState(() => _avatarMenuOpen = false); },
+                      onOpenSettings: _openSettings,
+                      onSignOut: _shell.onSignedOutToUserPicker,
+                      onDismiss: () { if (_avatarMenuOpen) setState(() => _avatarMenuOpen = false); },
                     ),
                   )),
                 ],
@@ -683,6 +688,10 @@ Future<EmbyViewEntry> _createMoonfinEntry() async {
     auth: dependencies<AuthRepository>(),
     servers: dependencies<ServerRepository>(),
     clients: dependencies<MediaServerClientFactory>(),
+    preferences: preferences,
+    credentials: dependencies.isRegistered<CredentialStore>()
+        ? dependencies<CredentialStore>()
+        : null,
     beforeSessionChange: () => entry.releaseCurrentSession(),
     chooseUserOnStartup: () => preferences.current.chooseUserOnStartup,
   );

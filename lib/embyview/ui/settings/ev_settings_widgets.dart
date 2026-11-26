@@ -13,7 +13,9 @@ const Color evDangerColor = Color(0xFFE5484D);
 LocalPreferences evCopyPreferences(
   LocalPreferences b, {
   ThemeMode? theme, NavigationStyle? navigation, ShelfSort? seriesSort,
-  bool? chooseUserOnStartup, bool? backgroundVideo, Duration? backgroundVideoDelay,
+  bool? chooseUserOnStartup, bool? autoSwitchServerAddress,
+  Map<String, List<ServerAddressEntry>>? serverAddresses,
+  bool? backgroundVideo, Duration? backgroundVideoDelay,
   Object? detailTrailerDelay = _keepField, bool? themeMusic, double? themeVolume,
   bool? quickLook, bool? hideUnwatchedOverview, bool? preResolve115,
   int? readAheadBytes, bool? autoPlayNext, bool? anime4kForAnime, bool? anime4kForOther,
@@ -22,7 +24,10 @@ LocalPreferences evCopyPreferences(
   int? monthlyBudgetMicros, MediaFolderStatus? mediaFolder, List<ZonePreference>? zones,
 }) => LocalPreferences(
   theme: theme ?? b.theme, navigation: navigation ?? b.navigation, seriesSort: seriesSort ?? b.seriesSort,
-  chooseUserOnStartup: chooseUserOnStartup ?? b.chooseUserOnStartup, backgroundVideo: backgroundVideo ?? b.backgroundVideo,
+  chooseUserOnStartup: chooseUserOnStartup ?? b.chooseUserOnStartup,
+  autoSwitchServerAddress: autoSwitchServerAddress ?? b.autoSwitchServerAddress,
+  serverAddresses: serverAddresses ?? b.serverAddresses,
+  backgroundVideo: backgroundVideo ?? b.backgroundVideo,
   backgroundVideoDelay: backgroundVideoDelay ?? b.backgroundVideoDelay,
   detailTrailerDelay: identical(detailTrailerDelay, _keepField) ? b.detailTrailerDelay : detailTrailerDelay as Duration?,
   themeMusic: themeMusic ?? b.themeMusic, themeVolume: themeVolume ?? b.themeVolume, quickLook: quickLook ?? b.quickLook,

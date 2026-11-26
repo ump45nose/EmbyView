@@ -426,7 +426,7 @@ void main() {
       expect(settingsTopBar.showBack, isTrue);
       expect(find.byKey(const Key('ev_zone_editor_dialog')), findsOneWidget);
 
-      // users (topbar hidden; 管理用户 opens settings account)
+      // users (topbar hidden; 管理 enters manage mode)
       router.go('$embyViewHomePath/users');
       await _pumpFrames(tester, 200);
       expect(find.byType(EvUsersPage), findsOneWidget);
@@ -434,8 +434,9 @@ void main() {
 
       await tester.tap(find.byKey(const Key('ev_users_manage_btn')));
       await _pumpFrames(tester, 200);
-      expect(find.byType(EvSettingsPage), findsOneWidget);
-      expect(tester.widget<EvSettingsPage>(find.byType(EvSettingsPage)).initialSection, EvSettingsSection.account);
+      expect(find.byType(EvUsersPage), findsOneWidget);
+      expect(find.text('管理这台 Mac 上的账号'), findsOneWidget);
+      expect(find.text('完成'), findsOneWidget);
     } finally {
       router.dispose();
       installEmbyViewEntry(null);

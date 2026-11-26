@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../contracts/accounts.dart';
 import '../contracts/common.dart';
 import '../contracts/media.dart';
 import '../contracts/preferences.dart';
@@ -249,6 +250,11 @@ class MachinePreferences implements EmbyViewPreferences {
     'navigation': p.navigation.name,
     'seriesSort': p.seriesSort.name,
     'chooseUser': p.chooseUserOnStartup,
+    'autoSwitchServerAddress': p.autoSwitchServerAddress,
+    'serverAddresses': {
+      for (final entry in p.serverAddresses.entries)
+        entry.key: entry.value.map(_serverAddressJson).toList(),
+    },
     'backgroundVideo': p.backgroundVideo,
     'backgroundDelay': p.backgroundVideoDelay.inMilliseconds,
     'trailerDelay': p.detailTrailerDelay?.inSeconds,
@@ -282,6 +288,10 @@ class MachinePreferences implements EmbyViewPreferences {
       navigation: _enum(NavigationStyle.values, p['navigation'], d.navigation),
       seriesSort: _enum(ShelfSort.values, p['seriesSort'], d.seriesSort),
       chooseUserOnStartup: p['chooseUser'] as bool,
+      autoSwitchServerAddress: p['autoSwitchServerAddress'] is bool
+          ? p['autoSwitchServerAddress'] as bool
+          : d.autoSwitchServerAddress,
+      serverAddresses: _decodeServerAddresses(p['serverAddresses']),
       backgroundVideo: p['backgroundVideo'] as bool,
       backgroundVideoDelay: Duration(
         milliseconds: (p['backgroundDelay'] as int).clamp(0, 60000),
@@ -347,6 +357,44 @@ class MachinePreferences implements EmbyViewPreferences {
       rule: rule,
       custom: z['custom'] as bool,
     );
+  }
+
+  Map<String, Object?> _serverAddressJson(ServerAddressEntry a) => {
+    'id': a.id,
+    'url': a.url,
+    'label': a.label,
+    'subtitle': a.subtitle,
+  };
+
+  Map<String, List<ServerAddressEntry>> _decodeServerAddresses(Object? raw) {
+    if (raw is! Map) return const {};
+    final out = <String, List<ServerAddressEntry>>{};
+    for (final entry in raw.entries) {
+      final serverId = entry.key;
+      final list = entry.value;
+      if (serverId is! String || serverId.isEmpty || list is! List) continue;
+      final parsed = <ServerAddressEntry>[];
+      for (final item in list) {
+        if (item is! Map) continue;
+        final id = item['id'];
+        final url = item['url'];
+        if (id is! String || id.isEmpty || url is! String || url.isEmpty) {
+          continue;
+        }
+        parsed.add(
+          ServerAddressEntry(
+            id: id,
+            url: url,
+            label: item['label'] as String? ?? '',
+            subtitle: item['subtitle'] as String? ?? '',
+          ),
+        );
+      }
+      if (parsed.isNotEmpty) {
+        out[serverId] = List.unmodifiable(parsed);
+      }
+    }
+    return Map.unmodifiable(out);
   }
 
   T _enum<T extends Enum>(List<T> values, Object? name, T fallback) =>

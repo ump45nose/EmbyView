@@ -65,6 +65,7 @@ class EvShellController extends ChangeNotifier {
     EvShellDestination initial = const EvHomeDestination(),
     List<ZoneTile> zones = const [],
     this.onOpenDetail, this.onOpenSearch, this.onOpenSettings, this.onOpenUsers, this.onManageZones,
+    this.onSignedOutToUserPicker, this.onSwitchServer, this.onAddAccount,
   }) : _stack = [initial], _zones = List<ZoneTile>.unmodifiable(zones);
 
   final List<EvShellDestination> _stack;
@@ -77,6 +78,7 @@ class EvShellController extends ChangeNotifier {
 
   ValueChanged<String>? onOpenDetail;
   VoidCallback? onOpenSearch, onOpenSettings, onOpenUsers, onManageZones;
+  VoidCallback? onSignedOutToUserPicker, onSwitchServer, onAddAccount;
 
   EvShellDestination get current => _stack.last;
   List<EvShellDestination> get stack => List<EvShellDestination>.unmodifiable(_stack);

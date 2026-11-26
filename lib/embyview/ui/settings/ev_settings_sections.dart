@@ -26,78 +26,546 @@ EvSettingsRow _toggleRow(String key, String title, String? sub, bool value, Valu
 );
 
 /// 1. Account & server pane (`account`).
-class EvAccountSettingsPane extends StatelessWidget {
+class EvAccountSettingsPane extends StatefulWidget {
   const EvAccountSettingsPane({
-    super.key, required this.snapshot, required this.prefs, required this.visibleZoneCount,
-    required this.onSwitchProfile, required this.onOpenUsers, required this.onUpdatePrefs,
+    super.key,
+    required this.snapshot,
+    required this.prefs,
+    required this.visibleZoneCount,
+    required this.onSwitchProfile,
+    required this.onOpenUsers,
+    required this.onUpdatePrefs,
+    this.onSignOut,
+    this.onRemoveAccount,
+    this.onAddAccount,
+    this.onSwitchServer,
+    this.onRemoveServer,
+    this.onAddAddress,
+    this.onUpdateAddress,
+    this.onRemoveAddress,
+    this.onReorderAddresses,
+    this.onActivateAddress,
   });
+
   final AccountSnapshot snapshot;
   final LocalPreferences prefs;
   final int visibleZoneCount;
   final ValueChanged<String> onSwitchProfile;
   final VoidCallback? onOpenUsers;
   final ValueChanged<LocalPreferences> onUpdatePrefs;
+  final Future<void> Function()? onSignOut;
+  final Future<void> Function(String profileId)? onRemoveAccount;
+  final VoidCallback? onAddAccount;
+  final VoidCallback? onSwitchServer;
+  final Future<void> Function()? onRemoveServer;
+  final Future<void> Function(ServerAddressEntry entry)? onAddAddress;
+  final Future<void> Function(ServerAddressEntry entry)? onUpdateAddress;
+  final Future<void> Function(String addressId)? onRemoveAddress;
+  final Future<void> Function(List<String> addressIds)? onReorderAddresses;
+  final Future<void> Function(String addressId)? onActivateAddress;
+
+  @override
+  State<EvAccountSettingsPane> createState() => _EvAccountSettingsPaneState();
+}
+
+class _EvAccountSettingsPaneState extends State<EvAccountSettingsPane> {
+  String? _editingAddressId;
+  bool _addingAddress = false;
+  String? _addressFormError;
+  String? _confirmRemoveAccountId;
+  bool _confirmRemoveServer = false;
+  bool _busy = false;
+
+  final _urlCtrl = TextEditingController();
+  final _labelCtrl = TextEditingController();
+  final _subCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _urlCtrl.dispose();
+    _labelCtrl.dispose();
+    _subCtrl.dispose();
+    super.dispose();
+  }
+
+  List<ServerAddressEntry> get _addresses {
+    if (widget.snapshot.addresses.isNotEmpty) return widget.snapshot.addresses;
+    final raw = widget.snapshot.serverAddress?.trim() ?? '';
+    if (raw.isEmpty) return const [];
+    return [
+      ServerAddressEntry(
+        id: 'primary',
+        url: raw,
+        label: inferServerAddressLabel(raw),
+        subtitle: inferServerAddressSubtitle(raw),
+      ),
+    ];
+  }
+
+  String? _formatLastUsed(AccountProfile p) {
+    if (p.lastUsedLabel != null && p.lastUsedLabel!.trim().isNotEmpty) {
+      return p.lastUsedLabel!.trim();
+    }
+    final dt = p.lastUsedAt;
+    if (dt == null) return null;
+    final diff = DateTime.now().difference(dt);
+    if (diff.inDays <= 0) return '今天用过';
+    if (diff.inDays == 1) return '昨天用过';
+    if (diff.inDays < 30) return '${diff.inDays} 天前用过';
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} 用过';
+  }
+
+  void _startAddAddress() {
+    setState(() {
+      _editingAddressId = null;
+      _addingAddress = true;
+      _addressFormError = null;
+      _urlCtrl.clear();
+      _labelCtrl.clear();
+      _subCtrl.clear();
+    });
+  }
+
+  void _startEditAddress(ServerAddressEntry entry) {
+    setState(() {
+      _addingAddress = false;
+      _editingAddressId = entry.id;
+      _addressFormError = null;
+      _urlCtrl.text = entry.url;
+      _labelCtrl.text = entry.label;
+      _subCtrl.text = entry.subtitle;
+    });
+  }
+
+  void _closeAddressForm() {
+    setState(() {
+      _addingAddress = false;
+      _editingAddressId = null;
+      _addressFormError = null;
+    });
+  }
+
+  Future<void> _saveAddressForm() async {
+    if (_busy) return;
+    final rawUrl = _urlCtrl.text.trim();
+    final parsed = parseEmbyServerAddress(rawUrl);
+    if (parsed == null) {
+      setState(() => _addressFormError = '请填写有效的服务器地址（如 http://nas.local:8096 或 https://emby.example.com）。');
+      return;
+    }
+    final normalizedUrl = parsed.toString();
+    final label = _labelCtrl.text.trim().isEmpty ? inferServerAddressLabel(normalizedUrl) : _labelCtrl.text.trim();
+    final subtitle = _subCtrl.text.trim().isEmpty ? inferServerAddressSubtitle(normalizedUrl) : _subCtrl.text.trim();
+    final isAdd = _addingAddress;
+    final id = isAdd ? 'addr_${DateTime.now().microsecondsSinceEpoch}' : _editingAddressId!;
+    final entry = ServerAddressEntry(id: id, url: normalizedUrl, label: label, subtitle: subtitle);
+
+    setState(() { _busy = true; _addressFormError = null; });
+    try {
+      if (isAdd) {
+        await widget.onAddAddress?.call(entry);
+      } else {
+        await widget.onUpdateAddress?.call(entry);
+      }
+      if (mounted) {
+        setState(() { _busy = false; _addingAddress = false; _editingAddressId = null; });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() { _busy = false; _addressFormError = e is EmbyViewFailure ? e.reason : '保存地址失败，请重试。'; });
+      }
+    }
+  }
+
+  Future<void> _moveAddress(int index, int delta) async {
+    final addrs = _addresses;
+    final target = index + delta;
+    if (_busy || index < 0 || index >= addrs.length || target < 0 || target >= addrs.length) return;
+    final ids = [for (final a in addrs) a.id];
+    ids.insert(target, ids.removeAt(index));
+    await widget.onReorderAddresses?.call(ids);
+  }
+
+  Widget _dangerBtn(EvTheme t, EvScale s, {Key? key, required String label, required bool primary, required VoidCallback? onPressed}) {
+    final bg = primary ? (t.isPaper ? const Color(0xFFC8463A) : const Color(0xFFE5484D)) : evTransparent;
+    final fg = primary ? const Color(0xFFFFFFFF) : (t.isPaper ? const Color(0xFFC8463A) : const Color(0xFFFF6B5A));
+    final radius = BorderRadius.circular(t.isPaper ? s.rem(0.625) : 999.0);
+    return EvInteractive(
+      key: key, label: label, enabled: onPressed != null, onTap: onPressed,
+      builder: (_, hovered, focused) => AnimatedScale(
+        scale: (onPressed != null && (hovered || focused)) ? 1.04 : 1.0,
+        duration: EvDurations.normal, curve: EvCurves.spring,
+        child: Opacity(
+          opacity: onPressed != null ? 1.0 : 0.45,
+          child: Container(
+            height: s.rem(2.375),
+            padding: EdgeInsets.symmetric(horizontal: s.rem(1.0625)),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: primary
+                  ? bg
+                  : (hovered ? t.fill3 : (t.isPaper ? const Color(0xFFFFFFFF) : t.glass)),
+              borderRadius: radius,
+              border: Border.all(
+                color: focused ? t.focusColor : (primary ? evTransparent : (t.isPaper ? const Color(0xFFD1CFC5) : t.glassBorder)),
+                width: focused ? 1.5 : 1.0,
+              ),
+            ),
+            child: Text(label, style: t.bodyStyle(s.font(0.9375), fontWeight: FontWeight.w600, color: fg)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _gaddRow(EvTheme t, EvScale s, {required Key key, required String label, required String hint, required VoidCallback? onTap}) {
+    return EvInteractive(
+      key: key, label: label, enabled: onTap != null, onTap: onTap,
+      builder: (_, hovered, focused) => Opacity(
+        opacity: onTap != null ? 1.0 : 0.45,
+        child: AnimatedContainer(
+          duration: EvDurations.fast, curve: EvCurves.soft,
+          constraints: BoxConstraints(minHeight: s.rem(3.5)),
+          padding: EdgeInsets.symmetric(horizontal: s.rem(1.125), vertical: s.rem(0.75)),
+          decoration: BoxDecoration(
+            color: hovered ? (t.isPaper ? const Color(0xFFF7F5EF) : t.fill2) : (t.isPaper ? const Color(0xFFFFFFFF) : evTransparent),
+            border: focused ? Border.all(color: t.focusColor, width: 1.5) : null,
+          ),
+          child: Row(children: [
+            EvIcon(EvIcons.plus, size: s.rem(1.25), color: hovered ? t.ink : t.ink2),
+            SizedBox(width: s.rem(0.75)),
+            Text(label, style: t.bodyStyle(s.font(1.0), fontWeight: FontWeight.w500, color: hovered ? t.ink : t.ink2)),
+            SizedBox(width: s.rem(1.0)),
+            Expanded(
+              child: Text(hint, textAlign: TextAlign.right, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: t.bodyStyle(s.font(0.875), color: t.ink3)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAddressForm(EvTheme t, EvScale s, {required bool isAdd, String? editId, required bool canDelete}) {
+    return Padding(
+      key: Key(isAdd ? 'ev_settings_add_addr_form' : 'ev_addr_edit_form_$editId'),
+      padding: EdgeInsets.fromLTRB(s.rem(1.125), s.rem(0.75), s.rem(1.125), s.rem(1.0)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          EvSettingsTextField(
+            key: const Key('ev_addr_url_input'),
+            controller: _urlCtrl,
+            placeholder: '服务器地址（如 https://nas.tail-example.ts.net 或 192.168.1.20:8096）',
+            onSubmitted: (_) => unawaited(_saveAddressForm()),
+          ),
+          SizedBox(height: s.rem(0.5)),
+          Row(children: [
+            Expanded(
+              child: EvSettingsTextField(
+                key: const Key('ev_addr_label_input'),
+                controller: _labelCtrl,
+                placeholder: '标签（如 内网、Tailscale）',
+              ),
+            ),
+            SizedBox(width: s.rem(0.5)),
+            Expanded(
+              flex: 2,
+              child: EvSettingsTextField(
+                key: const Key('ev_addr_sub_input'),
+                controller: _subCtrl,
+                placeholder: '说明（如 在家时用、出门时自动换到这里）',
+                onSubmitted: (_) => unawaited(_saveAddressForm()),
+              ),
+            ),
+          ]),
+          if (_addressFormError != null) ...[
+            SizedBox(height: s.rem(0.5)),
+            Text(_addressFormError!, key: const Key('ev_addr_form_error'),
+              style: t.bodyStyle(s.font(0.8125), color: t.isPaper ? const Color(0xFFC8463A) : evDangerColor)),
+          ],
+          SizedBox(height: s.rem(0.75)),
+          Row(children: [
+            if (!isAdd && canDelete && editId != null)
+              _dangerBtn(t, s, key: Key('ev_addr_delete_$editId'), label: '删除', primary: false,
+                onPressed: _busy ? null : () => unawaited(() async {
+                  setState(() => _busy = true);
+                  try {
+                    await widget.onRemoveAddress?.call(editId);
+                    if (mounted) setState(() { _busy = false; _editingAddressId = null; });
+                  } finally {
+                    if (mounted && _busy) setState(() => _busy = false);
+                  }
+                }())),
+            const Spacer(),
+            EvButton.ghost(key: const Key('ev_addr_cancel'), small: true, label: '取消', onPressed: _busy ? null : _closeAddressForm),
+            SizedBox(width: s.rem(0.5)),
+            EvButton.primary(key: Key(isAdd ? 'ev_addr_add_save' : 'ev_addr_save'), small: true,
+              label: isAdd ? '添加' : '保存', onPressed: _busy ? null : () => unawaited(_saveAddressForm())),
+          ]),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final t = EvTheme.of(context), s = EvScale.of(context), cur = snapshot.current, d = s.rem(3.5);
+    final t = EvTheme.of(context), s = EvScale.of(context);
+    final snapshot = widget.snapshot, prefs = widget.prefs, cur = snapshot.current;
     final profiles = [...snapshot.profiles, if (cur != null && snapshot.profiles.every((p) => p.id != cur.id)) cur];
-    final addr = snapshot.serverAddress?.trim().replaceFirst(RegExp(r'^https?://'), '');
+    final addresses = _addresses;
+    final activeAddr = snapshot.activeAddress ?? (addresses.isNotEmpty ? addresses.first : null);
+    final serverName = (snapshot.serverName?.trim().isNotEmpty ?? false) ? snapshot.serverName!.trim() : 'Emby 服务器';
     final ver = snapshot.serverVersion?.trim();
-    final serverDesc = (addr == null || addr.isEmpty) ? (ver?.isNotEmpty == true ? 'Emby $ver' : '未配置服务器') : (ver?.isNotEmpty == true ? '$addr · Emby $ver' : addr);
+    final activeLabel = activeAddr?.label.trim().isNotEmpty == true
+        ? activeAddr!.label.trim()
+        : (activeAddr != null ? inferServerAddressLabel(activeAddr.url) : '');
+    final overviewParts = <String>[
+      if (ver != null && ver.isNotEmpty) 'Emby $ver',
+      if (activeLabel.isNotEmpty) '走$activeLabel',
+      if (snapshot.latencyMs != null) '${snapshot.latencyMs} ms',
+    ];
+    final serverDesc = overviewParts.isNotEmpty
+        ? overviewParts.join(' · ')
+        : (activeAddr != null ? formatServerAddressForDisplay(activeAddr.url) : '未配置服务器');
     final (connLabel, connTone) = switch (snapshot.connection) {
       ConnectionState.connected => ('已连接', EvStatusTone.ok),
       ConnectionState.disconnected => ('已断开', EvStatusTone.error),
       ConnectionState.unknown => ('未检测', EvStatusTone.warn),
     };
+    final checkColor = t.isPaper ? const Color(0xFFB5532F) : const Color(0xFF34C759);
+
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       evPaneTitle(t, s, '用户与服务器'),
-      EvSettingsGroup(title: '切换用户', children: [
-        Padding(
-          padding: EdgeInsets.symmetric(horizontal: s.rem(1.125), vertical: s.rem(1.0)),
-          child: Wrap(spacing: s.rem(1.0), runSpacing: s.rem(1.0), children: [
-            for (var i = 0; i < profiles.length; i++)
-              EvInteractive(
-                key: Key('ev_settings_profile_${profiles[i].id}'), selected: cur?.id == profiles[i].id, label: profiles[i].displayName,
-                onTap: () => onSwitchProfile(profiles[i].id),
-                builder: (_, hovered, focused) {
-                  final sel = cur?.id == profiles[i].id;
-                  return SizedBox(width: s.rem(5.5), child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    AnimatedScale(
-                      scale: (hovered || focused) ? 1.06 : 1.0, duration: EvDurations.normal, curve: EvCurves.spring,
-                      child: Container(padding: const EdgeInsets.all(2),
-                        decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: sel ? t.ink : evTransparent, width: 2)),
-                        child: Container(padding: const EdgeInsets.all(2), decoration: BoxDecoration(shape: BoxShape.circle, color: sel ? t.bg : evTransparent),
-                          child: EvAvatarButton(profile: profiles[i], size: d, colorIndex: i))),
+      EvSettingsGroup(title: '服务器', children: [
+        EvSettingsRow(
+          key: const Key('ev_settings_server_overview'),
+          leading: Container(
+            width: s.rem(2.75), height: s.rem(2.75), alignment: Alignment.center,
+            decoration: BoxDecoration(color: t.fill2, borderRadius: BorderRadius.circular(s.rem(0.75))),
+            child: EvIcon(EvIcons.server, size: s.rem(1.5), color: t.ink),
+          ),
+          title: serverName,
+          subtitle: serverDesc,
+          trailing: EvStatusIndicator(key: const Key('ev_settings_connection_status'), label: connLabel, tone: connTone),
+        ),
+        for (var i = 0; i < addresses.length; i++) ...[
+          () {
+            final addr = addresses[i];
+            final isActive = activeAddr?.id == addr.id;
+            final tagText = [
+              if (addr.label.trim().isNotEmpty) addr.label.trim(),
+              if (addr.subtitle.trim().isNotEmpty) addr.subtitle.trim(),
+            ].join(' · ');
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                EvSettingsRow(
+                  key: Key('ev_addr_row_${addr.id}'),
+                  leading: SizedBox(
+                    width: s.rem(1.25),
+                    child: isActive ? Center(child: EvIcon(EvIcons.check, size: s.rem(1.0), color: checkColor)) : null,
+                  ),
+                  title: formatServerAddressForDisplay(addr.url),
+                  subtitle: tagText.isNotEmpty ? tagText : null,
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    if (isActive) ...[
+                      EvStatusIndicator(key: Key('ev_addr_active_${addr.id}'), label: '正在用', tone: EvStatusTone.ok),
+                      SizedBox(width: s.rem(0.625)),
+                    ] else if (widget.onActivateAddress != null) ...[
+                      EvButton.ghost(
+                        key: Key('ev_addr_use_${addr.id}'), small: true, label: '使用',
+                        onPressed: _busy ? null : () => unawaited(widget.onActivateAddress!(addr.id)),
+                      ),
+                      SizedBox(width: s.rem(0.375)),
+                    ],
+                    if (addresses.length > 1) ...[
+                      EvButton.ghost(
+                        key: Key('ev_addr_move_up_${addr.id}'), small: true, round: true, tooltip: '上移',
+                        onPressed: (!_busy && i > 0) ? () => unawaited(_moveAddress(i, -1)) : null,
+                        child: EvChevronIcon(up: true, size: s.rem(1.0), color: t.ink),
+                      ),
+                      SizedBox(width: s.rem(0.25)),
+                      EvButton.ghost(
+                        key: Key('ev_addr_move_down_${addr.id}'), small: true, round: true, tooltip: '下移',
+                        onPressed: (!_busy && i < addresses.length - 1) ? () => unawaited(_moveAddress(i, 1)) : null,
+                        child: EvChevronIcon(up: false, size: s.rem(1.0), color: t.ink),
+                      ),
+                      SizedBox(width: s.rem(0.375)),
+                    ],
+                    EvButton.ghost(
+                      key: Key('ev_addr_edit_${addr.id}'), small: true, round: true, tooltip: '修改',
+                      icon: EvIcons.edit,
+                      onPressed: _busy ? null : () => _editingAddressId == addr.id ? _closeAddressForm() : _startEditAddress(addr),
                     ),
-                    SizedBox(height: s.rem(0.5)),
-                    Text(profiles[i].displayName, maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: t.bodyStyle(s.font(0.875), fontWeight: sel ? FontWeight.w600 : FontWeight.w400, color: sel ? t.ink : t.ink2)),
-                  ]));
-                },
-              ),
-            EvInteractive(
-              key: const Key('ev_settings_profiles_manage'), label: '添加 / 管理', enabled: onOpenUsers != null, onTap: onOpenUsers,
-              builder: (_, hovered, _) => Opacity(opacity: onOpenUsers != null ? 1.0 : 0.45, child: SizedBox(width: s.rem(5.5), child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Padding(padding: const EdgeInsets.all(4), child: AnimatedScale(
-                  scale: hovered ? 1.06 : 1.0, duration: EvDurations.normal, curve: EvCurves.spring,
-                  child: Container(width: d, height: d, alignment: Alignment.center,
-                    decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: t.fill3, width: 2)),
-                    child: EvIcon(EvIcons.plus, size: s.rem(1.5), color: t.ink3)),
-                )),
-                SizedBox(height: s.rem(0.5)),
-                Text('添加 / 管理', maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.font(0.875), color: t.ink2)),
-              ]))),
-            ),
-          ]),
+                  ]),
+                ),
+                if (_editingAddressId == addr.id)
+                  _buildAddressForm(t, s, isAdd: false, editId: addr.id, canDelete: addresses.length > 1),
+              ],
+            );
+          }(),
+        ],
+        if (_addingAddress)
+          _buildAddressForm(t, s, isAdd: true, canDelete: false)
+        else
+          _gaddRow(
+            t, s,
+            key: const Key('ev_settings_add_addr'),
+            label: '添加地址',
+            hint: '比如 Tailscale 或公网域名',
+            onTap: _busy ? null : _startAddAddress,
+          ),
+        _toggleRow(
+          'ev_toggle_auto_switch_addr',
+          '连不上时自动换下一个地址',
+          '按上面的顺序试，可拖动调整；换地址时顶部提示一下',
+          prefs.autoSwitchServerAddress,
+          (v) => widget.onUpdatePrefs(evCopyPreferences(prefs, autoSwitchServerAddress: v)),
         ),
       ]),
-      EvSettingsGroup(title: '服务器', children: [
-        EvSettingsRow(title: 'Emby 服务器', subtitle: serverDesc, trailing: EvStatusIndicator(key: const Key('ev_settings_connection_status'), label: connLabel, tone: connTone)),
-        EvSettingsRow(title: '当前用户', subtitle: cur == null ? '尚未登录' : '${cur.displayName} · 可见 $visibleZoneCount 个分区',
-          trailing: EvButton.ghost(key: const Key('ev_settings_switch_users_btn'), small: true, label: '切换…', onPressed: onOpenUsers)),
-        _toggleRow('ev_toggle_choose_user', '打开时询问“谁在看”', '多人共用这台 Mac 时开启', prefs.chooseUserOnStartup,
-          (v) => onUpdatePrefs(evCopyPreferences(prefs, chooseUserOnStartup: v))),
+      EvSettingsGroup(title: '这台 Mac 上保存的账号', children: [
+        for (var i = 0; i < profiles.length; i++) () {
+          final p = profiles[i];
+          final isCurrent = cur?.id == p.id;
+          final keyDesc = p.hasPassword == false ? '不用密码' : '密码存在钥匙串';
+          final lastUsed = _formatLastUsed(p);
+          final sub = isCurrent
+              ? '当前 · 可见 ${p.visibleLibraryCount ?? widget.visibleZoneCount} 个片库 · $keyDesc'
+              : [keyDesc, ?lastUsed].join(' · ');
+          return ConstrainedBox(
+            key: Key('ev_settings_account_row_${p.id}'),
+            constraints: BoxConstraints(minHeight: s.rem(3.75)),
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: s.rem(1.125), vertical: s.rem(0.8125)),
+              child: Row(children: [
+                Expanded(
+                  child: EvInteractive(
+                    key: Key('ev_settings_profile_${p.id}'),
+                    selected: isCurrent,
+                    label: p.displayName,
+                    onTap: () => widget.onSwitchProfile(p.id),
+                    builder: (_, hovered, focused) => Row(children: [
+                      EvAvatarButton(profile: p, size: s.rem(2.5), colorIndex: i),
+                      SizedBox(width: s.rem(1.0)),
+                      Expanded(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(p.displayName, maxLines: 1, overflow: TextOverflow.ellipsis,
+                          style: t.bodyStyle(s.font(1.0), fontWeight: FontWeight.w500, color: (hovered || focused) ? t.ink : t.ink)),
+                        SizedBox(height: s.rem(0.25)),
+                        Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis,
+                          style: t.bodyStyle(s.font(0.875), color: t.ink3, height: 1.45)),
+                      ])),
+                    ]),
+                  ),
+                ),
+                SizedBox(width: s.rem(1.0)),
+                if (isCurrent)
+                  EvButton.ghost(
+                    key: Key('ev_settings_logout_${p.id}'),
+                    small: true, icon: EvIcons.logout, label: '退出登录',
+                    onPressed: _busy ? null : () => unawaited(widget.onSignOut?.call() ?? Future.value()),
+                  )
+                else if (_confirmRemoveAccountId == p.id)
+                  Wrap(
+                    key: Key('ev_settings_remove_confirm_${p.id}'),
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: s.rem(0.5),
+                    runSpacing: s.rem(0.375),
+                    children: [
+                      Text('只删这台 Mac 上的登录', style: t.bodyStyle(s.font(0.875), color: t.ink2)),
+                      _dangerBtn(
+                        t, s,
+                        key: Key('ev_settings_remove_ok_${p.id}'),
+                        label: '移出', primary: true,
+                        onPressed: _busy ? null : () => unawaited(() async {
+                          setState(() { _busy = true; _confirmRemoveAccountId = null; });
+                          try {
+                            await widget.onRemoveAccount?.call(p.id);
+                          } finally {
+                            if (mounted) setState(() => _busy = false);
+                          }
+                        }()),
+                      ),
+                      EvButton.ghost(
+                        key: Key('ev_settings_remove_cancel_${p.id}'),
+                        small: true, label: '取消',
+                        onPressed: _busy ? null : () => setState(() => _confirmRemoveAccountId = null),
+                      ),
+                    ],
+                  )
+                else
+                  EvButton.ghost(
+                    key: Key('ev_settings_remove_btn_${p.id}'),
+                    small: true, label: '移出本机',
+                    onPressed: _busy ? null : () => setState(() => _confirmRemoveAccountId = p.id),
+                  ),
+              ]),
+            ),
+          );
+        }(),
+        _gaddRow(
+          t, s,
+          key: const Key('ev_settings_profiles_manage'),
+          label: '添加账号',
+          hint: '从这台服务器的用户里选',
+          onTap: widget.onAddAccount ?? widget.onOpenUsers,
+        ),
+        _toggleRow(
+          'ev_toggle_choose_user',
+          '打开时询问“谁在看”',
+          '多人共用这台 Mac 时开启；关着就直接进上次的账号',
+          prefs.chooseUserOnStartup,
+          (v) => widget.onUpdatePrefs(evCopyPreferences(prefs, chooseUserOnStartup: v)),
+        ),
+      ]),
+      EvSettingsGroup(children: [
+        EvSettingsRow(
+          title: '连接其他服务器',
+          subtitle: '添加或换到另一台 Emby 服务器',
+          trailing: EvButton.ghost(
+            key: const Key('ev_settings_connect_other_server'),
+            small: true, icon: EvIcons.server, label: '连接…',
+            onPressed: widget.onSwitchServer,
+          ),
+        ),
+        EvSettingsRow(
+          title: '移除这台服务器',
+          subtitle: '删掉这台服务器的地址和这里保存的所有账号，回到登录页',
+          trailing: _confirmRemoveServer
+              ? Wrap(
+                  key: const Key('ev_settings_remove_server_confirm'),
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: s.rem(0.5),
+                  runSpacing: s.rem(0.375),
+                  children: [
+                    Text('只删这台 Mac 上的记录', style: t.bodyStyle(s.font(0.875), color: t.ink2)),
+                    _dangerBtn(
+                      t, s,
+                      key: const Key('ev_settings_remove_server_ok'),
+                      label: '移除', primary: true,
+                      onPressed: _busy ? null : () => unawaited(() async {
+                        setState(() { _busy = true; _confirmRemoveServer = false; });
+                        try {
+                          await widget.onRemoveServer?.call();
+                        } finally {
+                          if (mounted) setState(() => _busy = false);
+                        }
+                      }()),
+                    ),
+                    EvButton.ghost(
+                      key: const Key('ev_settings_remove_server_cancel'),
+                      small: true, label: '取消',
+                      onPressed: _busy ? null : () => setState(() => _confirmRemoveServer = false),
+                    ),
+                  ],
+                )
+              : _dangerBtn(
+                  t, s,
+                  key: const Key('ev_settings_remove_server_btn'),
+                  label: '移除…', primary: false,
+                  onPressed: _busy ? null : () => setState(() => _confirmRemoveServer = true),
+                ),
+        ),
       ]),
     ]);
   }

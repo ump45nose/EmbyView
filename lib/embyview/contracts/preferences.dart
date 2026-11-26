@@ -1,3 +1,4 @@
+import 'accounts.dart';
 import 'media.dart';
 import 'subtitles.dart';
 
@@ -54,6 +55,8 @@ class LocalPreferences {
     this.navigation = NavigationStyle.icon,
     this.seriesSort = ShelfSort.added,
     this.chooseUserOnStartup = true,
+    this.autoSwitchServerAddress = true,
+    this.serverAddresses = const {},
     this.backgroundVideo = true,
     this.backgroundVideoDelay = const Duration(milliseconds: 1700),
     this.detailTrailerDelay = const Duration(seconds: 12),
@@ -87,6 +90,8 @@ class LocalPreferences {
   final NavigationStyle navigation;
   final ShelfSort seriesSort;
   final bool chooseUserOnStartup;
+  final bool autoSwitchServerAddress;
+  final Map<String, List<ServerAddressEntry>> serverAddresses;
   final bool backgroundVideo;
   final Duration backgroundVideoDelay;
 

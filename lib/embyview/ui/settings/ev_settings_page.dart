@@ -19,12 +19,18 @@ class EvSettingsPage extends StatefulWidget {
     this.openZoneEditorOnMount = false,
     this.editZoneId,
     this.onOpenUsers,
+    this.onSignedOutToUserPicker,
+    this.onSwitchServer,
+    this.onAddAccount,
   });
 
   final EvSettingsSection initialSection;
   final bool openZoneEditorOnMount;
   final String? editZoneId;
   final VoidCallback? onOpenUsers;
+  final VoidCallback? onSignedOutToUserPicker;
+  final VoidCallback? onSwitchServer;
+  final VoidCallback? onAddAccount;
 
   @override State<EvSettingsPage> createState() => _EvSettingsPageState();
 }
@@ -291,7 +297,11 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
   );
 
   Widget _buildPane(EmbyViewServices services) {
-    final openUsers = widget.onOpenUsers ?? EvScope.maybeOf(context)?.shell.onOpenUsers;
+    final shell = EvScope.maybeOf(context)?.shell;
+    final openUsers = widget.onOpenUsers ?? shell?.onOpenUsers;
+    final onSignedOut = widget.onSignedOutToUserPicker ?? shell?.onSignedOutToUserPicker;
+    final onSwitchServer = widget.onSwitchServer ?? shell?.onSwitchServer;
+    final onAddAccount = widget.onAddAccount ?? shell?.onAddAccount ?? openUsers;
     final origin = parseTranslationBaseUrl(_prefs.translationBaseUrl)?.origin;
     Future<void> update(LocalPreferences next) async {
       final addressChanged = next.translationBaseUrl != _prefs.translationBaseUrl;
@@ -316,7 +326,24 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
       EvSettingsSection.account => EvAccountSettingsPane(
         snapshot: _account, prefs: _prefs, visibleZoneCount: _displayedZones.length,
         onSwitchProfile: (id) { if (_account.current?.id != id) unawaited(_guard(() => services.accounts.switchTo(id))); },
-        onOpenUsers: openUsers, onUpdatePrefs: update),
+        onOpenUsers: openUsers, onUpdatePrefs: update,
+        onSignOut: () => _guard(() async {
+          await services.accounts.signOut();
+          onSignedOut?.call();
+        }),
+        onRemoveAccount: (id) => _guard(() => services.accounts.removeLocalAccount(id)),
+        onAddAccount: onAddAccount,
+        onSwitchServer: onSwitchServer,
+        onRemoveServer: () => _guard(() async {
+          await services.accounts.removeCurrentServer();
+          onSwitchServer?.call();
+        }),
+        onAddAddress: (entry) => services.accounts.addServerAddress(entry),
+        onUpdateAddress: (entry) => services.accounts.updateServerAddress(entry),
+        onRemoveAddress: (id) => _guard(() => services.accounts.removeServerAddress(id)),
+        onReorderAddresses: (ids) => _guard(() => services.accounts.reorderServerAddresses(ids)),
+        onActivateAddress: (id) => _guard(() => services.accounts.activateServerAddress(id)),
+      ),
       EvSettingsSection.look => EvLookSettingsPane(prefs: _prefs, onUpdatePrefs: update),
       EvSettingsSection.zones => EvZonesSettingsPane(
         zones: _displayedZones, tilesById: _tilesById, facets: _zoneFacets, onMoveZone: _moveZone,

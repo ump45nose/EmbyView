@@ -339,7 +339,9 @@ class _EvShellState extends State<EvShell> {
                                 child: EvAvatarMenu(
                                   accounts: widget.services.accounts,
                                   onSwitchUsers: _shell.onOpenUsers, onManageZones: _shell.onManageZones,
-                                  onOpenSettings: _shell.onOpenSettings, onDismiss: _closeMenu,
+                                  onOpenSettings: _shell.onOpenSettings,
+                                  onSignOut: _shell.onSignedOutToUserPicker,
+                                  onDismiss: _closeMenu,
                                 ),
                               ),
                             ),
