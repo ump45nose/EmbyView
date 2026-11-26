@@ -65,10 +65,10 @@ jobs:
           git diff --exit-code -- pubspec.lock macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved
       - name: Package the app for local acceptance
         run: |
-          app=build/macos/Build/Products/Release/Moonfin.app
+          app=build/macos/Build/Products/Release/EmbyView.app
           test -d "$app"
-          test -x "$app/Contents/MacOS/Moonfin"
-          lipo "$app/Contents/MacOS/Moonfin" -verify_arch arm64
+          test -x "$app/Contents/MacOS/EmbyView"
+          lipo "$app/Contents/MacOS/EmbyView" -verify_arch arm64
           mkdir -p outputs
           ditto -c -k --sequesterRsrc --keepParent "$app" outputs/EmbyView-macos-arm64-unsigned.zip
           shasum -a 256 outputs/EmbyView-macos-arm64-unsigned.zip > outputs/SHA256SUMS
