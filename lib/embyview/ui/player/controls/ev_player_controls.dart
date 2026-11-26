@@ -65,11 +65,15 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
   @override
   void didChangeDependencies() { super.didChangeDependencies(); _syncGlow(); }
 
+  ArtworkRef? _titleLogo(EvPlayerControls controls) {
+    final item = controls.snapshot.item;
+    return item?.kind == MediaKind.episode ? item?.art.logo : controls.art?.logo ?? item?.art.logo;
+  }
+
   @override
   void didUpdateWidget(EvPlayerControls old) {
     super.didUpdateWidget(old);
-    if ((old.art?.logo ?? old.snapshot.item?.art.logo)?.cacheKey !=
-        (widget.art?.logo ?? widget.snapshot.item?.art.logo)?.cacheKey) {
+    if (_titleLogo(old)?.cacheKey != _titleLogo(widget)?.cacheKey) {
       _logoFailed = false;
     }
     if (widget.seekLeftNonce != old.seekLeftNonce) _spinL.forward(from: 0);
@@ -90,9 +94,9 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
   void dispose() { _spinL.dispose(); _spinR.dispose(); _a4kGlow.dispose(); _entry.dispose(); super.dispose(); }
 
   Widget _logo(EvTheme t, double maxH, double maxW, double fs, Alignment align) {
-    final ref = widget.art?.logo ?? widget.snapshot.item?.art.logo;
-    final title = widget.snapshot.item?.title.trim().isNotEmpty == true
-        ? widget.snapshot.item!.title : widget.snapshot.target.itemId;
+    final item = widget.snapshot.item;
+    final ref = _titleLogo(widget);
+    final title = item?.kind == MediaKind.episode ? item?.seriesName : item?.title;
     if (ref != null && !_logoFailed) {
       return ConstrainedBox(
         constraints: BoxConstraints(maxHeight: maxH, maxWidth: maxW),
@@ -105,6 +109,7 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
         ),
       );
     }
+    if (title == null || title.trim().isEmpty) return const SizedBox.shrink();
     return Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(fs, fontWeight: FontWeight.w700, color: _kWhite));
   }
 
@@ -252,7 +257,11 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
 
   Widget _topBar(EvTheme t, EvScale s, ({String primary, String secondary}) meta) {
     final paper = t.isPaper;
-    final tech = evPlayerTechSummary(widget.snapshot.quality ?? widget.snapshot.item?.quality);
+    final tech = evPlayerTechSummary(widget.snapshot.quality);
+    final titleMeta = [
+      if (meta.primary.isNotEmpty) meta.primary,
+      if (widget.snapshot.item?.kind == MediaKind.episode && meta.secondary.isNotEmpty) meta.secondary,
+    ].join(' · ');
     return AnimatedPositioned(
       duration: _kMs600, curve: EvCurves.out, left: 0, right: widget.panelOpen ? s.rem(29.0) : 0, top: 0,
       child: AnimatedContainer(
@@ -282,24 +291,21 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
                             child: Opacity(opacity: ((v - 0.15) / 0.85).clamp(0.0, 1.0), child: child),
                           ),
                         ),
-                  child: ConstrainedBox(
-                    key: const Key('ev_player_top_title'), constraints: BoxConstraints(maxWidth: s.rem(24.0)),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min, spacing: s.rem(0.75),
-                      children: [
-                        Flexible(child: _logo(t, s.rem(1.875), s.rem(9.0), s.rem(1.125), Alignment.centerLeft)),
-                        if (meta.primary.isNotEmpty)
-                          Flexible(
-                            child: Text(meta.primary, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.9375), color: const Color(0xCCFFFFFF))),
-                          ),
-                      ],
-                    ),
+                  child: Row(
+                    key: const Key('ev_player_top_title'), mainAxisSize: MainAxisSize.min, spacing: s.rem(0.75),
+                    children: [
+                      Flexible(child: _logo(t, s.rem(1.875), s.rem(9.0), s.rem(1.125), Alignment.centerLeft)),
+                      if (titleMeta.isNotEmpty)
+                        Flexible(
+                          child: Text(titleMeta, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.bodyStyle(s.rem(0.9375), color: const Color(0xCCFFFFFF))),
+                        ),
+                    ],
                   ),
                 ),
               ),
             ),
             SizedBox(width: s.rem(1.0)),
-            ConstrainedBox(
+            if (tech.isNotEmpty) ConstrainedBox(
               constraints: BoxConstraints(maxWidth: s.rem(24.0)),
               child: _Pill(
                 key: const Key('ev_player_tech_pill'), paper: paper, height: s.rem(2.5),
@@ -379,7 +385,7 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
                               child: Row(
                                 crossAxisAlignment: CrossAxisAlignment.end, spacing: s.rem(1.25),
                                 children: [
-                                  _logo(t, s.rem(3.5), s.rem(17.0), s.rem(1.875), Alignment.bottomLeft),
+                                  Flexible(child: _logo(t, s.rem(3.5), s.rem(17.0), s.rem(1.875), Alignment.bottomLeft)),
                                   if (meta.primary.isNotEmpty || meta.secondary.isNotEmpty)
                                     Flexible(
                                       child: Padding(

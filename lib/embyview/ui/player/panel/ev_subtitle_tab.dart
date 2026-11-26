@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
+import 'package:moonfin/embyview/subtitles/model/subtitle_document.dart' show normalizeSubtitleFormat;
+import 'package:moonfin/embyview/ui/player/controls/ev_track_language.dart';
 import 'package:moonfin/embyview/ui/player/controls/ev_player_format.dart';
 import 'package:moonfin/embyview/ui/player/panel/ev_player_panel.dart';
 
@@ -144,51 +146,6 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
         track.id.toLowerCase() == 'cm';
   }
 
-  static String? _parseLanguageCode(String? input) {
-    final s = input?.trim().toLowerCase() ?? '';
-    if (s.isEmpty) return null;
-    final tokens = s.split(RegExp(r'[^a-z]+')).where((w) => w.isNotEmpty).toSet();
-    if (s.contains('中') || s.contains('简') || s.contains('繁') || s.contains('国语') || s.contains('粤语') ||
-        tokens.any((w) => w == 'zh' || w == 'chi' || w == 'zho' || w == 'cmn' || w == 'yue' || w == 'chinese')) {
-      return 'zh';
-    }
-    if (s.contains('日语') || s.contains('日文') || s.contains('日') ||
-        tokens.any((w) => w == 'ja' || w == 'jpn' || w == 'japanese')) {
-      return 'ja';
-    }
-    if (s.contains('英语') || s.contains('英文') || s.contains('英') ||
-        tokens.any((w) => w == 'en' || w == 'eng' || w == 'english')) {
-      return 'en';
-    }
-    if (s.contains('韩语') || s.contains('韩文') || s.contains('韩') || s.contains('韓') ||
-        tokens.any((w) => w == 'ko' || w == 'kor' || w == 'korean')) {
-      return 'ko';
-    }
-    if (s.contains('法语') || s.contains('法文') || s.contains('法') ||
-        tokens.any((w) => w == 'fr' || w == 'fre' || w == 'fra' || w == 'french')) {
-      return 'fr';
-    }
-    if (s.contains('德语') || s.contains('德文') || s.contains('德') ||
-        tokens.any((w) => w == 'de' || w == 'ger' || w == 'deu' || w == 'german')) {
-      return 'de';
-    }
-    if (s.contains('西班牙语') || tokens.any((w) => w == 'es' || w == 'spa' || w == 'spanish')) {
-      return 'es';
-    }
-    if (s.contains('俄语') || s.contains('俄文') || s.contains('俄') ||
-        tokens.any((w) => w == 'ru' || w == 'rus' || w == 'russian')) {
-      return 'ru';
-    }
-    if (s.contains('意大利语') || tokens.any((w) => w == 'it' || w == 'ita' || w == 'italian')) {
-      return 'it';
-    }
-    if (s.contains('泰语') || s.contains('泰文') || s.contains('泰') ||
-        tokens.any((w) => w == 'th' || w == 'tha' || w == 'thai')) {
-      return 'th';
-    }
-    return null;
-  }
-
   String _sourceAudioLanguage() {
     final tracks = widget.snapshot.audioTracks;
     PlaybackTrack? target;
@@ -207,26 +164,16 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
       }
     }
     if (target == null) return '外语';
-    final code = _parseLanguageCode(target.language) ?? _parseLanguageCode(target.name);
-    return const {
-      'ja': '日语',
-      'en': '英语',
-      'ko': '韩语',
-      'fr': '法语',
-      'de': '德语',
-      'es': '西班牙语',
-      'ru': '俄语',
-      'it': '意大利语',
-      'th': '泰语',
-    }[code] ?? '外语';
+    final lang = evTrackLanguage(target.language, target.name);
+    return lang.code == 'en' ? '英语' : lang.code == null ? '外语' : lang.title;
   }
 
   PlaybackTrack? _pickTranslateTarget() {
     final tracks = widget.snapshot.subtitleTracks;
     bool isForeignSub(PlaybackTrack t) {
       if (t.source == PlaybackTrackSource.ai) return false;
-      final code = _parseLanguageCode(t.language) ?? _parseLanguageCode(t.name);
-      return code != 'zh';
+      final code = evTrackLanguage(t.language, t.name).code;
+      return code != 'zh' && code != 'yue';
     }
 
     final selectedId = widget.snapshot.selectedSubtitleId;
@@ -244,18 +191,8 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
   String _translateSourceLabel() {
     final target = _pickTranslateTarget();
     if (target == null) return '外语';
-    final code = _parseLanguageCode(target.language) ?? _parseLanguageCode(target.name);
-    return const {
-      'en': 'English',
-      'ja': '日语',
-      'ko': '韩语',
-      'fr': '法语',
-      'de': '德语',
-      'es': '西班牙语',
-      'ru': '俄语',
-      'it': '意大利语',
-      'th': '泰语',
-    }[code] ?? '外语';
+    final lang = evTrackLanguage(target.language, target.name);
+    return lang.code == null ? '外语' : lang.title;
   }
 
   String? _pickTrack({bool preferForeign = false}) {
@@ -340,13 +277,6 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
   static String _saveLabel(SubtitleSaveState s) => const {SubtitleSaveState.saved: '已存 NAS', SubtitleSaveState.saving: '保存中…', SubtitleSaveState.failed: '保存失败'}[s] ?? '';
   static String _indexLabel(SubtitleIndexState s) => const {SubtitleIndexState.recognized: 'Emby 已识别', SubtitleIndexState.unrecognized: 'Emby 未识别', SubtitleIndexState.checking: 'Emby 识别中…'}[s] ?? '';
   static String _sourceShort(PlaybackTrackSource s) => const {PlaybackTrackSource.embedded: '内嵌', PlaybackTrackSource.embyExternal: '外挂', PlaybackTrackSource.nas: 'NAS', PlaybackTrackSource.online: '在线下载', PlaybackTrackSource.ai: 'AI 生成'}[s]!;
-  static String _langCode(String? lang, String name) {
-    final s = (lang ?? name).toLowerCase();
-    if (s.contains('zh') || s.contains('chi') || s.contains('中') || s.contains('简') || s.contains('繁')) return '中';
-    if (s.contains('en') || s.contains('eng') || s.contains('英')) return 'EN';
-    return (s.contains('ja') || s.contains('jpn') || s.contains('日')) ? '日' : 'SUB';
-  }
-
   Widget _retryChip(EvTheme t, EvScale s, EvPanelPalette pal, Key key, String trackId) => evPanelTap(
     key: key,
     onTap: () {
@@ -390,10 +320,14 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
       seen.add(id);
       final isAi = src == PlaybackTrackSource.ai || st?.origin == SubtitleOrigin.ai;
       final isNas = !isAi && (src == PlaybackTrackSource.nas || src == PlaybackTrackSource.online || st?.origin == SubtitleOrigin.nas || st?.origin == SubtitleOrigin.online);
-      final meta = [_sourceShort(src), if (fmt?.trim().isNotEmpty == true) fmt!.trim(), if (st != null && _saveLabel(st.save).isNotEmpty) _saveLabel(st.save), if (st != null && _indexLabel(st.index).isNotEmpty) _indexLabel(st.index)].join(' · ');
+      final language = evTrackLanguage(lang, name);
+      final codec = normalizeSubtitleFormat(fmt ?? '');
+      final format = codec == 'sup' ? 'PGS' : codec.toUpperCase();
+      final title = isAi || isNas ? name : language.title;
+      final meta = [_sourceShort(src), if (format.isNotEmpty) format, if (st != null && _saveLabel(st.save).isNotEmpty) _saveLabel(st.save), if (st != null && _indexLabel(st.index).isNotEmpty) _indexLabel(st.index)].join(' · ');
       rows.add(EvPanelTrackRow(
-        key: Key('ev_sub_track_$id'), selected: selectedId == id, title: name, subtitle: meta, onTap: () => widget.onSelectSubtitle(id),
-        badge: _trackBadge(t, s, pal, isAi: isAi, isNas: isNas, text: _langCode(lang, name)),
+        key: Key('ev_sub_track_$id'), selected: selectedId == id, title: title, subtitle: meta, onTap: () => widget.onSelectSubtitle(id),
+        badge: _trackBadge(t, s, pal, isAi: isAi, isNas: isNas, text: language.badge),
         trailingAction: st?.save == SubtitleSaveState.failed && widget.subtitlePanel != null ? _retryChip(t, s, pal, Key('ev_sub_retry_$id'), id) : null,
       ));
     }

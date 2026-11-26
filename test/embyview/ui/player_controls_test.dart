@@ -220,7 +220,7 @@ void main() {
             audioLabel: 'Atmos',
           ),
         ),
-        'NAS 本地 · 直接播放 · 4K · Dolby Vision · Atmos',
+        'NAS 本地 · 4K · Atmos',
       );
       expect(
         evPlayerTechSummary(
@@ -228,7 +228,7 @@ void main() {
         ),
         '115 直连 · 1080p',
       );
-      expect(evPlayerTechSummary(null), '115 直连');
+      expect(evPlayerTechSummary(null), isEmpty);
 
       final ep = _sampleEpisode(title: '出征的号角', seasonId: 'sea1', episodeNumber: 9);
       final epMeta = evPlayerEpisodeMeta(
@@ -245,6 +245,15 @@ void main() {
       );
       expect(genericMeta.primary, '第 9 集');
       expect(genericMeta.secondary, '');
+
+      final unnumbered = evPlayerEpisodeMeta(
+        _sampleEpisode(seasonId: '20804', episodeNumber: null, title: '第 2 集'), const PlayTarget(itemId: '20806'),
+      );
+      expect(unnumbered, (primary: '', secondary: '第 2 集'));
+      final nonDuplicate = evPlayerEpisodeMeta(
+        _sampleEpisode(seasonId: '12', episodeNumber: 2, title: '第 3 集'), const PlayTarget(itemId: '20806'),
+      );
+      expect(nonDuplicate, (primary: '第 2 集', secondary: '第 3 集'));
 
       final movie = _sampleMovie();
       final movieMeta = evPlayerEpisodeMeta(
@@ -619,6 +628,35 @@ void main() {
   });
 
   group('C5.3: EvPlayerControls', () {
+    testWidgets('episode heading uses series art or name, real season number and a distinct episode title', (tester) async {
+      _setViewport(tester, const Size(1440, 900));
+      const series = '北斗神拳 拳王军杂兵们的挽歌';
+      const secondary = '第 1 季 · 第 2 集';
+      Future<void> show(String title, {bool logo = false}) async {
+        final card = MediaCard(
+          id: '20806', kind: MediaKind.episode, title: title, seriesId: '20800', seriesName: series,
+          seasonId: '20804', seasonNumber: 1, episodeNumber: 2, art: _sampleArt(withLogo: logo),
+        );
+        await tester.pumpWidget(_harness(child: EvPlayerControls(
+          visible: true, panelOpen: true, snapshot: _sampleSnapshot(item: card, quality: const MediaQuality(
+            origin: MediaOrigin.direct115, resolution: '1080p', videoRange: 'SDR', audioLabel: 'EAC3 2.0',
+          )), onSeek: (_) {},
+        )));
+        await tester.pump(const Duration(milliseconds: 650));
+      }
+
+      await show('第2集');
+      final top = find.byKey(const Key('ev_player_top_title'));
+      expect(find.descendant(of: top, matching: find.text(series)), findsOneWidget);
+      expect(find.descendant(of: top, matching: find.text(secondary)), findsOneWidget);
+      expect(find.text('第2集'), findsNothing);
+      expect(find.text('115 直连 · 1080p · EAC3 2.0'), findsOneWidget);
+      await show('挽歌', logo: true);
+      expect(find.descendant(of: top, matching: find.byType(Image)), findsOneWidget);
+      expect(find.descendant(of: top, matching: find.text(series)), findsNothing);
+      expect(find.descendant(of: top, matching: find.text('$secondary · 挽歌')), findsOneWidget);
+    });
+
     for (final mode in const [ThemeMode.cinema, ThemeMode.paper]) {
       for (final size in const [Size(1440, 900), Size(2560, 1440)]) {
         testWidgets(

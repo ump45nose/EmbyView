@@ -947,7 +947,17 @@ class EmbyMediaData implements EmbyViewData {
       children.sort(_collectionOrder);
       _collectionArt[itemId] = children;
     }
-    final card = _card(raw, collection: children);
+    Json? series;
+    if (raw['Type'] == 'Episode' && raw['SeriesId'] is String &&
+        (raw['SeriesName'] == null || raw['ParentLogoItemId'] != raw['SeriesId'] || raw['ParentLogoImageTag'] == null)) {
+      try {
+        series = await _item(raw['SeriesId'] as String);
+      } on EmbyViewFailure {
+        _check();
+        // The episode can still supply its own season, number and series name.
+      }
+    }
+    final card = _card(raw, parent: series, collection: children);
     Json? playable = raw['Type'] == 'Movie' || raw['Type'] == 'Episode' ? raw : null;
     if (raw['Type'] == 'Series') {
       playable = itemRecords(

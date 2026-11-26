@@ -119,7 +119,9 @@ class MediaCard {
     this.unplayedCount,
     this.favorite,
     this.seriesId,
+    this.seriesName,
     this.seasonId,
+    this.seasonNumber,
     this.episodeNumber,
   });
 
@@ -140,7 +142,9 @@ class MediaCard {
   final int? unplayedCount;
   final bool? favorite;
   final String? seriesId;
+  final String? seriesName;
   final String? seasonId;
+  final int? seasonNumber;
   final int? episodeNumber;
 }
 

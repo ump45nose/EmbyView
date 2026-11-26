@@ -10,6 +10,7 @@ import 'package:moonfin/embyview/contracts/common.dart';
 import 'package:moonfin/embyview/contracts/media.dart';
 import 'package:moonfin/embyview/data/emby_media_data.dart';
 import 'package:moonfin/embyview/data/title_index.dart';
+import 'package:moonfin/embyview/data/media_mapper.dart' show embyAudioTechnicalLabel;
 import 'package:server_core/server_core.dart';
 import 'package:server_emby/server_emby.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -149,6 +150,40 @@ class Fixture {
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
+  test('episode 20806 inherits series identity, including when only the series has a Logo', () async {
+    final f = Fixture();
+    addTearDown(f.dispose);
+    final episode = {
+      'Id': '20806', 'Type': 'Episode', 'Name': '第 2 集',
+      'SeriesId': '20800', 'SeasonId': '20804', 'ParentIndexNumber': 1, 'IndexNumber': 2,
+      'ImageTags': {'Logo': 'episode-only'},
+    };
+    final series = {
+      'Id': '20800', 'Type': 'Series', 'Name': '北斗神拳 拳王军杂兵们的挽歌', 'ImageTags': {'Logo': 'series-logo'},
+    };
+    f.hook = (o) async => o.path.endsWith('/Items/20806') ? episode : o.path.endsWith('/Items/20800') ? series : null;
+    final card = (await f.data.detail('20806')).card;
+    expect(card.seriesName, series['Name']);
+    expect(card.seasonNumber, 1);
+    expect(card.episodeNumber, 2);
+    expect(card.title, '第 2 集');
+    expect(card.art.logo?.id, '20800:Logo:0');
+    series.remove('ImageTags');
+    expect((await f.data.detail('20806')).card.art.logo, isNull);
+  });
+
+  test('audio pill uses codec and channel metadata independently', () {
+    const title = 'Japanese EAC3 stereo (默认)';
+    expect(embyAudioTechnicalLabel({'DisplayTitle': title, 'Codec': 'eac3', 'ChannelLayout': 'stereo', 'Channels': 2}), 'EAC3 2.0');
+    expect(embyAudioTechnicalLabel({'Codec': 'aac', 'Channels': 2}), 'AAC 2.0');
+    expect(embyAudioTechnicalLabel({'Codec': 'dts', 'ChannelLayout': '5.1(side)', 'Channels': 6}), 'DTS 5.1');
+    expect(embyAudioTechnicalLabel({'Codec': 'ac3', 'DisplayTitle': title}), 'AC3');
+    expect(embyAudioTechnicalLabel({'ChannelLayout': 'mono'}), '1.0');
+    expect(embyAudioTechnicalLabel({'Channels': 6}), '6 声道');
+    expect(embyAudioTechnicalLabel({'DisplayTitle': title}), isNull);
+    expect(embyAudioTechnicalLabel(null), isNull);
+  });
+
   test('macOS system transliteration supplies the shared Chinese sort and initials', () {
     final key = TitleKey('盗梦空间', MacPinyin.transliterate);
     expect([key.sort, key.initials, key.letter], ['daomengkongjian', 'dmkj', 'D']);

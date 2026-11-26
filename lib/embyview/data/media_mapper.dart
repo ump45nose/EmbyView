@@ -12,6 +12,28 @@ List<Json> itemRecords(dynamic value) => records(value is Map ? value['Items'] :
 Duration? ticks(dynamic value) => value is num ? Duration(microseconds: value.toInt() ~/ 10) : null;
 int? integer(dynamic value) => (value as num?)?.toInt();
 
+/// Compact label for the selected Emby stream. DisplayTitle also includes the
+/// language and flags, so it cannot stand in for missing technical metadata.
+String? embyAudioTechnicalLabel(Json? stream) {
+  final codec = (stream?['Codec'] as String?)?.trim().toUpperCase();
+  final rawLayout = (stream?['ChannelLayout'] as String?)?.trim().toLowerCase();
+  final count = int.tryParse('${stream?['Channels']}');
+  final layout = switch (rawLayout) {
+    'mono' => '1.0',
+    'stereo' => '2.0',
+    'quad' => '4.0',
+    String value when RegExp(r'^\d+\.\d+(?:\([^)]*\))?$').hasMatch(value) => value.split('(').first,
+    _ => switch (count) {
+      1 => '1.0',
+      2 => '2.0',
+      int n when n > 0 => '$n 声道',
+      _ => null,
+    },
+  };
+  final parts = [if (codec != null && codec.isNotEmpty) codec, ?layout];
+  return parts.isEmpty ? null : parts.join(' ');
+}
+
 class MediaMapper {
   MediaMapper({required this.server, required this.user, required this.token});
   final String server;
@@ -50,15 +72,13 @@ class MediaMapper {
     final title = item['Name'] as String? ?? '';
     final primary = image(item, 'Primary');
     final thumb = image(item, 'Thumb');
-    final logo =
-        image(item, 'Logo') ??
-        (parent == null ? null : image(parent, 'Logo')) ??
-        (item['ParentLogoItemId'] == null
-            ? null
-            : image({
-                'Id': item['ParentLogoItemId'],
-                'ImageTags': {'Logo': item['ParentLogoImageTag']},
-              }, 'Logo'));
+    final episode = item['Type'] == 'Episode';
+    final parentId = item['ParentLogoItemId'];
+    final inherited = parentId != null && (!episode || parentId == item['SeriesId'])
+        ? image({'Id': parentId, 'ImageTags': {'Logo': item['ParentLogoImageTag']}}, 'Logo')
+        : null;
+    final parentLogo = parent == null || (episode && parent['Id'] != item['SeriesId']) ? null : image(parent, 'Logo');
+    final logo = (episode ? null : image(item, 'Logo')) ?? parentLogo ?? inherited;
     var backs = <ArtworkRef>[
       for (var i = 0; i < (item['BackdropImageTags'] as List? ?? const []).length; i++)
         image(item, 'Backdrop', index: i)!,
@@ -161,6 +181,8 @@ class MediaMapper {
       unplayedCount: media.unplayedItemCount,
       favorite: data['IsFavorite'] as bool?,
       seriesId: item['SeriesId'] as String?,
+      seriesName: parent?['Name'] as String? ?? item['SeriesName'] as String?,
+      seasonNumber: integer(item['ParentIndexNumber']),
       seasonId: item['SeasonId'] as String?,
       episodeNumber: integer(item['IndexNumber']),
     );

@@ -1,11 +1,11 @@
 import 'package:moonfin/embyview/embyview.dart';
 
 final RegExp _kSeasonNumberRe = RegExp(
-  r'^(?:s|sea|season|季|第)?[-_\s]*(\d{1,2})(?:\s*季)?$',
+  r'^(?:s|sea|season|季|第)[-_\s]*(\d{1,2})(?:\s*季)?$',
   caseSensitive: false,
 );
 final RegExp _kGenericEpisodeTitleRe = RegExp(
-  r'^(?:第\s*\d+\s*集|episode\s*\d*)$',
+  r'^(?:第\s*(\d+)\s*集|episode\s*(\d*))$',
   caseSensitive: false,
 );
 
@@ -46,16 +46,21 @@ String evFormatPauseRemainingLine(Duration remaining, DateTime now) {
 /// Formats the top-right playback technical pill summary.
 String evPlayerTechSummary(MediaQuality? quality) {
   final parts = <String>[
-    quality?.origin == MediaOrigin.nasLocal ? 'NAS 本地 · 直接播放' : '115 直连',
-    for (final tag in [quality?.resolution, quality?.videoRange, quality?.audioLabel])
+    if (quality?.origin case MediaOrigin.direct115) '115 直连',
+    if (quality?.origin case MediaOrigin.nasLocal) 'NAS 本地',
+    for (final tag in [quality?.resolution, quality?.audioLabel])
       if (tag != null && tag.trim().isNotEmpty) tag.trim(),
   ];
   return parts.join(' · ');
 }
 
 /// Returns `true` when [title] is a generic placeholder such as `第 9 集` or `Episode 9`.
-bool evIsGenericEpisodeTitle(String title) =>
-    _kGenericEpisodeTitleRe.hasMatch(title.trim());
+bool evIsGenericEpisodeTitle(String title, {int? episodeNumber}) {
+  final match = _kGenericEpisodeTitleRe.firstMatch(title.trim());
+  if (match == null) return false;
+  final digits = match[1] ?? match[2]!;
+  return episodeNumber == null || digits.isEmpty || int.tryParse(digits) == episodeNumber;
+}
 
 /// Formats a concise episode heading for pause overlays (`第 N 集 · 集名` or `第 N 集`),
 /// or returns `null` for non-episodes.
@@ -64,7 +69,7 @@ String? evFormatPauseEpisodeTitle(MediaCard? item, PlayTarget target) {
   final raw = item?.title.trim() ?? '';
   if (item?.kind == MediaKind.episode || epNum != null) {
     if (epNum == null) return raw.isNotEmpty ? raw : null;
-    final distinct = raw.isNotEmpty && !evIsGenericEpisodeTitle(raw);
+    final distinct = raw.isNotEmpty && !evIsGenericEpisodeTitle(raw, episodeNumber: epNum);
     return distinct ? '第 $epNum 集 · $raw' : '第 $epNum 集';
   }
   return null;
@@ -76,11 +81,11 @@ String? evFormatPauseEpisodeTitle(MediaCard? item, PlayTarget target) {
   PlayTarget target,
 ) {
   final epNum = item?.episodeNumber ?? target.episodeNumber;
-  if ((item?.kind == MediaKind.episode || epNum != null) && epNum != null) {
-    final seasonNum = _parseSeasonNumber(item?.seasonId ?? target.seasonId);
-    final primary = seasonNum != null ? '第 $seasonNum 季 · 第 $epNum 集' : '第 $epNum 集';
+  if (item?.kind == MediaKind.episode || epNum != null) {
+    final seasonNum = item?.seasonNumber ?? _parseSeasonNumber(item?.seasonId ?? target.seasonId);
+    final primary = [if (seasonNum != null) '第 $seasonNum 季', if (epNum != null) '第 $epNum 集'].join(' · ');
     final raw = item?.title.trim() ?? '';
-    final secondary = raw.isNotEmpty && !evIsGenericEpisodeTitle(raw) ? raw : '';
+    final secondary = epNum != null && evIsGenericEpisodeTitle(raw, episodeNumber: epNum) ? '' : raw;
     return (primary: primary, secondary: secondary);
   }
   final primary = item?.year != null ? '${item!.year}' : '';

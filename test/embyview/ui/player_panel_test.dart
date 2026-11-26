@@ -317,6 +317,35 @@ void main() {
       expect(find.text('重新生成'), findsOneWidget);
     });
 
+    testWidgets('Emby subtitles show language, original stream format and source', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final snap = _snap(subtitleTracks: const [
+        PlaybackTrack(id: 'tr', name: 'Turkish (SUBRIP)', language: 'tur', format: 'subrip', source: PlaybackTrackSource.embedded),
+        PlaybackTrack(id: 'zh', name: 'Chinese Simplified (ASS)', language: 'zho', format: 'ass', source: PlaybackTrackSource.embyExternal),
+        PlaybackTrack(id: 'en', name: 'English (PGSSUB)', language: 'eng', format: 'pgssub', source: PlaybackTrackSource.embedded),
+        PlaybackTrack(id: 'fr', name: 'French (SSA)', format: 'ssa', source: PlaybackTrackSource.embedded),
+        PlaybackTrack(id: 'unknown', name: 'Subtitle', language: 'und', source: PlaybackTrackSource.embedded),
+      ]);
+      await tester.pumpWidget(_wrap(child: EvPlayerPanel(
+        open: true, activeTab: 'subs', snapshot: snap,
+        onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},
+        onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
+      )));
+      for (final (id, title, badge, meta) in [
+        ('tr', '土耳其语', 'TR', '内嵌 · SRT'),
+        ('zh', '简体中文', '中', '外挂 · ASS'),
+        ('en', 'English', 'EN', '内嵌 · PGS'),
+        ('fr', '法语', 'FR', '内嵌 · SSA'),
+        ('unknown', '未标明语言', '—', '内嵌'),
+      ]) {
+        final row = find.byKey(Key('ev_sub_track_$id'));
+        for (final label in [title, badge, meta]) {
+          expect(find.descendant(of: row, matching: find.text(label)), findsOneWidget);
+        }
+      }
+    });
+
     testWidgets('live, old and off rows select exactly one track while generation continues', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1440, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
