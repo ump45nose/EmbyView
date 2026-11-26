@@ -25,12 +25,21 @@ class _Backend extends PlayerBackend implements AetherBackend {
   final errors = StreamController<Map<String, dynamic>>.broadcast();
   final urls = <String>[];
   final starts = <Duration>[];
+  final seeks = <Duration>[];
+  final subtitlePicks = <(int, String?)>[];
+  int? refusedExternal;
+  @override
+  Future<void> seekTo(Duration position) async { seeks.add(position); at = position; }
+  @override
+  Future<void> addExternalSubtitle(String url, {String? title, String? language, String? codec}) async {
+    if (refusedExternal != null && url.contains('/Subtitles/$refusedExternal/')) throw StateError('registration failed');
+  }
   bool failOpen = false, playing = false, runtimeTracks = true;
   bool failDisableSubtitle = false, failSelectSubtitle = false;
   int subtitleDisables = 0;
   Completer<void>? subtitleDisableGate, subtitleSelectGate;
   int asyncFailureOpens = 0;
-  Completer<void>? stopping, releaseStop;
+  Completer<void>? stopping, releaseStop, opening, releaseOpen;
   Duration at = Duration.zero;
   @override
   bool get nativelyHandlesStartPosition => true;
@@ -54,7 +63,6 @@ class _Backend extends PlayerBackend implements AetherBackend {
     #getDeviceProfile => <String, dynamic>{},
     #waitForTracksReady ||
     #waitForEmbeddedSubtitleCount ||
-    #addExternalSubtitle ||
     #setAudioTrack ||
     #setSubtitleRendererMode ||
     #setVolume ||
@@ -78,12 +86,15 @@ class _Backend extends PlayerBackend implements AetherBackend {
   }) async {
     await subtitleSelectGate?.future;
     if (failSelectSubtitle) throw StateError('select failed');
+    subtitlePicks.add((index, externalSubtitleUrl));
   }
   @override
   Future<void> play(dynamic item, {Duration startPosition = Duration.zero}) async {
     urls.add(item['url'] as String);
     starts.add(startPosition);
     if (failOpen) throw TimeoutException('opening');
+    if (opening?.isCompleted == false) opening!.complete();
+    await releaseOpen?.future;
     at = startPosition;
     playing = item['autoPlay'] != false;
     if (urls.length <= asyncFailureOpens) {
@@ -190,6 +201,7 @@ class _PlaybackApi extends Fake implements PlaybackApi {
   int? compensationStopNumber;
   String? Function()? currentUser;
   final stopUsers = <String?>[];
+  Map<String, dynamic> sourcePatch = {};
   Map<String, dynamic> audio = {'Type': 'Audio', 'Index': 1, 'Language': 'jpn'};
   List<Map<String, dynamic>> subtitles = [];
   @override
@@ -208,6 +220,7 @@ class _PlaybackApi extends Fake implements PlaybackApi {
         'IsRemote': true,
         'Protocol': 'Http',
         'SupportsDirectPlay': true,
+        ...sourcePatch,
         'MediaStreams': [
           {'Type': 'Video', 'Index': 0, 'Width': 1920},
           audio,
@@ -583,6 +596,99 @@ void main() {
       expect(input.subtitleSource!.subtitleSwitchFrom, isNull);
     });
   }
+  for (final backToFirst in [false, true]) {
+    test('a newer audio pick and backward seek during teardown reach the replacement, backToFirst=$backToFirst', () async {
+      final backend = _Backend(), client = _Client();
+      final manager = PlaybackManager()..setBackend(backend);
+      final native = _Native(backend);
+      client.playbackApi.sourcePatch['DefaultAudioStreamIndex'] = 1;
+      client.playbackApi.subtitles.addAll([
+        {'Type': 'Audio', 'Index': 2, 'Language': 'en'},
+        {'Type': 'Audio', 'Index': 3, 'Language': 'fr'},
+      ]);
+      final adapter = MoonfinPlaybackAdapter(
+        manager: manager, client: client, native: native, audioInput: _Audio(),
+        redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.115.com/file'))),
+      );
+      addTearDown(() async { await adapter.dispose(); await native.events.close(); manager.dispose(); });
+      final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 5)));
+      await pumpEventQueue(times: 30);
+      final tracks = session.snapshot.audioTracks;
+      backend.stopping = Completer();
+      backend.releaseStop = Completer();
+      final first = session.selectAudio(tracks[1].id);
+      await backend.stopping!.future;
+      final latestIndex = backToFirst ? 1 : 3;
+      final newer = session.selectAudio(tracks[backToFirst ? 0 : 2].id);
+      await session.seek(const Duration(minutes: 8));
+      await session.seek(const Duration(minutes: 2));
+      expect(backend.seeks, isEmpty);
+      backend.releaseStop!.complete();
+      await Future.wait([first, newer]);
+      expect(session.snapshot.selectedAudioId, '${session.snapshot.generation}:$latestIndex');
+      expect(backend.starts.skip(1), everyElement(const Duration(minutes: 2)));
+      expect(backend.playing, isTrue);
+    });
+  }
+
+  test('a seek during the new backend open survives the delayed track-restore check', () async {
+    final backend = _Backend(), client = _Client();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    client.playbackApi.subtitles.add({'Type': 'Audio', 'Index': 2, 'Language': 'en'});
+    final adapter = MoonfinPlaybackAdapter(manager: manager, client: client, native: native, audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.115.com/file'))));
+    addTearDown(() async { await adapter.dispose(); await native.events.close(); manager.dispose(); });
+    final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 5)));
+    await pumpEventQueue(times: 30);
+    backend.opening = Completer();
+    backend.releaseOpen = Completer();
+    final change = session.selectAudio(session.snapshot.audioTracks.last.id);
+    await backend.opening!.future;
+    await session.seek(const Duration(minutes: 2));
+    backend.releaseOpen!.complete();
+    await change;
+    await Future<void>.delayed(const Duration(milliseconds: 230));
+    expect(backend.seeks, [const Duration(minutes: 2)]);
+    expect(backend.at, const Duration(minutes: 2));
+  });
+  for (final method in ['direct', 'remux']) {
+    test('a refused sidecar cannot steal the mounted bitmap or select another ordinal on $method', () async {
+      final backend = _Backend()..refusedExternal = 2;
+      final manager = PlaybackManager()..setBackend(backend);
+      final native = _Native(backend), client = _Client();
+      if (method == 'remux') client.playbackApi.sourcePatch = {
+        'IsRemote': false, 'SupportsDirectPlay': false, 'SupportsDirectStream': true, 'DirectStreamUrl': '/Videos/movie/stream.mkv',
+      };
+      for (final index in [2, 3, 4]) {
+        client.playbackApi.subtitles.add({
+          'Type': 'Subtitle', 'Index': index, 'Language': 'eng', 'Codec': 'pgssub',
+          'IsExternal': true, 'DeliveryMethod': 'External', 'DeliveryUrl': '/Videos/movie/source/Subtitles/$index/Stream.sup',
+        });
+      }
+      final adapter = MoonfinPlaybackAdapter(
+        manager: manager, client: client, native: native, audioInput: _Audio(),
+        redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.115.com/file'))),
+      );
+      addTearDown(() async { await adapter.dispose(); await native.events.close(); manager.dispose(); });
+      final session = adapter.open(const PlayTarget(itemId: 'movie'));
+      await pumpEventQueue(times: 30);
+      expect(manager.currentResolution?.playMethod, method == 'remux' ? StreamPlayMethod.directStream : StreamPlayMethod.directPlay);
+      final gen = session.snapshot.generation;
+      await session.selectSubtitle('$gen:3');
+      expect(backend.urls, hasLength(1));
+      expect(backend.subtitlePicks.last.$1, 1);
+      expect(backend.subtitlePicks.last.$2, contains('/Subtitles/3/'));
+      final picks = backend.subtitlePicks.length;
+      await expectLater(session.selectSubtitle('$gen:2'), throwsA(isA<EmbyViewFailure>()));
+      backend.failSelectSubtitle = true;
+      await expectLater(session.selectSubtitle('$gen:4'), throwsA(isA<EmbyViewFailure>()));
+      expect(backend.subtitlePicks, hasLength(picks));
+      expect(session.snapshot.selectedSubtitleId, '$gen:3');
+      expect(backend.urls, hasLength(1));
+    });
+  }
+
   test('a newer sidecar pick during teardown follows the same media into its new generation', () async {
     final backend = _Backend(), client = _Client();
     final manager = PlaybackManager()..setBackend(backend);
@@ -945,6 +1051,10 @@ void main() {
     client.playbackApi.audio.addAll({
       'Codec': 'eac3', 'ChannelLayout': 'stereo', 'Channels': 2, 'DisplayTitle': 'Japanese EAC3 stereo (默认)',
     });
+    client.playbackApi.subtitles.add({
+      'Type': 'Subtitle', 'Index': 3, 'Codec': 'subrip', 'Language': 'tur', 'DisplayTitle': 'Turkish (SUBRIP)',
+      'Title': 'Forced (SDH)', 'IsDefault': true,
+    });
     final adapter = MoonfinPlaybackAdapter(
       manager: manager, client: client, native: native, audioInput: _Audio(),
       redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://fixture.115cdn.net/video'))),
@@ -963,6 +1073,8 @@ void main() {
     expect(snap.quality?.origin, MediaOrigin.direct115);
     expect(snap.quality?.resolution, '1080p');
     expect(snap.quality?.audioLabel, 'EAC3 2.0');
+    expect(snap.subtitleTracks.single.qualifiers, ['强制', 'SDH', '默认']);
+    expect(snap.subtitleTracks.single.isForced, isFalse); // Display hints do not change auto-selection.
   });
 
   test('real 115 session refreshes once at position, retires old tracks and refuses the next failure', () async {

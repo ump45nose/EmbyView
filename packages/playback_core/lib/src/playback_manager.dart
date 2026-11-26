@@ -123,6 +123,17 @@ void withholdExternalPgsSubtitles(Map<String, dynamic> profile) {
 /// resolution only when the manager commits the replacement.
 typedef PrepareTrackReopen = Future<StreamResolutionResult Function()?> Function(ReplanRequest request);
 
+class ExternalSubtitleUnavailable implements Exception {
+  const ExternalSubtitleUnavailable();
+}
+
+/// Seeks made after committing a prepared track switch belong to its new player.
+class _TrackReopenSeek {
+  _TrackReopenSeek(this.itemEpoch);
+  final int itemEpoch;
+  Duration? position;
+}
+
 class PlaybackManager implements AudioOwnable {
   static const _mediaReadyPollInterval = Duration(milliseconds: 100);
   static const _defaultMediaReadyTimeout = Duration(seconds: 60);
@@ -266,6 +277,10 @@ class PlaybackManager implements AudioOwnable {
   // Unlike the request token, this survives stream and player rebuilds.
   int _subtitleDelaySessionId = 0;
   Future<void>? _externalSubsLoaded;
+  bool _verifyExternalSubtitles = false;
+  final _mountedExternalSubtitles = <int, ({int ordinal, String url})>{};
+  _TrackReopenSeek? _trackReopenSeek;
+  int _seekRevision = 0;
   Duration _deferredStartPosition = Duration.zero;
   bool _deferPlaybackToExternalPlayer = false;
   bool _skipExternalRoutingOnce = false;
@@ -1339,7 +1354,9 @@ class PlaybackManager implements AudioOwnable {
   /// Temporarily binds a user-scoped facade while keeping the original
   /// launcher's resolver configurator available when that facade is disposed.
   void Function() bindPlaybackSource(MediaStreamResolver resolver, PlayerService service,
-      {PlayerBackend? backend}) {
+      {PlayerBackend? backend, bool verifyExternalSubtitles = false}) {
+    final previousVerification = _verifyExternalSubtitles;
+    _verifyExternalSubtitles = verifyExternalSubtitles;
     final previousResolver = _resolver;
     final previousService = _service;
     final previousConfigurator = _resolverConfigurator;
@@ -1356,6 +1373,7 @@ class PlaybackManager implements AudioOwnable {
     }
     return () {
       if (!identical(_resolverConfigurator, configure)) return;
+      _verifyExternalSubtitles = previousVerification;
       _resolver = previousResolver; _service = previousService;
       _resolverConfigurator = previousConfigurator;
       sourceFailureRecovery = previousRecovery;
@@ -3274,6 +3292,7 @@ class PlaybackManager implements AudioOwnable {
     // re-resolve's teardown as its own.
     bool reopening = false,
   }) async {
+    final trackOpenSeekRevision = preparedTrackSource == null ? null : _seekRevision;
     _deferredStartPosition = Duration.zero;
     _deferPlaybackToExternalPlayer = false;
     // A channel started afresh -- a tune, or Retry on the card a spent budget
@@ -3369,6 +3388,7 @@ class PlaybackManager implements AudioOwnable {
       ),
     );
     _externalSubsLoaded = null;
+    _mountedExternalSubtitles.clear();
 
     await _resetSubtitleRendererMode();
     if (sessionToken != _playbackSessionToken) return;
@@ -4224,6 +4244,7 @@ class PlaybackManager implements AudioOwnable {
         _waitAndApplyTrackSelections(
           sessionToken,
           restorePosition: useNativeStart ? startPosition : null,
+          expectedSeekRevision: trackOpenSeekRevision,
         );
       }
       if (_subtitleStreamIndex == -1) {
@@ -4662,7 +4683,14 @@ class PlaybackManager implements AudioOwnable {
 
   Future<void> seekTo(Duration position) async {
     if (await _maybeIntercept(TransportAction.seek, position: position)) return;
+    ++_seekRevision;
     _lastKnownPosition = position;
+    final trackReopen = _trackReopenSeek;
+    if (trackReopen != null && trackReopen.itemEpoch == _itemEpoch) {
+      trackReopen.position = position;
+      state.setPosition(position);
+      return;
+    }
     // While one is being served the stream is being replaced, so a new seek
     // only moves its target.
     if (_seekReplanRunning) {
@@ -5294,6 +5322,29 @@ class PlaybackManager implements AudioOwnable {
     final unsupportedBitmap = bitmap && !(_backend?.canRenderBitmapSubtitles ?? false);
     final method = _currentResolution?.playMethod;
     final runtimeSelection = _backend?.supportsRuntimeTrackSelection;
+    // An explicitly selected sidecar is a separate subtitle resource. Its
+    // mounted identity is valid on both direct-play and stripped video.
+    if (prepareReopen != null && !refreshStreams && !previousBurned && !unsupportedBitmap &&
+        runtimeSelection == true && (_isSubtitleDeliveredExternally(streamIndex) || _isSubtitleExternal(streamIndex))) {
+      final token = _playbackSessionToken;
+      await _waitForTracksAndExternals();
+      if (token != _playbackSessionToken) return;
+      final mounted = _mountedExternalSubtitles[streamIndex];
+      if (mounted == null) throw const ExternalSubtitleUnavailable();
+      await _applySubtitleRendererModeForStream(streamIndex);
+      if (token != _playbackSessionToken) return;
+      try {
+        await _backend?.setSubtitleTrack(
+          mounted.ordinal, isBitmapSubtitle: bitmap, subtitleCodec: _subtitleCodecForStream(streamIndex),
+          isExternalSubtitle: true, externalSubtitleUrl: mounted.url,
+        );
+      } catch (_) {
+        if (token != _playbackSessionToken) return;
+        throw const ExternalSubtitleUnavailable();
+      }
+      if (token == _playbackSessionToken) select();
+      return;
+    }
     final ordinal = _mpvTrackIdForStream(streamIndex, 'Subtitle');
     bool? forceTranscode;
     var disableOldRenderer = false;
@@ -5336,13 +5387,7 @@ class PlaybackManager implements AudioOwnable {
     }
     final isExternal = _isSubtitleDeliveredExternally(streamIndex);
     if (isExternal && (method == StreamPlayMethod.directPlay || _isOfflinePlayback)) {
-      if (prepareReopen == null) {
-        _waitAndApplyTrackSelections(_playbackSessionToken);
-        return;
-      }
-      // Selecting a sidecar never reapplies the audio track. On Aether that
-      // separate command can rebuild the whole pipeline.
-      await _applyExternalSubtitleWhenReady(_playbackSessionToken);
+      _waitAndApplyTrackSelections(_playbackSessionToken);
     } else if (ordinal != null) {
       await _backend?.setSubtitleTrack(
         ordinal, isBitmapSubtitle: bitmap, subtitleCodec: _subtitleCodecForStream(streamIndex),
@@ -5552,6 +5597,8 @@ class PlaybackManager implements AudioOwnable {
     // spurious source error. The flag stays set through the whole teardown
     // because the dying player's error events arrive asynchronously.
     final teardownEpoch = _itemEpoch;
+    final seek = prepared == null ? null : _TrackReopenSeek(teardownEpoch);
+    if (seek != null) _trackReopenSeek = seek;
     _teardownEpoch = teardownEpoch;
     _reResolveStoppingOldPlayer = true;
     try {
@@ -5587,6 +5634,7 @@ class PlaybackManager implements AudioOwnable {
     _reResolveStoppingOldPlayer = false;
     if ((shouldProceed != null && !shouldProceed()) ||
         (prepared != null && (itemEpoch != _itemEpoch || previousToken != _playbackSessionToken))) {
+      if (identical(_trackReopenSeek, seek)) _trackReopenSeek = null;
       if (_teardownEpoch == teardownEpoch) _teardownEpoch = null;
       return;
     }
@@ -5597,8 +5645,10 @@ class PlaybackManager implements AudioOwnable {
     }
 
     try {
+      final start = seek?.position ?? currentPos;
+      seek?.position = null;
       await _playCurrentItem(
-        startPosition: currentPos,
+        startPosition: start,
         preparedTrackSource: prepared,
         enableDirectPlay: !forceTranscode && !disableDirectPlay,
         enableDirectStream: !forceTranscode,
@@ -5609,7 +5659,13 @@ class PlaybackManager implements AudioOwnable {
         replanReason: replanReason,
         reopening: true,
       );
+      while (seek?.position != null && itemEpoch == _itemEpoch && bringupState.phase == PlaybackBringupPhase.ready) {
+        final target = seek!.position!;
+        seek.position = null;
+        await _backend?.seekTo(_playerPosition(target));
+      }
     } finally {
+      if (identical(_trackReopenSeek, seek)) _trackReopenSeek = null;
       if (_teardownEpoch == teardownEpoch) _teardownEpoch = null;
     }
   }
@@ -5617,6 +5673,7 @@ class PlaybackManager implements AudioOwnable {
   Future<void> _applyStoredTrackSelections(
     int sessionToken, {
     Duration? restorePosition,
+    int? expectedSeekRevision,
   }) async {
     if (sessionToken != _playbackSessionToken) return;
     final shouldRestore =
@@ -5637,6 +5694,12 @@ class PlaybackManager implements AudioOwnable {
       await _resetSubtitleRendererMode();
       await _backend?.disableSubtitleTrack();
     } else if (_subtitleStreamIndex != null && _subtitleStreamIndex! >= 0) {
+      if (_verifyExternalSubtitles && _isSubtitleDeliveredExternally(_subtitleStreamIndex!) &&
+          !_mountedExternalSubtitles.containsKey(_subtitleStreamIndex)) {
+        _subtitleStreamIndex = -1;
+        await _backend?.disableSubtitleTrack();
+        return;
+      }
       final isBitmap = _isSubtitleBitmap(_subtitleStreamIndex!);
       final canRenderBitmap = _backend?.canRenderBitmapSubtitles ?? false;
       if (isBitmap && !canRenderBitmap) {
@@ -5674,7 +5737,8 @@ class PlaybackManager implements AudioOwnable {
 
     if (shouldRestore) {
       await Future.delayed(const Duration(milliseconds: 150));
-      if (sessionToken != _playbackSessionToken) return;
+      if (sessionToken != _playbackSessionToken ||
+          (expectedSeekRevision != null && expectedSeekRevision != _seekRevision)) return;
       final pos = _backend != null
           ? _mediaPosition(_backend!.position)
           : state.position;
@@ -5688,6 +5752,7 @@ class PlaybackManager implements AudioOwnable {
   void _waitAndApplyTrackSelections(
     int sessionToken, {
     Duration? restorePosition,
+    int? expectedSeekRevision,
   }) {
     _backend?.waitForTracksReady().then((_) async {
       if (sessionToken != _playbackSessionToken) return;
@@ -5701,6 +5766,7 @@ class PlaybackManager implements AudioOwnable {
       _applyStoredTrackSelections(
         sessionToken,
         restorePosition: restorePosition,
+        expectedSeekRevision: expectedSeekRevision,
       );
     });
   }
@@ -5723,6 +5789,11 @@ class PlaybackManager implements AudioOwnable {
     final streamIndex = _subtitleStreamIndex;
     if (streamIndex == null || streamIndex < 0) return;
     if (!_isSubtitleDeliveredExternally(streamIndex)) return;
+    if (_verifyExternalSubtitles && !_mountedExternalSubtitles.containsKey(streamIndex)) {
+      _subtitleStreamIndex = -1;
+      await _backend?.disableSubtitleTrack();
+      return;
+    }
     final mpvId = _mpvTrackIdForStream(streamIndex, 'Subtitle');
     if (mpvId == null) return;
     await _applySubtitleRendererModeForStream(streamIndex);
@@ -5760,14 +5831,22 @@ class PlaybackManager implements AudioOwnable {
 
     backend.waitForEmbeddedSubtitleCount(embeddedSubCount).then((_) async {
       if (sessionToken == _playbackSessionToken) {
+        var mountedCount = 0;
         for (final sub in subsToAdd) {
+          final url = _ensureSubtitleApiKey(sub.deliveryUrl);
           try {
             await backend.addExternalSubtitle(
-              _ensureSubtitleApiKey(sub.deliveryUrl),
+              url,
               title: sub.title,
               language: sub.language,
               codec: sub.codec,
             );
+            if (sessionToken != _playbackSessionToken) break;
+            ++mountedCount;
+            if (_verifyExternalSubtitles && sub.streamIndex != null) {
+              final index = sub.streamIndex!;
+              _mountedExternalSubtitles[index] = (ordinal: embeddedSubCount + mountedCount, url: url);
+            }
           } catch (_) {}
           if (sessionToken != _playbackSessionToken) break;
         }
@@ -5815,23 +5894,35 @@ class PlaybackManager implements AudioOwnable {
     );
   }
 
-  int? _mpvTrackIdForStream(int streamIndex, String type) =>
-      TrackOrdinalMapper.mpvTrackIdForStream(
-        streamIndex: streamIndex,
-        type: type,
-        mediaStreams: _currentMediaStreams,
-        externalSubtitles: _currentResolution?.externalSubtitles,
-        embeddedStripped: _embeddedSubtitlesUnavailable,
-      );
+  int? _mpvTrackIdForStream(int streamIndex, String type) {
+    if (_verifyExternalSubtitles && type == 'Subtitle' && _isSubtitleDeliveredExternally(streamIndex)) {
+      return _mountedExternalSubtitles[streamIndex]?.ordinal;
+    }
+    return TrackOrdinalMapper.mpvTrackIdForStream(
+      streamIndex: streamIndex,
+      type: type,
+      mediaStreams: _currentMediaStreams,
+      externalSubtitles: _currentResolution?.externalSubtitles,
+      embeddedStripped: _embeddedSubtitlesUnavailable,
+    );
+  }
 
-  int? _streamIndexForMpvTrackId(int mpvTrackId, String type) =>
-      TrackOrdinalMapper.streamIndexForMpvTrackId(
-        mpvTrackId: mpvTrackId,
-        type: type,
-        mediaStreams: _currentMediaStreams,
-        externalSubtitles: _currentResolution?.externalSubtitles,
-        embeddedStripped: _embeddedSubtitlesUnavailable,
-      );
+  int? _streamIndexForMpvTrackId(int mpvTrackId, String type) {
+    if (_verifyExternalSubtitles && type == 'Subtitle') {
+      final embedded = TrackOrdinalMapper.embeddedSubtitleCount(
+        mediaStreams: _currentMediaStreams, embeddedStripped: _embeddedSubtitlesUnavailable);
+      if (mpvTrackId > embedded) {
+        return _mountedExternalSubtitles.entries.where((entry) => entry.value.ordinal == mpvTrackId).firstOrNull?.key;
+      }
+    }
+    return TrackOrdinalMapper.streamIndexForMpvTrackId(
+      mpvTrackId: mpvTrackId,
+      type: type,
+      mediaStreams: _currentMediaStreams,
+      externalSubtitles: _currentResolution?.externalSubtitles,
+      embeddedStripped: _embeddedSubtitlesUnavailable,
+    );
+  }
 
   Future<void> playOffline(
     String url, {

@@ -80,8 +80,7 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
 
     static func sourceRequestLimit(for url: URL) -> Int? {
         guard let host = url.host?.lowercased() else { return nil }
-        return host == "115.com" || host.hasSuffix(".115.com")
-            || host == "115cdn.net" || host.hasSuffix(".115cdn.net") ? 1 : nil
+        return ["115.com", "115cdn.net", "115cdn.com"].contains { host == $0 || host.hasSuffix("." + $0) } ? 1 : nil
     }
 
     func nativePlaybackPayload(event: String = "nativePlayback") -> [String: Any] {

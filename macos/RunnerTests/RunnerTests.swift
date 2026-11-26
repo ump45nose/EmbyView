@@ -423,11 +423,13 @@ final class ExternalASSRenderingTests: XCTestCase {
     }
 
     func testDirect115UsesOnlyThePlaybackReader() {
-        for url in ["https://cdn.115.com/video", "https://file.115cdn.net/video"] {
+        for url in ["https://cdn.115.com/video", "https://file.115cdn.net/video",
+                    "https://115cdn.com/video", "https://a.b.115cdn.com/video"] {
             XCTAssertEqual(AetherPlayerWrapper.sourceRequestLimit(for: URL(string: url)!), 1)
         }
         for url in ["file:///library/film.mkv", "https://nas.test/emby/Videos/1/stream",
-                    "https://unrelated115.com/video"] {
+                    "https://unrelated115.com/video", "https://evil115cdn.com/video",
+                    "https://115cdn.com.other.test/video"] {
             XCTAssertNil(AetherPlayerWrapper.sourceRequestLimit(for: URL(string: url)!))
         }
     }

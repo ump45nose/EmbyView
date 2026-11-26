@@ -643,6 +643,12 @@ class AetherBackend
     bool isExternalSubtitle = false,
     String? externalSubtitleUrl,
   }) async {
+    if (_nativeSourceGeneration > 0 && isExternalSubtitle) {
+      if (externalSubtitleUrl == null) throw StateError('外挂字幕地址不可用。');
+      await loadExternalSubtitle(externalSubtitleUrl, codec: subtitleCodec);
+      _activeSubtitleTrackIndex = index;
+      return;
+    }
     _pendingEmbeddedSubtitle = null;
     _activeSubtitleTrackIndex = index;
     _log(
@@ -765,6 +771,13 @@ class AetherBackend
       'addExternalSubtitle ${loggableUrl(url)} title=${title ?? 'none'} '
       'language=${language ?? 'none'} codec=${codec ?? 'none'}',
     );
+    if (_nativeSourceGeneration > 0) {
+      final generation = _nativeSourceGeneration;
+      await waitForTracksReady();
+      await loadExternalSubtitle(url, title: title, language: language, codec: codec,
+          sourceGeneration: generation, select: false);
+      return;
+    }
     await _invoke<void>('addExternalSubtitle', {
       'url': url,
       'title': title,

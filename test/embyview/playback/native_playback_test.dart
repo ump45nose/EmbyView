@@ -17,8 +17,10 @@ void main() {
     const control = MethodChannel('moonfin/ios_aether_control');
     const events = MethodChannel('moonfin/ios_aether_events');
     final calls = <MethodCall>[];
+    var refuseExternal = false;
     messenger.setMockMethodCallHandler(control, (call) async {
       calls.add(call);
+      if (call.method == 'loadExternalSubtitle' && refuseExternal) throw PlatformException(code: 'registration_failed');
       return null;
     });
     messenger.setMockMethodCallHandler(events, (_) async => null);
@@ -47,6 +49,22 @@ void main() {
       await native.loadExternalSubtitle('file:///subtitle.srt');
       expect(calls.last.arguments['select'], isTrue);
       expect(backend.activeSubtitleTrackIndex, 0);
+      native.configureNextSource(sourceGeneration: 17);
+      await backend.play({'url': 'file:///video.mkv'});
+      await messenger.handlePlatformMessage(events.name,
+        const StandardMethodCodec().encodeSuccessEnvelope({'event': 'tracksChanged', 'textTrackCount': 2}), (_) {});
+      await Future<void>.delayed(Duration.zero);
+      await backend.setSubtitleTrack(1);
+      refuseExternal = true;
+      await expectLater(backend.addExternalSubtitle('file:///bad.srt'), throwsA(isA<PlatformException>()));
+      await expectLater(backend.setSubtitleTrack(2, isExternalSubtitle: true,
+          externalSubtitleUrl: 'file:///bad.srt'), throwsA(isA<PlatformException>()));
+      expect(backend.activeSubtitleTrackIndex, 1);
+      refuseExternal = false;
+      await backend.setSubtitleTrack(2, isExternalSubtitle: true, externalSubtitleUrl: 'file:///good.srt');
+      expect(calls.last.method, 'loadExternalSubtitle');
+      expect(calls.last.arguments['sourceGeneration'], 17);
+      expect(calls.last.arguments['url'], 'file:///good.srt');
     } finally {
       await native.dispose();
       backend.dispose();

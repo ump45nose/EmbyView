@@ -149,6 +149,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
             _resolver,
             EmbyPlaySessionService(client),
             backend: native.backend,
+            verifyExternalSubtitles: true,
           );
           manager.autoAdvanceEnabled = autoNext;
           manager.sourceFailureRecovery = session._recoverSource;
@@ -702,6 +703,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
           format: stream['Codec'] as String?,
           layout: stream['ChannelLayout'] as String?,
           isForced: stream['IsForced'] == true,
+          qualifiers: type == 'Subtitle' ? embySubtitleQualifiers(stream) : const [],
           source: stream['IsExternal'] == true
               ? PlaybackTrackSource.embyExternal
               : PlaybackTrackSource.embedded,
@@ -762,15 +764,20 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   @override
   Future<void> selectAudio(String trackId) async {
     final index = _trackIndex(trackId);
-    final choice = ++_audioChoice, generation = _snapshot.generation;
-    if (!_current || index == _manager.audioStreamIndex && _manager.currentResolution != null) return;
-    try {
-      await _control(() => _manager.changeAudioTrack(
-        index, prepareReopen: _prepareTrackReopen(generation, () => choice == _audioChoice, 'audio'),
-      ));
-    } on EmbyViewFailure catch (failure) {
-      if (failure.code != 'trackSwitchCancelled') rethrow;
-    }
+    final choice = ++_audioChoice, generation = _snapshot.generation, mediaEpoch = _subtitleMediaEpoch;
+    return _subtitleOperation(() async {
+      final currentGeneration = _snapshot.generation;
+      if (!_current || choice != _audioChoice || mediaEpoch != _subtitleMediaEpoch ||
+          (generation != currentGeneration && _previousTrackGeneration != generation) ||
+          index == _manager.audioStreamIndex && _manager.currentResolution != null) return;
+      try {
+        await _control(() => _manager.changeAudioTrack(
+          index, prepareReopen: _prepareTrackReopen(currentGeneration, () => choice == _audioChoice, 'audio'),
+        ));
+      } on EmbyViewFailure catch (failure) {
+        if (failure.code != 'trackSwitchCancelled') rethrow;
+      }
+    });
   }
 
   PrepareTrackReopen _prepareTrackReopen(int generation, bool Function() stillSelected, String kind) {
@@ -916,12 +923,15 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
           // renderer rejected the command. Reapply the last committed choice.
           // If only a disable was attempted, the native renderer was already
           // confirmed off for this live track and could never have turned on.
-          final sourceUntouched = error is EmbyViewFailure &&
+          final sourceUntouched = error is ExternalSubtitleUnavailable || error is EmbyViewFailure &&
               (error.code == 'trackSourceUnavailable' || error.code == 'trackSwitchCancelled');
           if (!sourceUntouched && (!restoreLive || before.nativeEnableAttempts != _nativeEnableAttempts)) {
             await _selectNativeSubtitle(restoreLive ? null : restore, generation, current, force: true);
           }
           if (current()) _liveRendererReady = restoreLive;
+        }
+        if (error is ExternalSubtitleUnavailable) {
+          throw const EmbyViewFailure('外挂字幕载入失败，已保留原轨道。', retryable: true);
         }
         if (error is EmbyViewFailure && error.code == 'trackSwitchCancelled') return;
         rethrow;
