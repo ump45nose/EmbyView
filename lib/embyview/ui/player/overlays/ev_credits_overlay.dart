@@ -10,57 +10,121 @@ import 'package:moonfin/embyview/ui/kit.dart';
 class EvCreditsVideoFrame extends StatelessWidget {
   const EvCreditsVideoFrame({
     super.key, required this.creditsActive, required this.panelOpen,
-    required this.child, this.onTapMiniVideo,
+    required this.child, this.videoAspectRatio = 16 / 9, this.onTapMiniVideo,
   });
 
   final bool creditsActive;
   final bool panelOpen;
   final Widget child;
+  final double videoAspectRatio;
   final VoidCallback? onTapMiniVideo;
 
   @override
   Widget build(BuildContext context) {
     final scale = EvScale.of(context);
     final insetForPanel = !creditsActive && panelOpen;
-    return AnimatedContainer(
-      duration: Duration(milliseconds: creditsActive ? 900 : 600),
-      curve: EvCurves.out,
-      margin: insetForPanel
-          ? EdgeInsets.fromLTRB(scale.rem(1), scale.rem(1), scale.rem(30), scale.rem(1))
-          : EdgeInsets.zero,
-      transform: creditsActive
-          ? (Matrix4.translationValues(scale.gutter - scale.vw(2), -scale.vh(4), 0)
-              ..multiply(Matrix4.diagonal3Values(0.36, 0.36, 1)))
-          : Matrix4.identity(),
-      transformAlignment: Alignment.bottomLeft,
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: const Color(0xFF000000),
-        borderRadius: creditsActive
-            ? BorderRadius.circular(scale.rem(2.5))
-            : insetForPanel
-            ? BorderRadius.circular(scale.rem(1.25))
-            : BorderRadius.zero,
-        boxShadow: creditsActive
-            ? [BoxShadow(offset: Offset(0, scale.rem(1.5)), blurRadius: scale.rem(4), color: const Color.fromRGBO(0, 0, 0, 0.6))]
-            : const [],
-      ),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          child,
-          if (creditsActive && onTapMiniVideo != null)
+    final duration = Duration(milliseconds: creditsActive ? 900 : 600);
+    final ar = (videoAspectRatio.isFinite && videoAspectRatio > 0) ? videoAspectRatio : (16 / 9);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.hasBoundedWidth ? constraints.maxWidth : scale.size.width;
+        final h = constraints.hasBoundedHeight ? constraints.maxHeight : scale.size.height;
+
+        var left = 0.0;
+        var top = 0.0;
+        var right = 0.0;
+        var bottom = 0.0;
+
+        if (insetForPanel) {
+          final availLeft = scale.rem(1);
+          final availTop = scale.rem(1);
+          final availRight = scale.rem(30);
+          final availBottom = scale.rem(1);
+          final availW = math.max(0.0, w - availLeft - availRight);
+          final availH = math.max(0.0, h - availTop - availBottom);
+          if (availW > 0 && availH > 0) {
+            final double fittedW;
+            final double fittedH;
+            if (availW / availH > ar) {
+              fittedH = availH;
+              fittedW = availH * ar;
+            } else {
+              fittedW = availW;
+              fittedH = availW / ar;
+            }
+            final dx = (availW - fittedW) / 2;
+            final dy = (availH - fittedH) / 2;
+            left = availLeft + dx;
+            top = availTop + dy;
+            right = availRight + dx;
+            bottom = availBottom + dy;
+          } else {
+            left = availLeft;
+            top = availTop;
+            right = availRight;
+            bottom = availBottom;
+          }
+        }
+
+        return Stack(
+          fit: StackFit.expand,
+          children: [
             Positioned.fill(
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque, onTap: onTapMiniVideo,
-                  child: Semantics(button: true, label: '返回全屏观看片尾', child: const SizedBox.expand()),
+              child: IgnorePointer(
+                child: ColoredBox(
+                  color: insetForPanel ? const Color(0xFF000000) : const Color(0x00000000),
                 ),
               ),
             ),
-        ],
-      ),
+            AnimatedPositioned(
+              key: const ValueKey('ev_credits_video_frame_pos'),
+              duration: duration,
+              curve: EvCurves.out,
+              left: left,
+              top: top,
+              right: right,
+              bottom: bottom,
+              child: AnimatedContainer(
+                key: const Key('ev_credits_video_frame_box'),
+                duration: duration,
+                curve: EvCurves.out,
+                transform: creditsActive
+                    ? (Matrix4.translationValues(scale.gutter - scale.vw(2), -scale.vh(4), 0)
+                        ..multiply(Matrix4.diagonal3Values(0.36, 0.36, 1)))
+                    : Matrix4.identity(),
+                transformAlignment: Alignment.bottomLeft,
+                clipBehavior: creditsActive ? Clip.antiAlias : Clip.hardEdge,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF000000),
+                  borderRadius: creditsActive
+                      ? BorderRadius.circular(scale.rem(2.5))
+                      : BorderRadius.zero,
+                  boxShadow: creditsActive
+                      ? [BoxShadow(offset: Offset(0, scale.rem(1.5)), blurRadius: scale.rem(4), color: const Color.fromRGBO(0, 0, 0, 0.6))]
+                      : const [],
+                ),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    child,
+                    if (creditsActive && onTapMiniVideo != null)
+                      Positioned.fill(
+                        child: MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque, onTap: onTapMiniVideo,
+                            child: Semantics(button: true, label: '返回全屏观看片尾', child: const SizedBox.expand()),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

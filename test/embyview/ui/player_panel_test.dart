@@ -644,4 +644,90 @@ void main() {
     expect(evAnime4kSweepSplit(2 / 3), closeTo(0.22, 1e-6));
     expect(evAnime4kSweepSplit(1.0), closeTo(0.50, 1e-6));
   });
+
+  group('Design visual polish: audio track badges/subtitles & subtitle language copy', () {
+    testWidgets('EvAudioTab formats original, other language, and commentary tracks per spec', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final snap = _snap(
+        selectedAudioId: 'aud_ja',
+        audioTracks: const [
+          PlaybackTrack(id: 'aud_ja', name: '日语', language: '日语', source: PlaybackTrackSource.embedded, format: 'AAC', layout: '2.0'),
+          PlaybackTrack(id: 'aud_en', name: 'English', language: 'English', source: PlaybackTrackSource.embedded, format: 'E-AC-3', layout: '5.1'),
+          PlaybackTrack(id: 'aud_cm', name: '导演评论', language: '日语', source: PlaybackTrackSource.embedded, format: 'AAC', layout: '2.0'),
+        ],
+      );
+
+      await tester.pumpWidget(_wrap(
+        child: EvPlayerPanel(
+          open: true, activeTab: 'audio', snapshot: snap,
+          onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},
+          onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.descendant(of: find.byKey(const Key('ev_audio_track_aud_ja')), matching: find.text('原')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('ev_audio_track_aud_ja')), matching: find.text('原声 · AAC 2.0')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('ev_audio_track_aud_en')), matching: find.text('EN')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('ev_audio_track_aud_en')), matching: find.text('E-AC-3 5.1')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('ev_audio_track_aud_cm')), matching: find.text('评')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('ev_audio_track_aud_cm')), matching: find.text('AAC 2.0')), findsOneWidget);
+    });
+
+    testWidgets('EvSubtitleTab specifies known audio/subtitle languages and falls back to 外语', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final panel = _FakeSubtitlePanel(const SubtitleSnapshot(generation: 1));
+
+      // Known Japanese audio + English subtitle track
+      await tester.pumpWidget(_wrap(
+        child: EvPlayerPanel(
+          open: true, activeTab: 'subs',
+          snapshot: _snap(
+            audioTracks: const [
+              PlaybackTrack(id: 'ja', name: '日语', language: 'ja', source: PlaybackTrackSource.embedded, format: 'AAC', layout: '2.0'),
+            ],
+            subtitleTracks: const [
+              PlaybackTrack(id: 'emb', name: '简体中文', language: 'zh', source: PlaybackTrackSource.embedded, format: 'ASS'),
+              PlaybackTrack(id: 'en', name: 'English', language: 'en', source: PlaybackTrackSource.embedded, format: 'SRT'),
+            ],
+          ),
+          subtitleSnapshot: const SubtitleSnapshot(generation: 1),
+          subtitlePanel: panel,
+          onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},
+          onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('把日语对白听写成文字，再译成简体中文。约 40 秒后开始出字，之后一直领先播放进度。'), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('ev_ai_translate')), matching: find.text('English → 中文')), findsOneWidget);
+
+      // Unknown audio + Chinese-only subtitle track -> falls back to 外语
+      await tester.pumpWidget(_wrap(
+        child: EvPlayerPanel(
+          open: true, activeTab: 'subs',
+          snapshot: _snap(
+            audioTracks: const [
+              PlaybackTrack(id: 'und', name: '原声', language: 'und', source: PlaybackTrackSource.embedded),
+            ],
+            subtitleTracks: const [
+              PlaybackTrack(id: 'emb', name: '简体中文', language: 'zh', source: PlaybackTrackSource.embedded, format: 'ASS'),
+            ],
+          ),
+          subtitleSnapshot: const SubtitleSnapshot(generation: 1),
+          subtitlePanel: panel,
+          onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},
+          onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('把外语对白听写成文字，再译成简体中文。约 40 秒后开始出字，之后一直领先播放进度。'), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('ev_ai_translate')), matching: find.text('外语 → 中文')), findsOneWidget);
+    });
+  });
 }

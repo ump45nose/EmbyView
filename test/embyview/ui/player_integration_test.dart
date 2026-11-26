@@ -9,6 +9,7 @@ import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/entry.dart';
 import 'package:moonfin/embyview/ui/detail/ev_detail_page.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
+import 'package:moonfin/embyview/ui/player/controls/ev_player_controls.dart';
 import 'package:moonfin/embyview/ui/player/ev_player_page.dart';
 import 'package:moonfin/embyview/ui/player/overlays/ev_credits_overlay.dart';
 
@@ -662,6 +663,49 @@ void main() {
     ));
     await tester.pump(const Duration(milliseconds: 450));
     expect(tester.widget<IgnorePointer>(find.byKey(const Key('ev_anime4k_compare_overlay'))).ignoring, isFalse);
+  });
+
+  testWidgets('dismissing credits via 看完片尾 shows OSD controls immediately and auto-hides after 3.2s idle', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final session = _TestSession(_initialSnap()._withPhase(PlaybackPhase.playing));
+
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(size: Size(1440, 900), devicePixelRatio: 1.0),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: EvThemeScope(
+            themeMode: ThemeMode.cinema,
+            child: EvPlayerPage(session: session),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 900));
+
+    // Wait past 3.2s idle so controls auto-hide before credits prompt arrives.
+    await tester.pump(const Duration(milliseconds: 3400));
+    expect(tester.widget<EvPlayerControls>(find.byType(EvPlayerControls)).visible, isFalse);
+
+    // Enter credits countdown -> controls stay hidden during credits.
+    session.emit(session._copy(creditsPrompt: CreditsPromptState.countingDown));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 950));
+    expect(tester.widget<EvPlayerControls>(find.byType(EvPlayerControls)).visible, isFalse);
+
+    // Click 看完片尾 -> controls & logo/title appear immediately.
+    await tester.tap(find.byKey(const Key('ev_credits_stay')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(session.dismissCreditsCalls, 1);
+    expect(tester.widget<EvPlayerControls>(find.byType(EvPlayerControls)).visible, isTrue);
+
+    // After 3.2s idle, controls auto-hide again.
+    await tester.pump(const Duration(milliseconds: 3300));
+    expect(tester.widget<EvPlayerControls>(find.byType(EvPlayerControls)).visible, isFalse);
   });
 }
 

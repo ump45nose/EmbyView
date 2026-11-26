@@ -134,11 +134,13 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   void _onSessionSnapshot(PlaybackSnapshot next) {
     if (!mounted) return;
     final prev = _snap, genChanged = next.generation != prev.generation;
+    final wasCredits = prev.creditsPrompt == CreditsPromptState.countingDown && prev.nextEpisode != null;
+    final nowCredits = next.creditsPrompt == CreditsPromptState.countingDown && next.nextEpisode != null;
     var closedPanel = false;
     setState(() {
       _snap = next;
       genChanged ? _resetForGeneration(next) : _observeFirstFrame(next);
-      if (next.creditsPrompt == CreditsPromptState.countingDown && next.nextEpisode != null) {
+      if (nowCredits) {
         closedPanel = _panelOpen;
         _panelOpen = _pauseCardVisible = _compareActive = false; _pauseTimer?.cancel(); _pauseTimer = null;
       }
@@ -147,7 +149,10 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     if (closedPanel) _reclaimPlayerFocus();
     if (!genChanged) _handleAnime4kTransition(prev.anime4k, next.anime4k);
     _syncPauseState(next);
-    if (next.phase == PlaybackPhase.playing && prev.phase != PlaybackPhase.playing) _pokeControls();
+    if ((next.phase == PlaybackPhase.playing && prev.phase != PlaybackPhase.playing) ||
+        (!genChanged && wasCredits && !nowCredits)) {
+      _pokeControls();
+    }
   }
 
   void _handleAnime4kTransition(Anime4kSnapshot prev, Anime4kSnapshot next) {
@@ -299,14 +304,23 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     super.dispose();
   }
 
+  void _dismissCredits() {
+    unawaited(widget.session.dismissCreditsPrompt());
+    _pokeControls();
+  }
+
   @override
   Widget build(BuildContext context) {
     final scale = EvScale.of(context), creditsActive = _creditsActive;
     final openingDone = _openingDone && !widget.holdOpening;
     final showControls = _controlsVisible && openingDone && !creditsActive;
+    final origSize = _snap.anime4k.originalSize;
+    final videoAspectRatio = (origSize != null && origSize.width > 0 && origSize.height > 0)
+        ? origSize.width / origSize.height
+        : 16 / 9;
 
     final videoFrame = EvCreditsVideoFrame(
-      creditsActive: creditsActive, panelOpen: _panelOpen, onTapMiniVideo: () => unawaited(widget.session.dismissCreditsPrompt()),
+      creditsActive: creditsActive, panelOpen: _panelOpen, videoAspectRatio: videoAspectRatio, onTapMiniVideo: _dismissCredits,
       child: Stack(fit: StackFit.expand, children: [
         Positioned.fill(child: widget.session.videoSurface(key: ValueKey('ev_video_${_snap.generation}'))),
         Positioned.fill(child: EvPlayerOpeningOverlay(
@@ -326,7 +340,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
             Positioned.fill(child: EvCreditsOverlay(
               visible: creditsActive, snapshot: _snap, autoTick: widget.autoTickCredits,
               onPlayNext: () => unawaited(widget.session.playNext(finishCurrent: true)),
-              onStay: () => unawaited(widget.session.dismissCreditsPrompt()),
+              onStay: _dismissCredits,
             )),
             Positioned.fill(child: AnimatedBuilder(
               animation: _openCtrl,

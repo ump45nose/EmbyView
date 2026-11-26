@@ -10,23 +10,66 @@ class EvAudioTab extends StatelessWidget {
   final PlaybackSnapshot snapshot;
   final ValueChanged<String> onSelectAudio;
 
-  static String _langBadge(PlaybackTrack track) {
-    final raw = (track.language ?? track.name).trim().toLowerCase();
-    if (raw.contains('zh') || raw.contains('chi') || raw.contains('中')) return '中';
-    if (raw.contains('ja') || raw.contains('jpn') || raw.contains('日')) return '日';
-    if (raw.contains('en') || raw.contains('eng') || raw.contains('英')) return 'EN';
-    if (raw.contains('ko') || raw.contains('kor') || raw.contains('韩')) return '韩';
-    return raw.contains('评') ? '评' : '原';
+  static bool _isCommentary(PlaybackTrack track) {
+    final nameLower = track.name.toLowerCase();
+    return track.name.contains('评论') ||
+        nameLower.contains('commentary') ||
+        track.id.toLowerCase() == 'cm';
   }
 
-  static String _trackSubtitle(PlaybackTrack t) => [
-    for (final v in [t.language, t.format, t.layout]) if (v != null && v.trim().isNotEmpty) v.trim(),
-  ].join(' · ');
+  static String? _langBadgeForRaw(String? input) {
+    final s = input?.trim().toLowerCase() ?? '';
+    if (s.isEmpty) return null;
+    final tokens = s.split(RegExp(r'[^a-z]+')).where((w) => w.isNotEmpty).toSet();
+    if (s.contains('中') || s.contains('简') || s.contains('繁') || s.contains('国语') || s.contains('粤语') ||
+        tokens.any((w) => w == 'zh' || w == 'chi' || w == 'zho' || w == 'cmn' || w == 'yue' || w == 'chinese')) {
+      return '中';
+    }
+    if (s.contains('日') || tokens.any((w) => w == 'ja' || w == 'jpn' || w == 'jp' || w == 'japanese')) return '日';
+    if (s.contains('英') || tokens.any((w) => w == 'en' || w == 'eng' || w == 'english')) return 'EN';
+    if (s.contains('韩') || s.contains('韓') || tokens.any((w) => w == 'ko' || w == 'kor' || w == 'korean')) return '韩';
+    if (s.contains('法') || tokens.any((w) => w == 'fr' || w == 'fre' || w == 'fra' || w == 'french')) return 'FR';
+    if (s.contains('德') || tokens.any((w) => w == 'de' || w == 'ger' || w == 'deu' || w == 'german')) return 'DE';
+    if (s.contains('西班牙') || tokens.any((w) => w == 'es' || w == 'spa' || w == 'spanish')) return 'ES';
+    if (s.contains('俄') || tokens.any((w) => w == 'ru' || w == 'rus' || w == 'russian')) return 'RU';
+    if (s.contains('意') || tokens.any((w) => w == 'it' || w == 'ita' || w == 'italian')) return 'IT';
+    if (s.contains('泰') || tokens.any((w) => w == 'th' || w == 'tha' || w == 'thai')) return 'TH';
+    return null;
+  }
+
+  static String _langBadge(PlaybackTrack track, {required bool isOriginal}) {
+    if (_isCommentary(track)) return '评';
+    if (isOriginal) return '原';
+    final matched = _langBadgeForRaw(track.language) ?? _langBadgeForRaw(track.name);
+    if (matched != null) return matched;
+    final lang = track.language?.trim() ?? '';
+    if (RegExp(r'^[A-Za-z]{2,3}$').hasMatch(lang) && lang.toLowerCase() != 'und') {
+      return lang.substring(0, 2).toUpperCase();
+    }
+    return '音';
+  }
+
+  static String _trackSubtitle(PlaybackTrack t, {required bool isOriginal}) {
+    final tech = [
+      for (final v in [t.format, t.layout]) if (v != null && v.trim().isNotEmpty) v.trim(),
+    ].join(' ');
+    if (isOriginal) {
+      return tech.isNotEmpty ? '原声 · $tech' : '原声';
+    }
+    return tech;
+  }
 
   @override
   Widget build(BuildContext context) {
     final t = EvTheme.of(context), s = EvScale.of(context), pal = EvPanelPalette.of(t);
     final tracks = snapshot.audioTracks;
+    String? firstNonCommentaryId;
+    for (final tr in tracks) {
+      if (!_isCommentary(tr)) {
+        firstNonCommentaryId = tr.id;
+        break;
+      }
+    }
     return Column(
       key: const Key('ev_panel_audio_tab'), crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min,
       children: [
@@ -37,17 +80,21 @@ class EvAudioTab extends StatelessWidget {
           child: tracks.isEmpty
               ? Padding(padding: EdgeInsets.all(s.rem(0.875)), child: Text('无可选音轨', style: t.bodyStyle(s.rem(0.875), color: pal.subInk)))
               : Column(mainAxisSize: MainAxisSize.min, children: [
-                  for (final track in tracks)
-                    EvPanelTrackRow(
-                      key: Key('ev_audio_track_${track.id}'),
-                      selected: track.id == snapshot.selectedAudioId, title: track.name, subtitle: _trackSubtitle(track),
-                      onTap: () => onSelectAudio(track.id),
-                      badge: Container(
-                        width: s.rem(2.25), height: s.rem(2.25), alignment: Alignment.center,
-                        decoration: BoxDecoration(color: pal.badgeBg, borderRadius: BorderRadius.circular(s.rem(0.625))),
-                        child: Text(_langBadge(track), style: t.bodyStyle(s.rem(0.8125), fontWeight: FontWeight.w700, color: pal.badgeFg)),
-                      ),
-                    ),
+                  for (final track in tracks) ...[
+                    Builder(builder: (_) {
+                      final isOriginal = !_isCommentary(track) && (track.id == firstNonCommentaryId || track.name.contains('原声'));
+                      return EvPanelTrackRow(
+                        key: Key('ev_audio_track_${track.id}'),
+                        selected: track.id == snapshot.selectedAudioId, title: track.name, subtitle: _trackSubtitle(track, isOriginal: isOriginal),
+                        onTap: () => onSelectAudio(track.id),
+                        badge: Container(
+                          width: s.rem(2.25), height: s.rem(2.25), alignment: Alignment.center,
+                          decoration: BoxDecoration(color: pal.badgeBg, borderRadius: BorderRadius.circular(s.rem(0.625))),
+                          child: Text(_langBadge(track, isOriginal: isOriginal), style: t.bodyStyle(s.rem(0.8125), fontWeight: FontWeight.w700, color: pal.badgeFg)),
+                        ),
+                      );
+                    }),
+                  ],
                 ]),
         ),
       ],

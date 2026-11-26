@@ -137,13 +137,132 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
     }
   }
 
+  static bool _isCommentaryAudio(PlaybackTrack track) {
+    final nameLower = track.name.toLowerCase();
+    return track.name.contains('评论') ||
+        nameLower.contains('commentary') ||
+        track.id.toLowerCase() == 'cm';
+  }
+
+  static String? _parseLanguageCode(String? input) {
+    final s = input?.trim().toLowerCase() ?? '';
+    if (s.isEmpty) return null;
+    final tokens = s.split(RegExp(r'[^a-z]+')).where((w) => w.isNotEmpty).toSet();
+    if (s.contains('中') || s.contains('简') || s.contains('繁') || s.contains('国语') || s.contains('粤语') ||
+        tokens.any((w) => w == 'zh' || w == 'chi' || w == 'zho' || w == 'cmn' || w == 'yue' || w == 'chinese')) {
+      return 'zh';
+    }
+    if (s.contains('日语') || s.contains('日文') || s.contains('日') ||
+        tokens.any((w) => w == 'ja' || w == 'jpn' || w == 'japanese')) {
+      return 'ja';
+    }
+    if (s.contains('英语') || s.contains('英文') || s.contains('英') ||
+        tokens.any((w) => w == 'en' || w == 'eng' || w == 'english')) {
+      return 'en';
+    }
+    if (s.contains('韩语') || s.contains('韩文') || s.contains('韩') || s.contains('韓') ||
+        tokens.any((w) => w == 'ko' || w == 'kor' || w == 'korean')) {
+      return 'ko';
+    }
+    if (s.contains('法语') || s.contains('法文') || s.contains('法') ||
+        tokens.any((w) => w == 'fr' || w == 'fre' || w == 'fra' || w == 'french')) {
+      return 'fr';
+    }
+    if (s.contains('德语') || s.contains('德文') || s.contains('德') ||
+        tokens.any((w) => w == 'de' || w == 'ger' || w == 'deu' || w == 'german')) {
+      return 'de';
+    }
+    if (s.contains('西班牙语') || tokens.any((w) => w == 'es' || w == 'spa' || w == 'spanish')) {
+      return 'es';
+    }
+    if (s.contains('俄语') || s.contains('俄文') || s.contains('俄') ||
+        tokens.any((w) => w == 'ru' || w == 'rus' || w == 'russian')) {
+      return 'ru';
+    }
+    if (s.contains('意大利语') || tokens.any((w) => w == 'it' || w == 'ita' || w == 'italian')) {
+      return 'it';
+    }
+    if (s.contains('泰语') || s.contains('泰文') || s.contains('泰') ||
+        tokens.any((w) => w == 'th' || w == 'tha' || w == 'thai')) {
+      return 'th';
+    }
+    return null;
+  }
+
+  String _sourceAudioLanguage() {
+    final tracks = widget.snapshot.audioTracks;
+    PlaybackTrack? target;
+    for (final t in tracks) {
+      if (t.id == widget.snapshot.selectedAudioId && !_isCommentaryAudio(t)) {
+        target = t;
+        break;
+      }
+    }
+    if (target == null) {
+      for (final t in tracks) {
+        if (!_isCommentaryAudio(t)) {
+          target = t;
+          break;
+        }
+      }
+    }
+    if (target == null) return '外语';
+    final code = _parseLanguageCode(target.language) ?? _parseLanguageCode(target.name);
+    return const {
+      'ja': '日语',
+      'en': '英语',
+      'ko': '韩语',
+      'fr': '法语',
+      'de': '德语',
+      'es': '西班牙语',
+      'ru': '俄语',
+      'it': '意大利语',
+      'th': '泰语',
+    }[code] ?? '外语';
+  }
+
+  PlaybackTrack? _pickTranslateTarget() {
+    final tracks = widget.snapshot.subtitleTracks;
+    bool isForeignSub(PlaybackTrack t) {
+      if (t.source == PlaybackTrackSource.ai) return false;
+      final code = _parseLanguageCode(t.language) ?? _parseLanguageCode(t.name);
+      return code != 'zh';
+    }
+
+    final selectedId = widget.snapshot.selectedSubtitleId;
+    if (selectedId != null) {
+      for (final t in tracks) {
+        if (t.id == selectedId && isForeignSub(t)) return t;
+      }
+    }
+    for (final t in tracks) {
+      if (isForeignSub(t)) return t;
+    }
+    return null;
+  }
+
+  String _translateSourceLabel() {
+    final target = _pickTranslateTarget();
+    if (target == null) return '外语';
+    final code = _parseLanguageCode(target.language) ?? _parseLanguageCode(target.name);
+    return const {
+      'en': 'English',
+      'ja': '日语',
+      'ko': '韩语',
+      'fr': '法语',
+      'de': '德语',
+      'es': '西班牙语',
+      'ru': '俄语',
+      'it': '意大利语',
+      'th': '泰语',
+    }[code] ?? '外语';
+  }
+
   String? _pickTrack({bool preferForeign = false}) {
     final tracks = widget.snapshot.subtitleTracks;
     if (preferForeign) {
-      for (final t in tracks) {
-        final l = (t.language ?? t.name).toLowerCase();
-        if (t.source != PlaybackTrackSource.ai && !l.contains('zh') && !l.contains('chi') && !l.contains('中')) return t.id;
-      }
+      final foreign = _pickTranslateTarget();
+      if (foreign != null) return foreign.id;
     }
     return widget.snapshot.selectedSubtitleId ?? (tracks.isNotEmpty ? tracks.first.id : null);
   }
@@ -344,7 +463,7 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
         ]),
         if (state == null || state == AiRunState.cancelled) ...[
           SizedBox(height: s.rem(0.75)),
-          Text('把外语对白听写成文字，再译成简体中文。约 40 秒后开始出字，之后一直领先播放进度。', style: t.bodyStyle(s.rem(0.875), color: pal.isPaper ? pal.subInk : const Color.fromRGBO(255, 255, 255, 0.72), height: 1.55)),
+          Text('把${_sourceAudioLanguage()}对白听写成文字，再译成简体中文。约 40 秒后开始出字，之后一直领先播放进度。', style: t.bodyStyle(s.rem(0.875), color: pal.isPaper ? pal.subInk : const Color.fromRGBO(255, 255, 255, 0.72), height: 1.55)),
           SizedBox(height: s.rem(1.0)),
           EvPanelButton(
             key: const Key('ev_ai_start'), primary: true, icon: EvIcons.aisub, label: '开始生成',
@@ -474,7 +593,7 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
 
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
       Row(spacing: s.rem(0.5), children: [
-        tile(const Key('ev_ai_translate'), EvIcons.lang, '翻译字幕', '外语 → 中文', () => unawaited(_runTrackAction(true))),
+        tile(const Key('ev_ai_translate'), EvIcons.lang, '翻译字幕', '${_translateSourceLabel()} → 中文', () => unawaited(_runTrackAction(true))),
         tile(const Key('ev_ai_align'), EvIcons.clock, '校正时间轴', '按对白对齐', () => unawaited(_runTrackAction(false))),
         tile(const Key('ev_ai_season'), EvIcons.stack, '整季生成', hasSeries ? '后台排队' : '仅剧集可用', () => unawaited(_runSeasonAction(confirm: false))),
       ]),

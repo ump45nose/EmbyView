@@ -294,7 +294,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.getRect(find.byKey(const Key('video_child'))), const Rect.fromLTWH(0, 0, 1440, 900));
 
-      // Panel open inset: left 1rem(16), top 1rem(16), right 30rem(480), bottom 1rem(16)
+      // Panel open inset: available area is left 1rem(16), top 1rem(16), right 30rem(480), bottom 1rem(16)
+      // (944x868), inside which 16:9 video is letterboxed centered (944x531 -> top 184.5, bottom 715.5) with zero radius.
       await tester.pumpWidget(
         _wrap(
           size: size,
@@ -312,11 +313,16 @@ void main() {
       await tester.pumpAndSettle();
       final panelRect = tester.getRect(find.byKey(const Key('video_child')));
       expect(panelRect.left, closeTo(16.0, 0.5));
-      expect(panelRect.top, closeTo(16.0, 0.5));
       expect(panelRect.right, closeTo(1440.0 - 480.0, 0.5));
-      expect(panelRect.bottom, closeTo(900.0 - 16.0, 0.5));
+      expect(panelRect.width, closeTo(944.0, 0.5));
+      expect(panelRect.height, closeTo(944.0 * 9 / 16, 0.5));
+      expect(panelRect.top, closeTo(16.0 + (868.0 - 531.0) / 2, 0.5));
+      expect(panelRect.bottom, closeTo(900.0 - 16.0 - (868.0 - 531.0) / 2, 0.5));
+      expect(panelRect.width / panelRect.height, closeTo(16 / 9, 0.005));
+      final panelBox = tester.widget<AnimatedContainer>(find.byKey(const Key('ev_credits_video_frame_box')));
+      expect((panelBox.decoration as BoxDecoration).borderRadius, BorderRadius.zero);
 
-      // Credits active -> shrinks to bottom-left (scale 0.36, left = 72 - 28.8 = 43.2, bottom = 900 - 36 = 864)
+      // Credits active -> shrinks to bottom-left (scale 0.36, left = 72 - 28.8 = 43.2, bottom = 900 - 36 = 864) with radius
       await tester.pumpWidget(
         _wrap(
           size: size,
@@ -337,6 +343,8 @@ void main() {
       expect(miniRect.height, closeTo(900 * 0.36, 1.0));
       expect(miniRect.left, closeTo(72.0 - 28.8, 1.0));
       expect(miniRect.bottom, closeTo(900.0 - 36.0, 1.0));
+      final creditsBox = tester.widget<AnimatedContainer>(find.byKey(const Key('ev_credits_video_frame_box')));
+      expect((creditsBox.decoration as BoxDecoration).borderRadius, BorderRadius.circular(40.0));
 
       await tester.tapAt(miniRect.center);
       await tester.pump();
