@@ -3,6 +3,7 @@ library;
 
 import 'dart:async';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -23,6 +24,7 @@ import '../data/services/media_server_client_factory.dart';
 import '../data/services/theme_music_service.dart';
 import '../playback/aether_backend.dart';
 import 'data/accounts.dart';
+import 'data/diagnostics_exporter.dart';
 import 'data/emby_media_data.dart';
 import 'embyview.dart';
 import 'playback/immersion.dart';
@@ -196,6 +198,10 @@ Widget buildStageFourTestShell({
   String? initialDetailId, bool initialSearch = false, EvSettingsSection? initialSettings,
   bool initialUsers = false, bool openZoneEditorOnMount = false,
   bool showOnboardingOverlay = false,
+  EvShellController? shellController,
+  EvNoticeState? initialNotice,
+  bool initialShortcutsOpen = false,
+  Future<void> Function()? onExportDiagnostics,
   VoidCallback? onSignedOutToUserPicker,
   VoidCallback? onSwitchServer,
   VoidCallback? onAddAccount,
@@ -208,6 +214,10 @@ Widget buildStageFourTestShell({
         : initialSettings != null ? _S4Settings(0, section: initialSettings, openZoneEditor: openZoneEditorOnMount)
         : initialUsers ? const _S4Users(0) : null,
     showOnboardingOverlay: showOnboardingOverlay,
+    shellController: shellController,
+    initialNotice: initialNotice,
+    initialShortcutsOpen: initialShortcutsOpen,
+    onExportDiagnostics: onExportDiagnostics,
     onSignedOutToUserPicker: onSignedOutToUserPicker,
     onSwitchServer: onSwitchServer,
     onAddAccount: onAddAccount,
@@ -278,6 +288,10 @@ class _StageFourShellHost extends StatefulWidget {
     this.initialDestination,
     this.initialEntry,
     this.showOnboardingOverlay = true,
+    this.shellController,
+    this.initialNotice,
+    this.initialShortcutsOpen = false,
+    this.onExportDiagnostics,
     this.onSignedOutToUserPicker,
     this.onSwitchServer,
     this.onAddAccount,
@@ -286,6 +300,10 @@ class _StageFourShellHost extends StatefulWidget {
   final EvShellDestination? initialDestination;
   final _S4Entry? initialEntry;
   final bool showOnboardingOverlay;
+  final EvShellController? shellController;
+  final EvNoticeState? initialNotice;
+  final bool initialShortcutsOpen;
+  final Future<void> Function()? onExportDiagnostics;
   final VoidCallback? onSignedOutToUserPicker;
   final VoidCallback? onSwitchServer;
   final VoidCallback? onAddAccount;
@@ -295,11 +313,16 @@ class _StageFourShellHost extends StatefulWidget {
 class _StageFourShellHostState extends State<_StageFourShellHost> {
   late _StageThreeRuntime _runtime;
   late EvShellController _shell;
+  late bool _ownsShell;
   late EvShellDestination _lastShellDest;
+  late bool _lastShortcutsOpen;
+  EvNoticeState? _lastNotice;
   late LocalPreferences _prefs;
   late AccountSnapshot _account;
   StreamSubscription<LocalPreferences>? _prefsSub;
   StreamSubscription<AccountSnapshot>? _accountsSub;
+  StreamSubscription<ConnectionNoticeEvent>? _noticeSub;
+  Object? _menuToken;
   final _quickLook = EvQuickLookController(), _palette = EvCommandPaletteController();
   final _shellScope = FocusScopeNode(debugLabel: 'ev_shell_scope');
   final _s4Scope = FocusScopeNode(debugLabel: 'ev_stage4_scope'), _s4MenuScope = FocusScopeNode(debugLabel: 'ev_stage4_menu_scope');
@@ -311,22 +334,54 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   void initState() {
     super.initState();
     _runtime = _StageThreeRuntime.acquire(widget.services);
-    _shell = EvShellController(
-      initial: widget.initialDestination ?? const EvHomeDestination(),
-      onOpenDetail: _openDetail, onOpenSearch: _openSearch, onOpenSettings: _openSettings,
-      onOpenUsers: _openUsers, onManageZones: () => _openSettings(section: EvSettingsSection.zones),
-      onSignedOutToUserPicker: _handleSignedOutToUserPicker,
-      onSwitchServer: _handleSwitchServer,
-      onAddAccount: _handleAddAccount,
-    )..addListener(_onShellChanged);
+    _ownsShell = widget.shellController == null;
+    _shell = widget.shellController ??
+        EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
+    _bindShellCallbacks(_shell);
+    _shell.addListener(_onShellChanged);
+    if (widget.initialNotice != null) {
+      _shell.showNotice(widget.initialNotice!);
+    }
+    if (widget.initialShortcutsOpen) {
+      _shell.showShortcuts();
+    }
     _lastShellDest = _shell.current;
+    _lastShortcutsOpen = _shell.shortcutsOpen;
+    _lastNotice = _shell.notice;
     if (widget.initialEntry != null) { _s4Stack.add((entry: widget.initialEntry!, saved: null, savedFocus: null)); _shellMounted = false; }
     _attachServices(widget.services);
+    HardwareKeyboard.instance.addHandler(_onGlobalHardwareKey);
+    _menuToken = EvMenuChannel.instance.registerHandler(
+      (action, _) => _shell.handleMenuAction(action),
+    );
     if (_s4Stack.isNotEmpty) _focusStageFourLater();
   }
 
+  void _bindShellCallbacks(EvShellController shell) {
+    shell.onOpenDetail = _openDetail;
+    shell.onOpenSearch = _openSearch;
+    shell.onOpenSettings = _openSettings;
+    shell.onOpenAbout = () => _openSettings(section: EvSettingsSection.about);
+    shell.onOpenServerSettings = () => _openSettings(section: EvSettingsSection.account);
+    shell.onOpenUsers = _openUsers;
+    shell.onManageZones = () => _openSettings(section: EvSettingsSection.zones);
+    shell.onSignedOutToUserPicker = _handleSignedOutToUserPicker;
+    shell.onSignOut = _handleMenuSignOut;
+    shell.onSwitchServer = _handleSwitchServer;
+    shell.onAddAccount = _handleAddAccount;
+    shell.onToggleCommandPalette = _toggleCommandPalette;
+    shell.onBack = _handleUnifiedBack;
+    shell.onGoHome = () => _returnToShell(const EvHomeDestination(), _shell.goHome, resetHero: true);
+    shell.onOpenZoneById = (z) => _returnToShell(EvZoneDestination(z), () => _shell.openZone(z));
+    shell.onExportDiagnostics = _handleExportDiagnostics;
+    shell.onRetryConnection = _handleRetryConnection;
+  }
+
   void _attachServices(EmbyViewServices services) {
-    unawaited(_prefsSub?.cancel()); unawaited(_accountsSub?.cancel());
+    unawaited(_prefsSub?.cancel());
+    unawaited(_accountsSub?.cancel());
+    unawaited(_noticeSub?.cancel());
+    _noticeSub = null;
     _prefs = services.preferences.current; _account = services.accounts.snapshot;
     _prefsSub = services.preferences.changes.listen((next) {
       String sig(List<ZonePreference> zs) => zs.map((z) => '${z.id}:${z.name}:${z.iconKey}:${z.colorSlot}').join('|');
@@ -336,6 +391,13 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
       if (zc && !_shellMounted) unawaited(_loadZones(services, force: true));
     });
     _accountsSub = services.accounts.changes.listen((next) { if (mounted) setState(() => _account = next); });
+    try {
+      _noticeSub = services.accounts.connectionNotices.listen(
+        _shell.handleConnectionNotice,
+      );
+    } on NoSuchMethodError catch (_) {
+      _noticeSub = null;
+    }
     if (!_shellMounted && _shell.zones.isEmpty) unawaited(_loadZones(services, force: false));
   }
 
@@ -361,14 +423,146 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
 
   @override
   void dispose() {
-    unawaited(_prefsSub?.cancel()); unawaited(_accountsSub?.cancel());
-    _shell..removeListener(_onShellChanged)..dispose();
+    HardwareKeyboard.instance.removeHandler(_onGlobalHardwareKey);
+    if (_menuToken != null) {
+      EvMenuChannel.instance.unregisterHandler(_menuToken!);
+      _menuToken = null;
+    }
+    unawaited(_prefsSub?.cancel());
+    unawaited(_accountsSub?.cancel());
+    unawaited(_noticeSub?.cancel());
+    _shell.removeListener(_onShellChanged);
+    if (_ownsShell) _shell.dispose();
     _quickLook.dispose(); _palette.dispose(); _shellScope.dispose(); _s4Scope.dispose(); _s4MenuScope.dispose();
     _runtime.release(); super.dispose();
   }
 
-  void _onShellChanged() { if (mounted && _shell.current != _lastShellDest) { _lastShellDest = _shell.current; _closeOverlays(); } }
-  void _closeOverlays({bool rebuild = true}) { _quickLook.close(); _palette.close(); if (_avatarMenuOpen) { _avatarMenuOpen = false; if (rebuild && mounted) setState(() {}); } }
+  void _onShellChanged() {
+    if (!mounted) return;
+    final destChanged = _shell.current != _lastShellDest;
+    final shortcutsChanged = _shell.shortcutsOpen != _lastShortcutsOpen;
+    final noticeChanged = _shell.notice != _lastNotice;
+    if (destChanged) {
+      _lastShellDest = _shell.current;
+      _closeOverlays();
+    }
+    if (shortcutsChanged || noticeChanged) {
+      _lastShortcutsOpen = _shell.shortcutsOpen;
+      _lastNotice = _shell.notice;
+      setState(() {});
+    }
+  }
+
+  void _closeOverlays({bool rebuild = true}) {
+    _quickLook.close();
+    _palette.close();
+    _shell.closeShortcuts();
+    if (_avatarMenuOpen) { _avatarMenuOpen = false; if (rebuild && mounted) setState(() {}); }
+  }
+
+  void _toggleCommandPalette() {
+    _shell.closeShortcuts();
+    _palette.toggle();
+  }
+
+  void _handleMenuSignOut() {
+    _closeOverlays(rebuild: true);
+    unawaited(() async {
+      try {
+        await widget.services.accounts.signOut();
+      } on NoSuchMethodError catch (_) {
+      } catch (_) {
+      } finally {
+        _handleSignedOutToUserPicker();
+      }
+    }());
+  }
+
+  Future<void> _handleExportDiagnostics() async {
+    if (widget.onExportDiagnostics != null) {
+      await widget.onExportDiagnostics!();
+      return;
+    }
+    await evExportDiagnosticsViaDialog();
+  }
+
+  void _handleRetryConnection() {
+    try {
+      unawaited(widget.services.accounts.retryConnection());
+    } on NoSuchMethodError catch (_) {}
+  }
+
+  bool get _isShowingOnboarding =>
+      widget.showOnboardingOverlay &&
+      _s4Stack.isEmpty &&
+      !_onboardingDismissedLocally &&
+      !_prefs.onboardingDismissed &&
+      _shell.current is EvHomeDestination;
+
+  bool _handleUnifiedBack() {
+    if (_shell.shortcutsOpen) {
+      _shell.closeShortcuts();
+      return true;
+    }
+    if (_palette.isOpen) {
+      _palette.close();
+      return true;
+    }
+    if (_quickLook.isOpen) {
+      _quickLook.close();
+      return true;
+    }
+    if (_avatarMenuOpen) {
+      setState(() => _avatarMenuOpen = false);
+      return true;
+    }
+    if (_shell.onCloseAvatarMenu?.call() == true) {
+      return true;
+    }
+    if (_isShowingOnboarding) {
+      setState(() => _onboardingDismissedLocally = true);
+      return true;
+    }
+    if (_s4Stack.isNotEmpty) {
+      _popStageFour();
+      return true;
+    }
+    if (_shell.pop()) {
+      return true;
+    }
+    if (Navigator.canPop(context)) {
+      unawaited(Navigator.maybePop(context));
+      return true;
+    }
+    // At Home with no overlays open: intentionally do nothing (never show exit dialog).
+    return false;
+  }
+
+  bool _onGlobalHardwareKey(KeyEvent event) {
+    if (!mounted || event is! KeyDownEvent) return false;
+    if (ModalRoute.of(context)?.isCurrent == false) return false;
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (_shell.shortcutsOpen) {
+        _shell.closeShortcuts();
+        return true;
+      }
+      final primary = FocusManager.instance.primaryFocus;
+      if (primary == null || primary == FocusManager.instance.rootScope) {
+        _handleUnifiedBack();
+        return true;
+      }
+      return false;
+    }
+    final action = evResolveShellMenuAction(
+      event,
+      isEditingText: evIsTextInputFocused(),
+    );
+    if (action == null) return false;
+    return EvMenuChannel.instance.dispatchAction(
+      action,
+      source: EvMenuActionSource.keyboard,
+    );
+  }
 
   _StageSnap _captureSnap() => (
     mode: _runtime.stage.mode, baseBackdrop: _runtime.stage.baseBackdrop, scrollProgress: _runtime.stage.scrollProgress,
@@ -447,7 +641,10 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
 
   void _popStageFour() {
     _closeOverlays(rebuild: false);
-    if (_s4Stack.isEmpty) { if (!_shell.pop()) unawaited(Navigator.maybePop(context)); return; }
+    if (_s4Stack.isEmpty) {
+      if (!_shell.pop() && Navigator.canPop(context)) unawaited(Navigator.maybePop(context));
+      return;
+    }
     if (_s4Stack.length == 1 && _s4Stack.first.saved == null && Navigator.canPop(context)) { unawaited(Navigator.maybePop(context)); return; }
     final popped = _s4Stack.removeLast(), backToShell = _s4Stack.isEmpty;
     if (backToShell) _shellMounted = true;
@@ -553,59 +750,73 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   @override
   Widget build(BuildContext context) {
     final showingStageFour = _s4Stack.isNotEmpty;
-    final showOnboarding = widget.showOnboardingOverlay &&
-        !showingStageFour &&
-        !_onboardingDismissedLocally &&
-        !_prefs.onboardingDismissed &&
-        _shell.current is EvHomeDestination;
+    final showOnboarding = _isShowingOnboarding;
+    final activeNotice = _shell.notice;
+    final shortcutsOpen = _shell.shortcutsOpen;
     return EvThemeScope(
       preferences: widget.services.preferences,
       child: EvScope(
         services: widget.services, stage: _runtime.stage, immersion: _runtime.immersion, shell: _shell,
-        child: EvQuickLookHost(
-          controller: _quickLook,
-          isSuppressed: () => showOnboarding || _palette.isOpen || ModalRoute.of(context)?.isCurrent == false,
-          resolveFocusTarget: _resolveEpisodeQuickLook, onOpenDetail: _openDetail,
-          child: EvCommandPaletteHost(
-            controller: _palette, onBeforeOpen: _quickLook.close,
-            onOpenDetail: _openDetail, onOpenSearch: _openSearch, onOpenSettings: _openSettings, onOpenUsers: _openUsers,
-            onAddZone: () => _openSettings(section: EvSettingsSection.zones, openZoneEditor: true),
-            onOpenZone: (z) => _returnToShell(EvZoneDestination(z), () => _shell.openZone(z)),
-            child: Stack(fit: StackFit.expand, children: [
-              if (_shellMounted)
-                ExcludeFocus(
-                  excluding: showingStageFour || showOnboarding,
-                  child: Offstage(
-                    offstage: showingStageFour,
-                    child: TickerMode(
-                      enabled: !showingStageFour,
-                      child: EvShell(
-                        services: widget.services, initialDestination: widget.initialDestination,
-                        controller: _shell, stage: _runtime.stage, immersion: _runtime.immersion,
-                        focusScopeNode: _shellScope,
-                        onConfigureWindow: () => _macWin(() => windowManager.setTitleBarStyle(TitleBarStyle.hidden, windowButtonVisibility: true)),
-                        windowDragBuilder: _buildMacWindowDragArea,
-                        homeBuilder: (_) => const EvHomePage(), zoneBuilder: (_, z) => EvZonePage(zoneId: z),
-                        wallBuilder: (_, q, t) => EvWallPage(initialQuery: q, title: t),
+        child: Stack(fit: StackFit.expand, children: [
+          EvQuickLookHost(
+            controller: _quickLook,
+            isSuppressed: () => showOnboarding || _palette.isOpen || shortcutsOpen || ModalRoute.of(context)?.isCurrent == false,
+            resolveFocusTarget: _resolveEpisodeQuickLook, onOpenDetail: _openDetail,
+            child: EvCommandPaletteHost(
+              controller: _palette, onBeforeOpen: () { _quickLook.close(); _shell.closeShortcuts(); },
+              onOpenDetail: _openDetail, onOpenSearch: _openSearch, onOpenSettings: _openSettings, onOpenUsers: _openUsers,
+              onAddZone: () => _openSettings(section: EvSettingsSection.zones, openZoneEditor: true),
+              onOpenZone: (z) => _returnToShell(EvZoneDestination(z), () => _shell.openZone(z)),
+              child: Stack(fit: StackFit.expand, children: [
+                if (_shellMounted)
+                  ExcludeFocus(
+                    excluding: showingStageFour || showOnboarding || shortcutsOpen,
+                    child: Offstage(
+                      offstage: showingStageFour,
+                      child: TickerMode(
+                        enabled: !showingStageFour,
+                        child: EvShell(
+                          services: widget.services, initialDestination: widget.initialDestination,
+                          controller: _shell, stage: _runtime.stage, immersion: _runtime.immersion,
+                          focusScopeNode: _shellScope,
+                          renderGlobalOverlays: false,
+                          onConfigureWindow: () => _macWin(() => windowManager.setTitleBarStyle(TitleBarStyle.hidden, windowButtonVisibility: true)),
+                          windowDragBuilder: _buildMacWindowDragArea,
+                          homeBuilder: (_) => const EvHomePage(), zoneBuilder: (_, z) => EvZonePage(zoneId: z),
+                          wallBuilder: (_, q, t) => EvWallPage(initialQuery: q, title: t),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              if (showOnboarding)
-                Positioned.fill(
-                  child: EvOnboardingCard(
-                    preferences: widget.services.preferences,
-                    profile: _account.current,
-                    onDismissed: () {
-                      if (mounted) setState(() => _onboardingDismissedLocally = true);
-                    },
-                    onOpenAiSettings: () => _openSettings(section: EvSettingsSection.ai),
+                if (showOnboarding)
+                  Positioned.fill(
+                    child: EvOnboardingCard(
+                      preferences: widget.services.preferences,
+                      profile: _account.current,
+                      onDismissed: () {
+                        if (mounted) setState(() => _onboardingDismissedLocally = true);
+                      },
+                      onOpenAiSettings: () => _openSettings(section: EvSettingsSection.ai),
+                    ),
                   ),
-                ),
-              if (showingStageFour) Positioned.fill(child: _buildStageFourFrame(context, _s4Stack.last.entry)),
-            ]),
+                if (showingStageFour) Positioned.fill(child: _buildStageFourFrame(context, _s4Stack.last.entry)),
+                if (activeNotice != null)
+                  Positioned.fill(
+                    child: EvNoticeCapsule(
+                      notice: activeNotice,
+                      onRetry: _handleRetryConnection,
+                      onOpenServerSettings: () => _openSettings(section: EvSettingsSection.account),
+                      onDismiss: _shell.dismissNotice,
+                    ),
+                  ),
+              ]),
+            ),
           ),
-        ),
+          if (shortcutsOpen)
+            Positioned.fill(
+              child: EvShortcutsOverlay(onClose: _shell.closeShortcuts),
+            ),
+        ]),
       ),
     );
   }
@@ -627,17 +838,11 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
       return Shortcuts(
         shortcuts: const <ShortcutActivator, Intent>{
           SingleActivator(LogicalKeyboardKey.escape): _S4Cmd('esc'),
-          SingleActivator(LogicalKeyboardKey.keyF, meta: true): _S4Cmd('search'),
-          SingleActivator(LogicalKeyboardKey.keyF, control: true): _S4Cmd('search'),
-          SingleActivator(LogicalKeyboardKey.comma, meta: true): _S4Cmd('settings'),
-          SingleActivator(LogicalKeyboardKey.comma, control: true): _S4Cmd('settings'),
         },
         child: Actions(
           actions: <Type, Action<Intent>>{
             _S4Cmd: CallbackAction<_S4Cmd>(onInvoke: (i) {
-              if (i.kind == 'esc') { _avatarMenuOpen ? setState(() => _avatarMenuOpen = false) : _popStageFour(); }
-              else if (i.kind == 'search') { _openSearch(); }
-              else if (i.kind == 'settings') { _openSettings(); }
+              if (i.kind == 'esc') { _handleUnifiedBack(); }
               return null;
             }),
           },
@@ -1130,6 +1335,53 @@ String resolveEmbyViewColdStartRoute({required bool chooseUserOnStartup}) =>
 
 bool isEmbyViewPath(String path) =>
     path == embyViewHomePath || path.startsWith('$embyViewHomePath/');
+
+bool isEmbyViewRoutePath(String path) =>
+    isEmbyViewPath(path) ||
+    path == embyViewLoginPath ||
+    path.startsWith('$embyViewLoginPath/');
+
+/// Whether the running app is currently in EmbyView mode (suppressing legacy
+/// banners, in-app update checks, exit confirmation dialog, F1, and legacy
+/// shortcut reference).
+bool isEmbyViewAppMode({
+  required String path,
+  required bool isMacOS,
+  bool? embyServersOnly,
+}) {
+  if (isEmbyViewRoutePath(path)) return true;
+  if (!isMacOS) return false;
+  if (installedEmbyViewEntry != null) return true;
+  if (embyServersOnly != null) return embyServersOnly;
+  try {
+    if (GetIt.instance.isRegistered<ServerRepository>()) {
+      final servers = GetIt.instance<ServerRepository>().servers;
+      return servers.every((s) => s.serverType == ServerType.emby);
+    }
+  } catch (_) {}
+  return true;
+}
+
+/// Prompts for a save location and exports sanitized diagnostic logs via
+/// [EvDiagnosticsExporter]. Used by the macOS "帮助 → 导出诊断日志" menu item.
+Future<EvDiagnosticsExportResult?> evExportDiagnosticsViaDialog({
+  EvDiagnosticsExporter exporter = const EvDiagnosticsExporter(),
+}) async {
+  final ts = DateTime.now().toIso8601String().replaceAll(':', '').split('.').first;
+  String? path;
+  try {
+    path = await FilePicker.saveFile(
+      dialogTitle: '导出诊断日志',
+      fileName: 'EmbyView-diagnostics-$ts.log',
+      type: FileType.custom,
+      allowedExtensions: const ['log', 'txt'],
+    );
+  } catch (_) {
+    return null;
+  }
+  if (path == null || path.isEmpty) return null;
+  return exporter.exportSanitizedBundle(destinationPath: path);
+}
 
 /// The caller supplies verified platform, server and authentication state.
 String? embyViewRouteRedirect({

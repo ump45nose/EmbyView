@@ -6,7 +6,10 @@ import 'package:flutter/services.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/shelf/ev_card.dart';
 import 'package:moonfin/embyview/ui/shell/ev_avatar_menu.dart';
+import 'package:moonfin/embyview/ui/shell/ev_menu_channel.dart';
+import 'package:moonfin/embyview/ui/shell/ev_notice_capsule.dart';
 import 'package:moonfin/embyview/ui/shell/ev_scope.dart';
+import 'package:moonfin/embyview/ui/shell/ev_shortcuts_overlay.dart';
 import 'package:moonfin/embyview/ui/shell/ev_top_bar.dart';
 import 'package:moonfin/embyview/ui/stage/ev_stage.dart';
 import 'package:moonfin/embyview/ui/stage/ev_stage_controller.dart';
@@ -24,7 +27,7 @@ class EvShell extends StatefulWidget {
     this.stage, this.immersion, this.focusScopeNode,
     this.homeBuilder, this.zoneBuilder, this.wallBuilder,
     this.configureWindow = true, this.onConfigureWindow, this.windowDragBuilder,
-    this.enableStageMotion = true,
+    this.enableStageMotion = true, this.renderGlobalOverlays = true,
   });
 
   final EmbyViewServices services;
@@ -36,7 +39,7 @@ class EvShell extends StatefulWidget {
   final WidgetBuilder? homeBuilder;
   final Widget Function(BuildContext context, String zoneId)? zoneBuilder;
   final Widget Function(BuildContext context, WallQuery query, String? title)? wallBuilder;
-  final bool configureWindow, enableStageMotion;
+  final bool configureWindow, enableStageMotion, renderGlobalOverlays;
   final FutureOr<void> Function()? onConfigureWindow;
   final WidgetBuilder? windowDragBuilder;
 
@@ -52,9 +55,13 @@ class _EvShellState extends State<EvShell> {
   late bool _ownsShell;
   late EvShellDestination _lastDestination;
   late List<ZoneTile> _lastZones;
+  late bool _lastShortcutsOpen;
+  EvNoticeState? _lastNotice;
 
   StreamSubscription<LocalPreferences>? _prefsSub;
   StreamSubscription<AccountSnapshot>? _accountsSub;
+  StreamSubscription<ConnectionNoticeEvent>? _noticeSub;
+  Object? _menuToken;
   late LocalPreferences _prefs;
   late AccountSnapshot _account;
   bool _avatarMenuOpen = false;
@@ -91,9 +98,18 @@ class _EvShellState extends State<EvShell> {
     _shell = widget.controller ?? EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
     _lastDestination = _shell.current;
     _lastZones = _shell.zones;
+    _lastShortcutsOpen = _shell.shortcutsOpen;
+    _lastNotice = _shell.notice;
+    _shell.onCloseAvatarMenu = _closeMenuIfOpen;
     _scheduleStageSyncForDestination(_lastDestination, allowSync: _ownsStage);
     _shell.addListener(_onShellChanged);
     _attachServices(widget.services, initial: true);
+    if (widget.renderGlobalOverlays) {
+      HardwareKeyboard.instance.addHandler(_onHardwareKey);
+      _menuToken = EvMenuChannel.instance.registerHandler(
+        (action, _) => _handleLocalMenuAction(action),
+      );
+    }
     if (widget.configureWindow && widget.onConfigureWindow != null) {
       unawaited(() async { try { await widget.onConfigureWindow!(); } catch (_) {} }());
     }
@@ -115,13 +131,34 @@ class _EvShellState extends State<EvShell> {
     }
     if (old.controller != widget.controller) {
       _shell.removeListener(_onShellChanged);
+      if (identical(_shell.onCloseAvatarMenu, _closeMenuIfOpen)) {
+        _shell.onCloseAvatarMenu = null;
+      }
       if (_ownsShell) _shell.dispose();
       _ownsShell = widget.controller == null;
       _shell = widget.controller ?? EvShellController(initial: widget.initialDestination ?? const EvHomeDestination());
+      _shell.onCloseAvatarMenu = _closeMenuIfOpen;
       _lastDestination = _shell.current;
       _lastZones = _shell.zones;
+      _lastShortcutsOpen = _shell.shortcutsOpen;
+      _lastNotice = _shell.notice;
       _scheduleStageSyncForDestination(_lastDestination, allowSync: false);
       _shell.addListener(_onShellChanged);
+    }
+    if (old.renderGlobalOverlays != widget.renderGlobalOverlays) {
+      if (widget.renderGlobalOverlays) {
+        HardwareKeyboard.instance.addHandler(_onHardwareKey);
+        _menuToken ??= EvMenuChannel.instance.registerHandler(
+          (action, _) => _handleLocalMenuAction(action),
+        );
+      } else {
+        HardwareKeyboard.instance.removeHandler(_onHardwareKey);
+        if (_menuToken != null) {
+          EvMenuChannel.instance.unregisterHandler(_menuToken!);
+          _menuToken = null;
+        }
+      }
+      _attachNoticeStream(widget.services);
     }
     if (!identical(old.services, widget.services) || old.services.sessionId != widget.services.sessionId) {
       final next = widget.services;
@@ -146,7 +183,21 @@ class _EvShellState extends State<EvShell> {
       if (zc) unawaited(_loadZones(services, force: true));
     });
     _accountsSub = services.accounts.changes.listen((next) { if (mounted) setState(() => _account = next); });
+    _attachNoticeStream(services);
     if (_shell.zones.isEmpty || !initial) unawaited(_loadZones(services, force: !initial));
+  }
+
+  void _attachNoticeStream(EmbyViewServices services) {
+    unawaited(_noticeSub?.cancel());
+    _noticeSub = null;
+    if (!widget.renderGlobalOverlays) return;
+    try {
+      _noticeSub = services.accounts.connectionNotices.listen(
+        _shell.handleConnectionNotice,
+      );
+    } on NoSuchMethodError catch (_) {
+      _noticeSub = null;
+    }
   }
 
   Future<void> _loadZones(EmbyViewServices services, {required bool force}) async {
@@ -189,9 +240,13 @@ class _EvShellState extends State<EvShell> {
     if (!mounted) return;
     final destChanged = _shell.current != _lastDestination;
     final zonesChanged = !identical(_shell.zones, _lastZones);
-    if (!destChanged && !zonesChanged) return;
+    final shortcutsChanged = _shell.shortcutsOpen != _lastShortcutsOpen;
+    final noticeChanged = _shell.notice != _lastNotice;
+    if (!destChanged && !zonesChanged && !shortcutsChanged && !noticeChanged) return;
     _lastDestination = _shell.current;
     _lastZones = _shell.zones;
+    _lastShortcutsOpen = _shell.shortcutsOpen;
+    _lastNotice = _shell.notice;
     if (destChanged) {
       if (_avatarMenuOpen) _avatarMenuOpen = false;
       _syncStageForDestination(_lastDestination);
@@ -199,8 +254,61 @@ class _EvShellState extends State<EvShell> {
     setState(() {});
   }
 
-  void _handleBack(BuildContext context) {
-    if (!_shell.pop()) unawaited(Navigator.maybePop(context));
+  bool _handleBack(BuildContext context) {
+    if (_shell.shortcutsOpen) {
+      _shell.closeShortcuts();
+      return true;
+    }
+    if (_avatarMenuOpen) {
+      _closeMenu();
+      return true;
+    }
+    if (_shell.pop()) return true;
+    if (Navigator.canPop(context)) {
+      unawaited(Navigator.maybePop(context));
+      return true;
+    }
+    return false;
+  }
+
+  bool _handleLocalMenuAction(String action) {
+    if (action == EvMenuAction.back) {
+      return _handleBack(context);
+    }
+    return _shell.handleMenuAction(action);
+  }
+
+  bool _onHardwareKey(KeyEvent event) {
+    if (!mounted || !widget.renderGlobalOverlays || event is! KeyDownEvent) {
+      return false;
+    }
+    if (ModalRoute.of(context)?.isCurrent == false) return false;
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (_shell.shortcutsOpen) {
+        _shell.closeShortcuts();
+        return true;
+      }
+      final primary = FocusManager.instance.primaryFocus;
+      if (primary == null || primary == FocusManager.instance.rootScope) {
+        return _handleBack(context);
+      }
+      return false;
+    }
+    final action = evResolveShellMenuAction(
+      event,
+      isEditingText: evIsTextInputFocused(),
+    );
+    if (action == null) return false;
+    return EvMenuChannel.instance.dispatchAction(
+      action,
+      source: EvMenuActionSource.keyboard,
+    );
+  }
+
+  bool _closeMenuIfOpen() {
+    if (!_avatarMenuOpen) return false;
+    _closeMenu();
+    return true;
   }
 
   void _toggleMenu() {
@@ -219,8 +327,19 @@ class _EvShellState extends State<EvShell> {
 
   @override
   void dispose() {
+    if (widget.renderGlobalOverlays) {
+      HardwareKeyboard.instance.removeHandler(_onHardwareKey);
+      if (_menuToken != null) {
+        EvMenuChannel.instance.unregisterHandler(_menuToken!);
+        _menuToken = null;
+      }
+    }
     unawaited(_prefsSub?.cancel());
     unawaited(_accountsSub?.cancel());
+    unawaited(_noticeSub?.cancel());
+    if (identical(_shell.onCloseAvatarMenu, _closeMenuIfOpen)) {
+      _shell.onCloseAvatarMenu = null;
+    }
     _shell.removeListener(_onShellChanged);
     if (_ownsShell) _shell.dispose();
     if (_ownsShellScope) _shellScope.dispose();
@@ -247,21 +366,17 @@ class _EvShellState extends State<EvShell> {
                 SingleActivator(LogicalKeyboardKey.arrowDown): DirectionalFocusIntent(TraversalDirection.down),
                 SingleActivator(LogicalKeyboardKey.arrowLeft): DirectionalFocusIntent(TraversalDirection.left),
                 SingleActivator(LogicalKeyboardKey.arrowRight): DirectionalFocusIntent(TraversalDirection.right),
-                SingleActivator(LogicalKeyboardKey.escape): _EvCmd('esc'),
-                SingleActivator(LogicalKeyboardKey.keyF, meta: true): _EvCmd('search'),
-                SingleActivator(LogicalKeyboardKey.keyF, control: true): _EvCmd('search'),
-                SingleActivator(LogicalKeyboardKey.comma, meta: true): _EvCmd('settings'),
-                SingleActivator(LogicalKeyboardKey.comma, control: true): _EvCmd('settings'),
+                SingleActivator(LogicalKeyboardKey.escape): _EvEscapeIntent(),
               },
               child: Actions(
                 actions: <Type, Action<Intent>>{
                   DirectionalFocusIntent: _EvSpatialAction(_shellScope),
-                  _EvCmd: CallbackAction<_EvCmd>(onInvoke: (i) {
-                    if (i.kind == 'esc') { _avatarMenuOpen ? _closeMenu() : _handleBack(context); }
-                    else if (i.kind == 'search') { _shell.onOpenSearch?.call(); }
-                    else if (i.kind == 'settings') { _shell.onOpenSettings?.call(); }
-                    return null;
-                  }),
+                  _EvEscapeIntent: CallbackAction<_EvEscapeIntent>(
+                    onInvoke: (_) {
+                      _handleBack(context);
+                      return null;
+                    },
+                  ),
                 },
                 child: FocusScope(
                   node: _shellScope,
@@ -346,6 +461,30 @@ class _EvShellState extends State<EvShell> {
                               ),
                             ),
                           ],
+                          if (widget.renderGlobalOverlays && _shell.notice != null)
+                            Positioned.fill(
+                              child: EvNoticeCapsule(
+                                notice: _shell.notice!,
+                                onRetry: () {
+                                  if (_shell.onRetryConnection != null) {
+                                    _shell.onRetryConnection!();
+                                  } else {
+                                    try {
+                                      unawaited(widget.services.accounts.retryConnection());
+                                    } on NoSuchMethodError catch (_) {}
+                                  }
+                                },
+                                onOpenServerSettings: () =>
+                                    (_shell.onOpenServerSettings ?? _shell.onOpenSettings)?.call(),
+                                onDismiss: _shell.dismissNotice,
+                              ),
+                            ),
+                          if (widget.renderGlobalOverlays && _shell.shortcutsOpen)
+                            Positioned.fill(
+                              child: EvShortcutsOverlay(
+                                onClose: _shell.closeShortcuts,
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -361,9 +500,8 @@ class _EvShellState extends State<EvShell> {
   }
 }
 
-class _EvCmd extends Intent {
-  const _EvCmd(this.kind);
-  final String kind;
+class _EvEscapeIntent extends Intent {
+  const _EvEscapeIntent();
 }
 
 class _EvSpatialPolicy extends ReadingOrderTraversalPolicy {

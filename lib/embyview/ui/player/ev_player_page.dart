@@ -64,6 +64,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   int _trackSelection = 0;
   EvIconData? _toastIcon;
   Timer? _idleTimer, _pauseTimer, _toastTimer, _auroraFlashTimer;
+  late final EvPlayerMenuDelegate _menuDelegate;
 
   bool get _creditsActive => _snap.creditsPrompt == CreditsPromptState.countingDown && _snap.nextEpisode != null;
   SubtitleSnapshot? get _activeSubSnap => _subSnap?.generation == _snap.generation ? _subSnap : null;
@@ -81,6 +82,52 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     _sessionSub = widget.session.changes.listen(_onSessionSnapshot);
     _syncPauseState(_snap);
     if (_snap.phase == PlaybackPhase.playing) _scheduleIdleHide();
+    _menuDelegate = EvPlayerMenuDelegate(
+      togglePlayPause: _togglePlayPause,
+      seekBack10: () => _seekBy(const Duration(seconds: -10)),
+      seekForward10: () => _seekBy(const Duration(seconds: 10)),
+      nextEpisode: () {
+        if (_snap.nextEpisode != null) {
+          unawaited(widget.session.playNext(finishCurrent: true));
+          _pokeControls();
+        }
+      },
+      toggleSubtitlePanel: () => _togglePanelTab('subs'),
+      triggerAiSubtitle: _triggerAiSubtitleFromMenu,
+      toggleAnime4k: () {
+        unawaited(widget.session.setAnime4k(!_snap.anime4k.requested));
+        _pokeControls();
+      },
+      toggleFullscreen: () {
+        unawaited(widget.session.setFullscreen(!_snap.fullscreen));
+        _pokeControls();
+      },
+    );
+    EvPlayer.registerActivePlayer(_menuDelegate);
+  }
+
+  void _triggerAiSubtitleFromMenu() {
+    if (!_panelOpen || _panelTab != 'subs') {
+      setState(() {
+        _panelOpen = true;
+        _panelTab = 'subs';
+      });
+    }
+    _pokeControls();
+    final panel = _subtitlePanel;
+    final aiState = _activeSubSnap?.ai?.state;
+    final busy = aiState == AiRunState.preparing ||
+        aiState == AiRunState.generating ||
+        aiState == AiRunState.catchingUp;
+    if (panel != null && !busy) {
+      unawaited(
+        panel.startAi().catchError((Object err) {
+          if (mounted) {
+            _showToast(err is EmbyViewFailure ? err.reason : '启动 AI 字幕失败');
+          }
+        }),
+      );
+    }
   }
 
   @override
@@ -309,6 +356,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
 
   @override
   void dispose() {
+    EvPlayer.unregisterActivePlayer(_menuDelegate);
     _idleTimer?.cancel(); _pauseTimer?.cancel(); _toastTimer?.cancel(); _auroraFlashTimer?.cancel();
     unawaited(_sessionSub?.cancel()); unawaited(_subSub?.cancel());
     if (_subtitlePanel != null) unawaited(_subtitlePanel!.close());

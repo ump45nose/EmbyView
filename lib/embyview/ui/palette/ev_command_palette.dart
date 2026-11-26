@@ -76,7 +76,16 @@ class _EvCommandPaletteHostState extends State<EvCommandPaletteHost> {
   bool _onHardwareKey(KeyEvent event) {
     if (!mounted || event is! KeyDownEvent || (ModalRoute.of(context)?.isCurrent == false)) return false;
     final hw = HardwareKeyboard.instance;
-    if (event.logicalKey == LogicalKeyboardKey.keyK && (hw.isMetaPressed || hw.isControlPressed) && !hw.isAltPressed) { _controller.toggle(); return true; }
+    if (event.logicalKey == LogicalKeyboardKey.keyK && (hw.isMetaPressed || hw.isControlPressed) && !hw.isAltPressed) {
+      if (EvMenuChannel.instance.hasHandler) {
+        return EvMenuChannel.instance.dispatchAction(
+          EvMenuAction.commandPalette,
+          source: EvMenuActionSource.keyboard,
+        );
+      }
+      _controller.toggle();
+      return true;
+    }
     if (_controller.isOpen && event.logicalKey == LogicalKeyboardKey.escape) { _controller.close(); return true; }
     return false;
   }

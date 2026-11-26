@@ -7,8 +7,8 @@ import 'package:moonfin/embyview/ui/settings/ev_settings_sections.dart';
 import 'package:moonfin/embyview/ui/settings/ev_settings_widgets.dart';
 import 'package:moonfin/embyview/ui/settings/ev_zone_editor.dart';
 
-/// All 10 settings navigation sections aligned with `.spec/mockups/proto.js`.
-enum EvSettingsSection { account, look, zones, play, immerse, subs, ai, video, keys, about }
+/// All 11 settings navigation sections aligned with `.spec/mockups/proto.js`.
+enum EvSettingsSection { account, look, zones, play, immerse, subs, ai, video, keys, shortcuts, about }
 
 /// Full EmbyView settings page with sidebar navigation, 10 live-bound panes,
 /// and inline custom zone editor overlay.
@@ -233,7 +233,9 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
       (EvSettingsSection.zones, '分区', EvIcons.zones), (EvSettingsSection.play, '播放', EvIcons.play),
       (EvSettingsSection.immerse, '沉浸', EvIcons.film), (EvSettingsSection.subs, '字幕', EvIcons.cc),
       (EvSettingsSection.ai, 'AI 字幕', EvIcons.spark), (EvSettingsSection.video, '画面增强', EvIcons.a4k),
-      (EvSettingsSection.keys, '密钥', EvIcons.key), (EvSettingsSection.about, '关于', EvIcons.info),
+      (EvSettingsSection.keys, '密钥', EvIcons.key),
+      (EvSettingsSection.shortcuts, '快捷键', EvIcons.keyboard),
+      (EvSettingsSection.about, '关于', EvIcons.info),
     ];
     return SingleChildScrollView(
       padding: EdgeInsets.only(bottom: s.rem(3.0)),
@@ -366,6 +368,7 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
       EvSettingsSection.keys => EvKeysSettingsPane(
         origin: origin, savingAddress: _savingTranslationAddress, configuredSecrets: _configuredSecrets, loadingSecrets: _loadingSecrets,
         onSaveSecret: saveSecret),
+      EvSettingsSection.shortcuts => const EvShortcutsSettingsPane(),
       EvSettingsSection.about => const EvAboutSettingsPane(),
     };
   }

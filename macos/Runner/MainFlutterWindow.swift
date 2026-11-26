@@ -189,6 +189,7 @@ class MainFlutterWindow: NSWindow {
   private var sfSymbolChannel: FlutterMethodChannel?
   private var downloadDirChannel: FlutterMethodChannel?
   private var mediaFolderChannel: FlutterMethodChannel?
+  private var menuChannel: FlutterMethodChannel?
   private var accessedMediaURL: URL?
   private var embyViewAudioChannel: EmbyViewAudioChannel?
   private var gameChannel: NativeGameChannel?
@@ -376,6 +377,9 @@ class MainFlutterWindow: NSWindow {
       wrapperProvider: { [weak aetherChannel] in aetherChannel?.player ?? AetherPlayerWrapper() })
     EmbyViewAsrChannel.register(messenger: messenger)
     registerMediaFolderChannel(messenger: messenger)
+    let menuChannel = FlutterMethodChannel(name: "embyview/menu", binaryMessenger: messenger)
+    self.menuChannel = menuChannel
+    (NSApp.delegate as? AppDelegate)?.bindMenuChannel(menuChannel)
     let aetherRegistrar = flutterViewController.registrar(forPlugin: "moonfin_aether_video")
     aetherRegistrar.register(
       MacosAetherVideoViewFactory(

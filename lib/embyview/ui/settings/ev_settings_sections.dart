@@ -1282,7 +1282,53 @@ class _SecretGroupState extends State<_SecretGroup> {
   }
 }
 
-/// 10. About pane (`about`) mirroring `paneAbout` in `.spec/mockups/proto.js`.
+/// 10. Keyboard shortcuts pane (`settings:shortcuts`) mirroring `paneKeys` in `.spec/mockups/proto.js`.
+class EvShortcutsSettingsPane extends StatelessWidget {
+  const EvShortcutsSettingsPane({super.key, this.groups = evShortcutGroups});
+
+  final List<EvShortcutGroup> groups;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context);
+    return Column(
+      key: const Key('ev_settings_shortcuts_pane'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        evPaneTitle(t, s, '快捷键'),
+        for (final group in groups)
+          EvSettingsGroup(
+            title: group.title,
+            children: [
+              for (final item in group.items)
+                EvSettingsRow(
+                  title: item.label,
+                  trailing: EvKeycapSequence(item.keys),
+                ),
+            ],
+          ),
+        Padding(
+          padding: EdgeInsets.only(top: s.rem(0.25)),
+          child: Wrap(
+            key: const Key('ev_settings_shortcuts_note'),
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: s.rem(0.375),
+            runSpacing: s.rem(0.375),
+            children: [
+              Text('随时按', style: t.bodyStyle(s.font(0.9375), color: t.ink3)),
+              const EvKeycapSequence('?'),
+              Text('或', style: t.bodyStyle(s.font(0.9375), color: t.ink3)),
+              const EvKeycapSequence('⌘ /'),
+              Text('打开速查卡。', style: t.bodyStyle(s.font(0.9375), color: t.ink3)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 11. About pane (`about`) mirroring `paneAbout` in `.spec/mockups/proto.js`.
 class EvAboutSettingsPane extends StatefulWidget {
   const EvAboutSettingsPane({
     super.key,

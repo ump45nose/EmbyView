@@ -32,6 +32,9 @@ import 'data/services/deep_link_service.dart';
 import 'data/services/topshelf_service.dart';
 import 'data/services/watch_next_service.dart';
 import 'di/providers.dart';
+import 'embyview/entry.dart';
+import 'embyview/ui/shell/ev_menu_channel.dart';
+import 'embyview/ui/shell/ev_player.dart';
 import 'l10n/app_localizations.dart';
 import 'l10n/current_app_localizations.dart';
 import 'preference/preference_constants.dart' show GlassSettledQuality;
@@ -293,15 +296,31 @@ class _MoonfinAppState extends State<MoonfinApp> {
                                   _ConnectivityListener(
                                     child: child ?? const SizedBox.shrink(),
                                   ),
-                                  const Align(
-                                    alignment: Alignment.topCenter,
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        OfflineBanner(),
-                                        AppUpdateBanner(),
-                                      ],
-                                    ),
+                                  ListenableBuilder(
+                                    listenable: appRouter.routerDelegate,
+                                    builder: (context, _) {
+                                      final curPath = appRouter
+                                          .routerDelegate
+                                          .currentConfiguration
+                                          .uri
+                                          .path;
+                                      if (isEmbyViewAppMode(
+                                        path: curPath,
+                                        isMacOS: PlatformDetection.isMacOS,
+                                      )) {
+                                        return const SizedBox.shrink();
+                                      }
+                                      return const Align(
+                                        alignment: Alignment.topCenter,
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            OfflineBanner(),
+                                            AppUpdateBanner(),
+                                          ],
+                                        ),
+                                      );
+                                    },
                                   ),
                                 ],
                               ),
@@ -601,6 +620,14 @@ class _GlobalShortcutScopeState extends State<_GlobalShortcutScope>
 
   bool _handleMouseBackNavigation() {
     if (TimesUpGate.isShowing()) return true;
+    if (_isEmbyViewMode()) {
+      if (EvPlayer.isOpening) return false;
+      EvMenuChannel.instance.dispatchAction(
+        EvMenuAction.back,
+        source: EvMenuActionSource.keyboard,
+      );
+      return true;
+    }
     if (_isPlayerRoute()) {
       return false;
     }
@@ -714,6 +741,13 @@ class _GlobalShortcutScopeState extends State<_GlobalShortcutScope>
       return true;
     }
     if (!appRouter.canPop()) {
+      if (_isEmbyViewMode()) {
+        EvMenuChannel.instance.dispatchAction(
+          EvMenuAction.back,
+          source: EvMenuActionSource.keyboard,
+        );
+        return true;
+      }
       if (!_leaveAdminArea() && !_exitDialogShowing) {
         _exitDialogShowing = true;
         unawaited(_showExitConfirmation());
@@ -737,6 +771,11 @@ class _GlobalShortcutScopeState extends State<_GlobalShortcutScope>
       Destinations.routeReadsBackKey(_currentRoutePath());
 
   bool _isHomeRoute() => _currentRoutePath() == Destinations.home;
+
+  bool _isEmbyViewMode() => isEmbyViewAppMode(
+    path: _currentRoutePath(),
+    isMacOS: PlatformDetection.isMacOS,
+  );
 
   bool _shortcutsDialogOpen = false;
 
@@ -808,6 +847,10 @@ class _GlobalShortcutScopeState extends State<_GlobalShortcutScope>
     if (key.isBackKey) {
       // Nothing to go back to while the schedule is closed.
       if (TimesUpGate.isShowing()) return true;
+      // EmbyView owns Esc / back navigation and never shows the TV exit dialog.
+      if (_isEmbyViewMode()) {
+        return false;
+      }
       final fromRemote = GamepadKeySynthesizer.isRemote(event.physicalKey);
       if (isBackspace && _isEditingText()) {
         return false;
@@ -885,7 +928,9 @@ class _GlobalShortcutScopeState extends State<_GlobalShortcutScope>
     // ? and F1 list the keyboard shortcuts on every screen, trimmed to the
     // ones that work where the user is. ? is a character, so a text field
     // keeps it. F1 isn't, so it still opens the list there.
-    if (!PlatformDetection.isTV &&
+    // EmbyView handles ? / ⌘/ with its own shortcuts card and leaves F1 unbound.
+    if (!_isEmbyViewMode() &&
+        !PlatformDetection.isTV &&
         isShowShortcutsKey(key) &&
         (key == LogicalKeyboardKey.f1 || !_isEditingText())) {
       _showKeyboardShortcuts();
@@ -1457,20 +1502,23 @@ class _ConnectivityListenerState extends ConsumerState<_ConnectivityListener>
     _wasServerReachable = serverReachable;
 
     if (_wasOnline != null && _wasOnline != isOnline) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).clearSnackBars();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isOnline
-                  ? 'Back online. Syncing progress...'
-                  : 'You are offline.',
+      final path = appRouter.routerDelegate.currentConfiguration.uri.path;
+      if (!isEmbyViewAppMode(path: path, isMacOS: PlatformDetection.isMacOS)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).clearSnackBars();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                isOnline
+                    ? 'Back online. Syncing progress...'
+                    : 'You are offline.',
+              ),
+              duration: const Duration(seconds: 3),
             ),
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      });
+          );
+        });
+      }
     }
     _wasOnline = isOnline;
 

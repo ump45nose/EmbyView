@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/icons/ev_icons.dart';
+import 'package:moonfin/embyview/ui/shell/ev_menu_channel.dart';
 import 'package:moonfin/embyview/ui/shell/ev_scope.dart';
 import 'package:moonfin/embyview/ui/stage/immersion.dart';
 import 'package:moonfin/embyview/ui/theme/ev_motion.dart';
@@ -22,6 +23,20 @@ abstract final class EvPlayer {
   static bool get isOpening => _isOpening;
   static DateTime? _lastOpenedAt;
   static DateTime? get lastOpenedAt => _lastOpenedAt;
+  static EvPlayerMenuDelegate? _activePlayerActions;
+  static EvPlayerMenuDelegate? get activePlayerActions => _activePlayerActions;
+
+  /// Registers the currently active player's menu bar control callbacks.
+  static void registerActivePlayer(EvPlayerMenuDelegate delegate) {
+    _activePlayerActions = delegate;
+  }
+
+  /// Unregisters [delegate] if it is still the active player delegate.
+  static void unregisterActivePlayer(EvPlayerMenuDelegate delegate) {
+    if (identical(_activePlayerActions, delegate)) {
+      _activePlayerActions = null;
+    }
+  }
 
   /// Opens [target], pauses [Immersion], pushes the player route, and guarantees
   /// closing the [PlaybackSession] and resuming immersion when returning or failing.

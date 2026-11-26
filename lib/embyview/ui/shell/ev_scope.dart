@@ -1,5 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
+import 'package:moonfin/embyview/ui/shell/ev_menu_channel.dart';
+import 'package:moonfin/embyview/ui/shell/ev_notice_capsule.dart';
+import 'package:moonfin/embyview/ui/shell/ev_player.dart';
 import 'package:moonfin/embyview/ui/stage/ev_stage_controller.dart';
 import 'package:moonfin/embyview/ui/stage/immersion.dart';
 
@@ -58,14 +63,31 @@ class EvChromeTitlePlate {
   @override int get hashCode => Object.hash(iconKey, title, colorSlot, total, unit, addedThisMonth);
 }
 
-/// Shared navigation stack, zone catalog, top-bar chrome state, and stage-four
-/// extension hooks owned by or supplied to [EvShell].
+/// Shared navigation stack, zone catalog, top-bar chrome state, global overlays
+/// (shortcuts reference & connection notice capsule), and macOS menu bar
+/// dispatcher owned by or supplied to [EvShell].
 class EvShellController extends ChangeNotifier {
   EvShellController({
     EvShellDestination initial = const EvHomeDestination(),
     List<ZoneTile> zones = const [],
-    this.onOpenDetail, this.onOpenSearch, this.onOpenSettings, this.onOpenUsers, this.onManageZones,
-    this.onSignedOutToUserPicker, this.onSwitchServer, this.onAddAccount,
+    this.onOpenDetail,
+    this.onOpenSearch,
+    this.onOpenSettings,
+    this.onOpenAbout,
+    this.onOpenServerSettings,
+    this.onOpenUsers,
+    this.onManageZones,
+    this.onSignedOutToUserPicker,
+    this.onSignOut,
+    this.onSwitchServer,
+    this.onAddAccount,
+    this.onToggleCommandPalette,
+    this.onBack,
+    this.onGoHome,
+    this.onOpenZoneById,
+    this.onExportDiagnostics,
+    this.onRetryConnection,
+    this.activePlayerResolver,
   }) : _stack = [initial], _zones = List<ZoneTile>.unmodifiable(zones);
 
   final List<EvShellDestination> _stack;
@@ -75,10 +97,19 @@ class EvShellController extends ChangeNotifier {
   EvChromeTitlePlate? _titlePlate;
   List<Widget> _rightActions = const [];
   bool? _showBackOverride;
+  bool _shortcutsOpen = false;
+  EvNoticeState? _notice;
 
   ValueChanged<String>? onOpenDetail;
-  VoidCallback? onOpenSearch, onOpenSettings, onOpenUsers, onManageZones;
-  VoidCallback? onSignedOutToUserPicker, onSwitchServer, onAddAccount;
+  VoidCallback? onOpenSearch, onOpenSettings, onOpenAbout, onOpenServerSettings;
+  VoidCallback? onOpenUsers, onManageZones;
+  VoidCallback? onSignedOutToUserPicker, onSignOut, onSwitchServer, onAddAccount;
+  VoidCallback? onToggleCommandPalette, onGoHome, onRetryConnection;
+  bool Function()? onBack;
+  bool Function()? onCloseAvatarMenu;
+  ValueChanged<String>? onOpenZoneById;
+  Future<void> Function()? onExportDiagnostics;
+  EvPlayerMenuDelegate? Function()? activePlayerResolver;
 
   EvShellDestination get current => _stack.last;
   List<EvShellDestination> get stack => List<EvShellDestination>.unmodifiable(_stack);
@@ -91,6 +122,8 @@ class EvShellController extends ChangeNotifier {
   bool get hideTabs => _hideTabs;
   bool get hideAvatar => _hideAvatar;
   bool get showBack => _showBackOverride ?? (canPop && current is EvWallDestination);
+  bool get shortcutsOpen => _shortcutsOpen;
+  EvNoticeState? get notice => _notice;
 
   void _resetChrome() {
     _scrolled = _hideTabs = _hideAvatar = false;
@@ -129,7 +162,11 @@ class EvShellController extends ChangeNotifier {
     return true;
   }
 
-  void setZones(List<ZoneTile> value) { _zones = List<ZoneTile>.unmodifiable(value); notifyListeners(); }
+  void setZones(List<ZoneTile> value) {
+    _zones = List<ZoneTile>.unmodifiable(value);
+    unawaited(EvMenuChannel.instance.syncZones(_zones));
+    notifyListeners();
+  }
 
   void setScrollOffset(double offset) {
     final fade = (offset / 160.0).clamp(0.0, 1.0), s = offset > 0.5;
@@ -162,6 +199,160 @@ class EvShellController extends ChangeNotifier {
     if (hideAvatar != null) _hideAvatar = hideAvatar;
     if (clearShowBack) { _showBackOverride = null; } else if (showBack != null) { _showBackOverride = showBack; }
     notifyListeners();
+  }
+
+  // --- Global shortcuts overlay ---
+
+  void showShortcuts() {
+    if (_shortcutsOpen) return;
+    _shortcutsOpen = true;
+    notifyListeners();
+  }
+
+  void closeShortcuts() {
+    if (!_shortcutsOpen) return;
+    _shortcutsOpen = false;
+    notifyListeners();
+  }
+
+  void toggleShortcuts() {
+    _shortcutsOpen = !_shortcutsOpen;
+    notifyListeners();
+  }
+
+  // --- Global connection notice capsule ---
+
+  void showNotice(EvNoticeState value) {
+    if (_notice == value) return;
+    _notice = value;
+    notifyListeners();
+  }
+
+  void showOfflineNotice({
+    String? serverName,
+    int initialCountdownSeconds = 8,
+    int retryIntervalSeconds = 10,
+    int triedAddressCount = 0,
+    bool autoTick = true,
+  }) {
+    showNotice(EvNoticeState.offline(
+      serverName: serverName,
+      initialCountdownSeconds: initialCountdownSeconds,
+      retryIntervalSeconds: retryIntervalSeconds,
+      triedAddressCount: triedAddressCount,
+      autoTick: autoTick,
+    ));
+  }
+
+  void showSwitchedNotice({
+    String? message,
+    String? serverName,
+    Duration? autoDismissAfter = const Duration(seconds: 8),
+  }) {
+    showNotice(EvNoticeState.switched(
+      message: message,
+      serverName: serverName,
+      autoDismissAfter: autoDismissAfter,
+    ));
+  }
+
+  void dismissNotice() {
+    if (_notice == null) return;
+    _notice = null;
+    notifyListeners();
+  }
+
+  void clearNotice() => dismissNotice();
+
+  void handleConnectionNotice(ConnectionNoticeEvent event) {
+    if (event.kind == ConnectionNoticeKind.recovered) {
+      dismissNotice();
+      return;
+    }
+    showNotice(EvNoticeState.fromConnectionEvent(event));
+  }
+
+  // --- macOS menu bar & shortcut dispatcher ---
+
+  bool handleMenuAction(String action) {
+    if (EvMenuAction.isPlaybackAction(action)) {
+      final player = (activePlayerResolver ?? () => EvPlayer.activePlayerActions)();
+      if (player == null) return false;
+      return player.dispatch(action);
+    }
+
+    final zoneIndex = EvMenuAction.zoneIndexFor(action);
+    if (zoneIndex != null) {
+      if (zoneIndex >= _zones.length) return false;
+      closeShortcuts();
+      final zoneId = _zones[zoneIndex].id;
+      if (onOpenZoneById != null) {
+        onOpenZoneById!(zoneId);
+      } else {
+        openZone(zoneId);
+      }
+      return true;
+    }
+
+    switch (action) {
+      case EvMenuAction.about:
+        closeShortcuts();
+        if (onOpenAbout != null) {
+          onOpenAbout!();
+        } else {
+          onOpenSettings?.call();
+        }
+        return true;
+      case EvMenuAction.settings:
+        closeShortcuts();
+        onOpenSettings?.call();
+        return true;
+      case EvMenuAction.signOut:
+        closeShortcuts();
+        if (onSignOut != null) {
+          onSignOut!();
+        } else {
+          onSignedOutToUserPicker?.call();
+        }
+        return true;
+      case EvMenuAction.search:
+        closeShortcuts();
+        onOpenSearch?.call();
+        return true;
+      case EvMenuAction.goHome:
+        closeShortcuts();
+        if (onGoHome != null) {
+          onGoHome!();
+        } else {
+          goHome();
+        }
+        return true;
+      case EvMenuAction.commandPalette:
+        closeShortcuts();
+        onToggleCommandPalette?.call();
+        return true;
+      case EvMenuAction.back:
+        if (_shortcutsOpen) {
+          closeShortcuts();
+          return true;
+        }
+        if (onBack != null) {
+          return onBack!();
+        }
+        return pop();
+      case EvMenuAction.shortcuts:
+        toggleShortcuts();
+        return true;
+      case EvMenuAction.exportDiagnostics:
+        final exporter = onExportDiagnostics;
+        if (exporter != null) {
+          unawaited(exporter());
+          return true;
+        }
+        return false;
+      default:
+        return false;
+    }
   }
 }
 
