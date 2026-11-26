@@ -10,7 +10,7 @@ import 'package:moonfin/embyview/contracts/common.dart';
 import 'package:moonfin/embyview/contracts/media.dart';
 import 'package:moonfin/embyview/data/emby_media_data.dart';
 import 'package:moonfin/embyview/data/title_index.dart';
-import 'package:moonfin/embyview/data/media_mapper.dart' show embyAudioTechnicalLabel;
+import 'package:moonfin/embyview/data/media_mapper.dart' show embyAudioTechnicalLabel, embySubtitleQualifiers;
 import 'package:server_core/server_core.dart';
 import 'package:server_emby/server_emby.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -170,6 +170,14 @@ void main() {
     expect(card.art.logo?.id, '20800:Logo:0');
     series.remove('ImageTags');
     expect((await f.data.detail('20806')).card.art.logo, isNull);
+  });
+
+  test('subtitle variant labels follow the original track metadata', () {
+    expect(embySubtitleQualifiers({'DisplayTitle': 'Turkish (SUBRIP)'}), isEmpty);
+    expect(embySubtitleQualifiers({'Title': 'Full', 'DisplayTitle': 'Turkish (SUBRIP)'}), ['全字幕']);
+    expect(embySubtitleQualifiers({'IsForced': true}), ['强制']);
+    expect(embySubtitleQualifiers({'Title': 'non-forced', 'IsHearingImpaired': true}), ['SDH']);
+    expect(embySubtitleQualifiers({'Title': '非强制', 'IsDefault': true}), ['默认']);
   });
 
   test('audio pill uses codec and channel metadata independently', () {

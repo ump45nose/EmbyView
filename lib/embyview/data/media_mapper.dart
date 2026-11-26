@@ -4,6 +4,7 @@ import 'package:flutter/painting.dart';
 import '../contracts/internal/authorized_resources.dart';
 import '../contracts/media.dart';
 import '../../data/models/aggregated_item.dart';
+import '../../util/subtitle_track_logic.dart' show isForcedSubtitleStream, isSdhSubtitleStream;
 
 typedef Json = Map<String, dynamic>;
 List<Json> records(dynamic value) =>
@@ -32,6 +33,22 @@ String? embyAudioTechnicalLabel(Json? stream) {
   };
   final parts = [if (codec != null && codec.isNotEmpty) codec, ?layout];
   return parts.isEmpty ? null : parts.join(' ');
+}
+
+final _forcedChineseTitle = RegExp(r'(?<!非)(?:强制|強制)');
+final _fullSubtitleTitle = RegExp(r'\bfull subtitles?\b|\bfull(?=\s*(?:$|[),·]))|全字幕|完整字幕', caseSensitive: false);
+final _defaultSubtitleTitle = RegExp(r'(?<!non[\s-])\bdefault\b|(?<!非)(?:默认|預設)', caseSensitive: false);
+final _commentarySubtitleTitle = RegExp(r'\bcommentar(?:y|ies)\b|导演评论|導演講評', caseSensitive: false);
+
+List<String> embySubtitleQualifiers(Json stream) {
+  final titles = [stream['Title'], stream['DisplayTitle']].whereType<String>().join(' · ');
+  return [
+    if (isForcedSubtitleStream(stream) || _forcedChineseTitle.hasMatch(titles)) '强制',
+    if (_fullSubtitleTitle.hasMatch(titles)) '全字幕',
+    if (isSdhSubtitleStream(stream) || titles.contains('听障') || titles.contains('聽障')) 'SDH',
+    if (stream['IsCommentary'] == true || _commentarySubtitleTitle.hasMatch(titles)) '评论',
+    if (stream['IsDefault'] == true || _defaultSubtitleTitle.hasMatch(titles)) '默认',
+  ];
 }
 
 class MediaMapper {

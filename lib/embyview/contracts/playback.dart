@@ -32,6 +32,7 @@ class PlaybackTrack {
     this.format,
     this.layout,
     this.isForced = false,
+    this.qualifiers = const [],
   });
 
   final String id;
@@ -41,6 +42,9 @@ class PlaybackTrack {
   final String? format;
   final String? layout;
   final bool isForced;
+
+  /// Display labels for subtitle variants reported by the server.
+  final List<String> qualifiers;
 }
 
 class VideoSize {

@@ -316,15 +316,17 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
       EvPanelTrackRow(key: const Key('ev_sub_track_off'), badge: _trackBadge(t, s, pal, text: '—'), title: '关闭字幕', selected: selectedId == null, onTap: () => widget.onSelectSubtitle(null)),
     ];
 
-    void addTrack(String id, String name, PlaybackTrackSource src, String? lang, String? fmt, SubtitleTrackState? st) {
+    void addTrack(PlaybackTrack track, SubtitleTrackState? st) {
+      final id = track.id, src = track.source, name = track.name;
       seen.add(id);
       final isAi = src == PlaybackTrackSource.ai || st?.origin == SubtitleOrigin.ai;
       final isNas = !isAi && (src == PlaybackTrackSource.nas || src == PlaybackTrackSource.online || st?.origin == SubtitleOrigin.nas || st?.origin == SubtitleOrigin.online);
-      final language = evTrackLanguage(lang, name);
-      final codec = normalizeSubtitleFormat(fmt ?? '');
+      final language = evTrackLanguage(track.language, name);
+      final codec = normalizeSubtitleFormat(track.format ?? '');
       final format = codec == 'sup' ? 'PGS' : codec.toUpperCase();
       final title = isAi || isNas ? name : language.title;
-      final meta = [_sourceShort(src), if (format.isNotEmpty) format, if (st != null && _saveLabel(st.save).isNotEmpty) _saveLabel(st.save), if (st != null && _indexLabel(st.index).isNotEmpty) _indexLabel(st.index)].join(' · ');
+      final qualifiers = {if (track.isForced) '强制', ...track.qualifiers};
+      final meta = [_sourceShort(src), if (format.isNotEmpty) format, ...qualifiers, if (st != null && _saveLabel(st.save).isNotEmpty) _saveLabel(st.save), if (st != null && _indexLabel(st.index).isNotEmpty) _indexLabel(st.index)].join(' · ');
       rows.add(EvPanelTrackRow(
         key: Key('ev_sub_track_$id'), selected: selectedId == id, title: title, subtitle: meta, onTap: () => widget.onSelectSubtitle(id),
         badge: _trackBadge(t, s, pal, isAi: isAi, isNas: isNas, text: language.badge),
@@ -332,11 +334,12 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
       ));
     }
 
-    for (final tr in widget.snapshot.subtitleTracks) { addTrack(tr.id, tr.name, tr.source, tr.language, tr.format, stateById[tr.id]); }
+    for (final track in widget.snapshot.subtitleTracks) { addTrack(track, stateById[track.id]); }
     for (final st in widget.subtitleSnapshot?.tracks ?? const <SubtitleTrackState>[]) {
       if (seen.contains(st.trackId)) continue;
       final src = _trackSourceFromOrigin(st.origin);
-      addTrack(st.trackId, st.origin == SubtitleOrigin.ai ? '简体中文 · AI 生成' : '外挂字幕', src, 'zh', null, st);
+      final ai = st.origin == SubtitleOrigin.ai;
+      addTrack(PlaybackTrack(id: st.trackId, name: ai ? '简体中文 · AI 生成' : '未标明语言', source: src, language: ai ? 'zh' : null), st);
     }
 
     return Container(padding: EdgeInsets.all(s.rem(0.25)), decoration: BoxDecoration(color: pal.cardBg, borderRadius: BorderRadius.circular(s.rem(1.0)), border: Border.all(color: pal.cardBorder)), child: Column(mainAxisSize: MainAxisSize.min, children: rows));

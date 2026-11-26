@@ -322,6 +322,8 @@ void main() {
       addTearDown(() => tester.binding.setSurfaceSize(null));
       final snap = _snap(subtitleTracks: const [
         PlaybackTrack(id: 'tr', name: 'Turkish (SUBRIP)', language: 'tur', format: 'subrip', source: PlaybackTrackSource.embedded),
+        PlaybackTrack(id: 'tr-full', name: 'Turkish (SUBRIP)', language: 'tur', format: 'subrip', source: PlaybackTrackSource.embedded, qualifiers: ['全字幕', 'SDH', '默认']),
+        PlaybackTrack(id: 'tr-forced', name: 'Turkish (SUBRIP)', language: 'tur', format: 'subrip', source: PlaybackTrackSource.embedded, isForced: true),
         PlaybackTrack(id: 'zh', name: 'Chinese Simplified (ASS)', language: 'zho', format: 'ass', source: PlaybackTrackSource.embyExternal),
         PlaybackTrack(id: 'en', name: 'English (PGSSUB)', language: 'eng', format: 'pgssub', source: PlaybackTrackSource.embedded),
         PlaybackTrack(id: 'fr', name: 'French (SSA)', format: 'ssa', source: PlaybackTrackSource.embedded),
@@ -329,11 +331,17 @@ void main() {
       ]);
       await tester.pumpWidget(_wrap(child: EvPlayerPanel(
         open: true, activeTab: 'subs', snapshot: snap,
+        subtitleSnapshot: const SubtitleSnapshot(generation: 1, tracks: [
+          SubtitleTrackState(trackId: 'pending', origin: SubtitleOrigin.embyExternal),
+        ]),
         onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},
         onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
       )));
       for (final (id, title, badge, meta) in [
         ('tr', '土耳其语', 'TR', '内嵌 · SRT'),
+        ('tr-full', '土耳其语', 'TR', '内嵌 · SRT · 全字幕 · SDH · 默认'),
+        ('tr-forced', '土耳其语', 'TR', '内嵌 · SRT · 强制'),
+        ('pending', '未标明语言', '—', '外挂'),
         ('zh', '简体中文', '中', '外挂 · ASS'),
         ('en', 'English', 'EN', '内嵌 · PGS'),
         ('fr', '法语', 'FR', '内嵌 · SSA'),
