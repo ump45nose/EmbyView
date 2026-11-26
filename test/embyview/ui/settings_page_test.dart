@@ -119,7 +119,8 @@ class _FakePreferences implements EmbyViewPreferences {
     subtitleLanguages: _current.subtitleLanguages,
     autoSelectChineseSubtitle: _current.autoSelectChineseSubtitle,
     subtitleSources: _current.subtitleSources,
-    translationProvider: _current.translationProvider,
+    translationBaseUrl: _current.translationBaseUrl,
+    translationModel: _current.translationModel,
     monthlyBudgetMicros: _current.monthlyBudgetMicros,
     mediaFolder: mediaFolder ?? _current.mediaFolder,
     zones: zones ?? _current.zones,
@@ -312,6 +313,7 @@ class _FakeSubtitles implements EmbyViewSubtitles {
              usedMicros: 23400000,
              budgetMicros: 100000000,
              completedEpisodes: 41,
+             unmeteredCalls: 3,
              averageEpisodeMicros: 570000,
            ),
        _jobs = List<SeasonJob>.from(initialJobs);
@@ -959,20 +961,52 @@ void main() {
       await tester.pumpAndSettle();
       expect(env.prefs.mediaFolderStatusCalls, 1);
 
-      // AI section: provider, budget presets + custom, usage, job cancel
+      // AI section: translation settings, budget presets + custom, usage, job cancel
       await tester.tap(find.byKey(const Key('ev_settings_nav_ai')));
       await tester.pumpAndSettle();
       expect(find.text('\$23.40 / \$100'), findsOneWidget);
       expect(find.textContaining('本月生成 41 集'), findsOneWidget);
       expect(find.textContaining('王者天下 第 1 季'), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('ev_ai_provider_openAi')));
+      Finder input(String name) => find.descendant(
+        of: find.byKey(Key(name)), matching: find.byType(EditableText),
+      );
+      final address = input('ev_ai_translation_address');
+      final model = input('ev_ai_translation_model');
+      expect(tester.widget<EditableText>(address).controller.text, defaultTranslationBaseUrl);
+      expect(tester.widget<EditableText>(model).controller.text, defaultTranslationModel);
+      expect(find.textContaining('3 次翻译未计费'), findsOneWidget);
+      await tester.enterText(address, 'example.com');
+      await tester.enterText(model, '');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('ev_ai_translation_save')));
       await tester.pumpAndSettle();
-      expect(env.prefs.current.translationProvider, TranslationProvider.openAi);
+      expect(find.text('请输入有效的翻译服务地址'), findsOneWidget);
+      expect(find.text('请输入翻译模型名称'), findsOneWidget);
+      expect(env.prefs.current.translationBaseUrl, defaultTranslationBaseUrl);
 
+      await tester.enterText(address, 'https://example.com/v1');
+      await tester.enterText(model, 'custom-model');
+      await tester.tap(find.byKey(const Key('ev_ai_translation_save')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.translationBaseUrl, 'https://example.com/v1');
+      expect(env.prefs.current.translationModel, 'custom-model');
+      expect(find.textContaining('当前翻译服务未计费'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('ev_secret_edit_openAi')));
+      await tester.pumpAndSettle();
+      final translationKey = input('ev_secret_input_openAi');
+      expect(tester.widget<EditableText>(translationKey).obscureText, isTrue);
+      await tester.enterText(translationKey, 'example-translation-key');
+      await tester.tap(find.byKey(const Key('ev_secret_save_openAi')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.setSecretCalls.last, (SecretKind.openAi, 'example-translation-key'));
+
+      await tester.ensureVisible(find.byKey(const Key('ev_ai_budget_50')));
       await tester.tap(find.byKey(const Key('ev_ai_budget_50')));
       await tester.pumpAndSettle();
       expect(env.prefs.current.monthlyBudgetMicros, 50000000);
+      expect(env.prefs.current.translationBaseUrl, 'https://example.com/v1');
+      expect(env.prefs.current.translationModel, 'custom-model');
 
       final budgetInput = find.descendant(
         of: find.byKey(const Key('ev_ai_budget_input')),
@@ -992,7 +1026,7 @@ void main() {
       expect(env.subtitles!.cancelJobCalls, ['job_kingdom']);
       expect(find.byKey(const Key('ev_ai_jobs_empty')), findsOneWidget);
 
-      // Keys section: obscured save, clear, and warning dot dismissal when all 4 configured
+      // Keys section shares the translation key and retains subtitle search keys.
       await tester.tap(find.byKey(const Key('ev_settings_nav_keys')));
       await tester.pumpAndSettle();
       expect(
@@ -1002,46 +1036,6 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('ev_secret_status_gemini')),
-          matching: find.text('缺少'),
-        ),
-        findsOneWidget,
-      );
-
-      // Save Gemini secret (obscured input)
-      await tester.tap(find.byKey(const Key('ev_secret_edit_gemini')));
-      await tester.pumpAndSettle();
-      final geminiField = tester.widget<EditableText>(
-        find.descendant(
-          of: find.byKey(const Key('ev_secret_input_gemini')),
-          matching: find.byType(EditableText),
-        ),
-      );
-      expect(geminiField.obscureText, isTrue);
-
-      await tester.enterText(
-        find.descendant(
-          of: find.byKey(const Key('ev_secret_input_gemini')),
-          matching: find.byType(EditableText),
-        ),
-        'test-gemini-token',
-      );
-      await tester.tap(find.byKey(const Key('ev_secret_save_gemini')));
-      await tester.pumpAndSettle();
-      expect(env.prefs.setSecretCalls.last, (
-        SecretKind.gemini,
-        'test-gemini-token',
-      ));
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('ev_secret_status_gemini')),
-          matching: find.text('已设置'),
-        ),
-        findsOneWidget,
-      );
-
       // Fill remaining two secrets -> sidebar warning dot disappears
       for (final kind in [SecretKind.assrt, SecretKind.openSubtitles]) {
         await tester.tap(find.byKey(Key('ev_secret_edit_${kind.name}')));
@@ -1065,6 +1059,59 @@ void main() {
       await tester.pumpAndSettle();
       expect(env.prefs.setSecretCalls.last, (SecretKind.openAi, null));
       expect(find.byKey(const Key('ev_settings_keys_badge')), findsOneWidget);
+    });
+
+    testWidgets('local model download, progress, cancel, retry and delete', (tester) async {
+      const channel = MethodChannel('embyview/asr');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final actions = <String>[];
+      const mib = 1024 * 1024;
+      var state = 'notDownloaded', received = 0;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        switch (call.method) {
+          case 'modelStatus':
+            return {'state': state, 'totalBytes': 547 * mib, 'receivedBytes': received * mib,
+              if (state == 'failed') 'error': '校验失败'};
+          case 'downloadModel':
+            state = 'downloading';
+          case 'cancelDownload':
+            state = 'notDownloaded';
+          case 'deleteModel':
+            state = 'notDownloaded';
+            received = 0;
+        }
+        actions.add(call.method);
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      await _pumpSettings(tester, initialSection: EvSettingsSection.ai);
+      expect(find.textContaining('547 MiB'), findsOneWidget);
+      await tester.tap(find.text('下载模型'));
+      await tester.pumpAndSettle();
+      received = 245;
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('245 / 547 MiB'), findsOneWidget);
+      expect(find.textContaining('45%'), findsOneWidget);
+      await tester.tap(find.text('取消下载'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('继续下载'));
+      await tester.pumpAndSettle();
+      state = 'failed';
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('校验失败'), findsOneWidget);
+      await tester.tap(find.text('重新下载'));
+      await tester.pumpAndSettle();
+      state = 'ready';
+      received = 547;
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.text('已就绪'), findsOneWidget);
+      await tester.tap(find.text('删除模型'));
+      await tester.pumpAndSettle();
+      expect(find.text('下载模型'), findsOneWidget);
+      expect(actions, ['downloadModel', 'cancelDownload', 'downloadModel', 'downloadModel', 'deleteModel']);
     });
 
     testWidgets('AI section handles subtitles == null gracefully', (
@@ -1169,7 +1216,7 @@ void main() {
       final staleUsage = Completer<AiUsage>();
 
       final prefsA = _DelayedSecretsPrefs(staleSecrets.future);
-      final prefsB = _FakePreferences(configuredSecrets: {SecretKind.openAi, SecretKind.gemini, SecretKind.assrt, SecretKind.openSubtitles});
+      final prefsB = _FakePreferences(configuredSecrets: {SecretKind.openAi, SecretKind.assrt, SecretKind.openSubtitles});
       final accountsA = _FakeAccounts();
       final accountsB = _FakeAccounts();
       final dataA = _DelayedFacetsData(prefsA, staleFacets.future);

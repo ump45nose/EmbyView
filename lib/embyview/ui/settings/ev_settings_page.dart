@@ -233,7 +233,7 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
               scope.shell.setScrollOffset(0.0);
               setState(() { _section = sec; _bannerError = null; });
               if (sec == EvSettingsSection.ai && _boundServices?.subtitles != null) unawaited(_refreshAiUsage(_boundServices!));
-              if (sec == EvSettingsSection.keys && _boundServices != null) unawaited(_refreshSecrets(_boundServices!));
+              if ((sec == EvSettingsSection.keys || sec == EvSettingsSection.ai) && _boundServices != null) unawaited(_refreshSecrets(_boundServices!));
             },
             builder: (_, hovered, focused) {
               final sel = _section == sec, fg = (sel || hovered || focused) ? t.ink : t.ink2;
@@ -273,6 +273,10 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
   Widget _buildPane(EmbyViewServices services) {
     final openUsers = widget.onOpenUsers ?? EvScope.maybeOf(context)?.shell.onOpenUsers;
     void update(LocalPreferences next) => unawaited(_guard(() => services.preferences.update(next)));
+    Future<void> saveSecret(SecretKind kind, String? value) => _guard(() async {
+      await services.preferences.setSecret(kind, value);
+      await _refreshSecrets(services);
+    });
     return switch (_section) {
       EvSettingsSection.account => EvAccountSettingsPane(
         snapshot: _account, prefs: _prefs, visibleZoneCount: _displayedZones.length,
@@ -293,11 +297,12 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
       EvSettingsSection.ai => EvAiSettingsPane(
         prefs: _prefs, subtitlesAvailable: services.subtitles != null, usage: _aiUsage,
         loadingUsage: _loadingAiUsage, jobs: _aiJobs, onUpdatePrefs: update,
+        configuredSecrets: _configuredSecrets, loadingSecrets: _loadingSecrets, onSaveSecret: saveSecret,
         onCancelJob: (id) => _guard(() async { await services.subtitles?.cancelJob(id); })),
       EvSettingsSection.video => EvVideoSettingsPane(prefs: _prefs, onUpdatePrefs: update),
       EvSettingsSection.keys => EvKeysSettingsPane(
         configuredSecrets: _configuredSecrets, loadingSecrets: _loadingSecrets,
-        onSaveSecret: (kind, val) => _guard(() async { await services.preferences.setSecret(kind, val); await _refreshSecrets(services); })),
+        onSaveSecret: saveSecret),
       EvSettingsSection.about => const EvAboutSettingsPane(),
     };
   }

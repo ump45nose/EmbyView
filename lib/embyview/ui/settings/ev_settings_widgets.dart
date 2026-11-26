@@ -18,7 +18,7 @@ LocalPreferences evCopyPreferences(
   bool? quickLook, bool? hideUnwatchedOverview, bool? preResolve115,
   int? readAheadBytes, bool? autoPlayNext, bool? anime4kForAnime, bool? anime4kForOther,
   List<String>? subtitleLanguages, bool? autoSelectChineseSubtitle,
-  Set<SubtitleSource>? subtitleSources, TranslationProvider? translationProvider,
+  Set<SubtitleSource>? subtitleSources, String? translationBaseUrl, String? translationModel,
   int? monthlyBudgetMicros, MediaFolderStatus? mediaFolder, List<ZonePreference>? zones,
 }) => LocalPreferences(
   theme: theme ?? b.theme, navigation: navigation ?? b.navigation, seriesSort: seriesSort ?? b.seriesSort,
@@ -31,7 +31,8 @@ LocalPreferences evCopyPreferences(
   anime4kForAnime: anime4kForAnime ?? b.anime4kForAnime, anime4kForOther: anime4kForOther ?? b.anime4kForOther,
   subtitleLanguages: subtitleLanguages ?? b.subtitleLanguages,
   autoSelectChineseSubtitle: autoSelectChineseSubtitle ?? b.autoSelectChineseSubtitle,
-  subtitleSources: subtitleSources ?? b.subtitleSources, translationProvider: translationProvider ?? b.translationProvider,
+  subtitleSources: subtitleSources ?? b.subtitleSources,
+  translationBaseUrl: translationBaseUrl ?? b.translationBaseUrl, translationModel: translationModel ?? b.translationModel,
   monthlyBudgetMicros: monthlyBudgetMicros ?? b.monthlyBudgetMicros, mediaFolder: mediaFolder ?? b.mediaFolder, zones: zones ?? b.zones,
 );
 

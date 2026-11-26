@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart' hide ConnectionState, Page;
 import 'package:moonfin/embyview/embyview.dart';
+import 'package:moonfin/embyview/subtitles/ai/subtitle_ai.dart' show AsrModelState, AsrModelStatus, LocalSubtitleAsr, isSubtitleTranslationMetered;
 import 'package:moonfin/embyview/ui/kit.dart';
 import 'package:moonfin/embyview/ui/settings/ev_settings_widgets.dart';
 
@@ -435,9 +436,12 @@ class EvAiSettingsPane extends StatefulWidget {
   const EvAiSettingsPane({
     super.key, required this.prefs, required this.subtitlesAvailable, required this.usage,
     required this.loadingUsage, required this.jobs, required this.onUpdatePrefs, required this.onCancelJob,
+    required this.configuredSecrets, required this.loadingSecrets, required this.onSaveSecret,
   });
   final LocalPreferences prefs;
-  final bool subtitlesAvailable, loadingUsage;
+  final bool subtitlesAvailable, loadingUsage, loadingSecrets;
+  final Set<SecretKind> configuredSecrets;
+  final Future<void> Function(SecretKind, String?) onSaveSecret;
   final AiUsage? usage;
   final List<SeasonJob> jobs;
   final ValueChanged<LocalPreferences> onUpdatePrefs;
@@ -448,14 +452,37 @@ class EvAiSettingsPane extends StatefulWidget {
 class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
   static const _presets = [10000000, 30000000, 50000000, 100000000];
   late final _budgetCtrl = TextEditingController(text: _fmt(widget.prefs.monthlyBudgetMicros));
-  String? _budgetError;
+  late final _address = TextEditingController(text: widget.prefs.translationBaseUrl);
+  late final _model = TextEditingController(text: widget.prefs.translationModel);
+  String? _budgetError, _addressError, _modelError;
   String _fmt(int m) => m % 1000000 == 0 ? '${m ~/ 1000000}' : (m / 1000000.0).toStringAsFixed(2);
 
   @override void didUpdateWidget(EvAiSettingsPane old) {
     super.didUpdateWidget(old);
+    if (old.prefs.translationBaseUrl != widget.prefs.translationBaseUrl) _address.text = widget.prefs.translationBaseUrl;
+    if (old.prefs.translationModel != widget.prefs.translationModel) _model.text = widget.prefs.translationModel;
     if (old.prefs.monthlyBudgetMicros != widget.prefs.monthlyBudgetMicros) _budgetCtrl.text = _fmt(widget.prefs.monthlyBudgetMicros);
   }
-  @override void dispose() { _budgetCtrl.dispose(); super.dispose(); }
+  @override void dispose() {
+    _address.dispose();
+    _model.dispose();
+    _budgetCtrl.dispose();
+    super.dispose();
+  }
+
+  void _applyTranslation() {
+    final address = _address.text.trim(), model = _model.text.trim();
+    final uri = Uri.tryParse(address);
+    final valid = uri != null && (uri.scheme == 'https' || uri.scheme == 'http') &&
+        uri.host.isNotEmpty && uri.userInfo.isEmpty && !uri.hasQuery && !uri.hasFragment;
+    setState(() {
+      _addressError = valid ? null : '请输入有效的翻译服务地址';
+      _modelError = model.isEmpty ? '请输入翻译模型名称' : null;
+    });
+    if (valid && model.isNotEmpty) {
+      widget.onUpdatePrefs(evCopyPreferences(widget.prefs, translationBaseUrl: address, translationModel: model));
+    }
+  }
 
   void _applyBudget() {
     final v = double.tryParse(_budgetCtrl.text.trim().replaceFirst(RegExp(r'^\$'), ''));
@@ -469,17 +496,30 @@ class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
     final t = EvTheme.of(context), s = EvScale.of(context), prefs = widget.prefs;
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       evPaneTitle(t, s, 'AI 字幕'),
-      EvSettingsGroup(title: '模型', children: [
-        EvSettingsRow(title: '听写', subtitle: '日语、英语对白转文字', trailing: evValueText(t, s, 'OpenAI')),
-        EvSettingsRow(title: '翻译', subtitle: '译成简体中文，保留原文以备双语',
-          trailing: EvSegmentedControl<TranslationProvider>(value: prefs.translationProvider,
-            onChanged: (v) => widget.onUpdatePrefs(evCopyPreferences(prefs, translationProvider: v)),
-            options: const [
-              EvSegmentOption(key: Key('ev_ai_provider_gemini'), value: TranslationProvider.gemini, label: 'Gemini'),
-              EvSegmentOption(key: Key('ev_ai_provider_openAi'), value: TranslationProvider.openAi, label: 'OpenAI'),
-            ])),
+      EvSettingsGroup(title: '本机听写', children: [
+        const _AsrModelRow(),
         EvSettingsRow(title: '校正时间轴', subtitle: '本机音频对白匹配，计算偏移与漂移，不额外调用接口', trailing: evValueText(t, s, '本机自动')),
       ]),
+      _SecretGroup(title: '翻译服务', items: const [_translationKey],
+        configuredSecrets: widget.configuredSecrets, loadingSecrets: widget.loadingSecrets, onSaveSecret: widget.onSaveSecret,
+        prefix: [
+          EvSettingsRow(title: '接口地址', subtitle: _addressError ?? '兼容 OpenAI 的服务地址',
+            subtitleColor: _addressError == null ? null : evDangerColor,
+            trailing: SizedBox(width: s.rem(22), child: EvSettingsTextField(
+              key: const Key('ev_ai_translation_address'), controller: _address, keyboardType: TextInputType.url,
+              onSubmitted: (_) => _applyTranslation()))),
+          EvSettingsRow(title: '翻译模型', subtitle: _modelError, subtitleColor: evDangerColor,
+            trailing: SizedBox(width: s.rem(22), child: Row(children: [
+              Expanded(child: EvSettingsTextField(key: const Key('ev_ai_translation_model'), controller: _model,
+                onSubmitted: (_) => _applyTranslation())),
+              SizedBox(width: s.rem(0.5)),
+              ListenableBuilder(listenable: Listenable.merge([_address, _model]), builder: (_, _) {
+                final changed = _address.text != prefs.translationBaseUrl || _model.text != prefs.translationModel;
+                return EvButton.ghost(key: const Key('ev_ai_translation_save'), small: true,
+                  label: '保存配置', onPressed: changed ? _applyTranslation : null);
+              }),
+            ]))),
+        ]),
       EvSettingsGroup(title: '每月预算', children: [
         EvSettingsRow(title: '预算上限', subtitle: '本月累计达到预算后不再开新任务，进行中的集做完为止',
           trailing: EvSegmentedControl<int>(
@@ -515,6 +555,8 @@ class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
     final parts = [
       if (u != null && u.month.isNotEmpty) u.month, '本月生成 ${u?.completedEpisodes ?? 0} 集',
       if (u?.averageEpisodeMicros != null) '平均每集 ${evFormatMicros(u!.averageEpisodeMicros!)}',
+      if (!isSubtitleTranslationMetered(widget.prefs)) '当前翻译服务未计费',
+      if ((u?.unmeteredCalls ?? 0) > 0) '${u!.unmeteredCalls} 次翻译未计费',
       if (u?.reason?.isNotEmpty == true) u!.reason!,
     ];
     return EvSettingsRow(
@@ -540,6 +582,97 @@ class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
         ]),
       );
     }()];
+  }
+}
+
+class _AsrModelRow extends StatefulWidget {
+  const _AsrModelRow();
+  @override State<_AsrModelRow> createState() => _AsrModelRowState();
+}
+
+class _AsrModelRowState extends State<_AsrModelRow> {
+  static const _asr = LocalSubtitleAsr();
+  AsrModelStatus? _status;
+  Timer? _timer;
+  bool _busy = false;
+  int _revision = 0;
+  String? _error;
+
+  @override void initState() {
+    super.initState();
+    unawaited(_refresh());
+  }
+
+  @override void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refresh([Future<void> Function()? action]) async {
+    final revision = ++_revision;
+    _timer?.cancel();
+    if (action != null) setState(() => _busy = true);
+    try {
+      await action?.call();
+      final status = await _asr.modelStatus();
+      if (!mounted || revision != _revision) return;
+      setState(() { _status = status; _busy = false; _error = null; });
+      if (status.state == AsrModelState.downloading) {
+        _timer = Timer(const Duration(milliseconds: 500), _refresh);
+      }
+    } catch (error) {
+      if (!mounted || revision != _revision) return;
+      setState(() {
+        _error = error is EmbyViewFailure ? error.reason : '无法读取模型状态，请重试。';
+        _status = null;
+        _busy = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = EvScale.of(context);
+    final status = _status, state = status?.state;
+    final received = status?.receivedBytes ?? 0, total = status?.totalBytes ?? 0;
+    final progress = total > 0 ? (received / total).clamp(0.0, 1.0) : 0.0;
+    const mib = 1024 * 1024;
+    final size = total > 0 ? '${(total / mib).round()} MiB' : '约 547 MiB';
+    final downloading = state == AsrModelState.downloading;
+    final paused = state == AsrModelState.notDownloaded && received > 0;
+    final label = switch (state) {
+      AsrModelState.downloading => '下载中 ${(progress * 100).round()}%',
+      AsrModelState.ready => '已就绪',
+      AsrModelState.failed => '下载失败',
+      AsrModelState.notDownloaded => paused ? '已暂停' : '未下载',
+      null => _error == null ? '读取中' : '暂不可用',
+    };
+    final (actionLabel, action) = switch (state) {
+      AsrModelState.downloading => ('取消下载', _asr.cancelDownload),
+      AsrModelState.ready => ('删除模型', _asr.deleteModel),
+      AsrModelState.failed => ('重新下载', _asr.downloadModel),
+      AsrModelState.notDownloaded => (paused ? '继续下载' : '下载模型', _asr.downloadModel),
+      null => ('重试', null),
+    };
+    final detail = _error ?? status?.error;
+    return EvSettingsRow(
+      title: 'Whisper large-v3-turbo',
+      subtitle: ['Q5_0', downloading || paused ? '${(received / mib).floor()} / $size' : size,
+        '本机听写免费', ?detail].join(' · '),
+      bottom: downloading ? EvMeterBar(progress: progress) : null,
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        EvStatusIndicator(label: label, tone: state == AsrModelState.ready ? EvStatusTone.ok
+          : detail != null ? EvStatusTone.error : EvStatusTone.warn),
+        if (state != null || _error != null) ...[
+          SizedBox(width: s.rem(0.75)),
+          EvButton.ghost(small: true, label: actionLabel, onPressed: _busy ? null : () => _refresh(action)),
+        ],
+        if (paused || (state == AsrModelState.failed && received > 0)) ...[
+          SizedBox(width: s.rem(0.375)),
+          EvButton.ghost(small: true, label: '删除模型', onPressed: _busy ? null : () => _refresh(_asr.deleteModel)),
+        ],
+      ]),
+    );
   }
 }
 
@@ -571,15 +704,35 @@ class EvVideoSettingsPane extends StatelessWidget {
 }
 
 /// 9. Keychain secrets pane (`keys`).
-class EvKeysSettingsPane extends StatefulWidget {
+class EvKeysSettingsPane extends StatelessWidget {
   const EvKeysSettingsPane({super.key, required this.configuredSecrets, required this.loadingSecrets, required this.onSaveSecret});
   final Set<SecretKind> configuredSecrets;
   final bool loadingSecrets;
   final Future<void> Function(SecretKind kind, String? value) onSaveSecret;
-  @override State<EvKeysSettingsPane> createState() => _EvKeysSettingsPaneState();
+
+  @override
+  Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+    evPaneTitle(EvTheme.of(context), EvScale.of(context), '密钥'),
+    _SecretGroup(title: '存在本机钥匙串', configuredSecrets: configuredSecrets, loadingSecrets: loadingSecrets, onSaveSecret: onSaveSecret,
+      items: const [_translationKey, (SecretKind.assrt, '射手网 assrt', '字幕检索'), (SecretKind.openSubtitles, 'OpenSubtitles', '字幕检索')]),
+  ]);
 }
 
-class _EvKeysSettingsPaneState extends State<EvKeysSettingsPane> {
+const _translationKey = (SecretKind.openAi, '翻译密钥', '仅存本机钥匙串');
+
+class _SecretGroup extends StatefulWidget {
+  const _SecretGroup({required this.title, this.prefix = const [], required this.items,
+    required this.configuredSecrets, required this.loadingSecrets, required this.onSaveSecret});
+  final String title;
+  final List<Widget> prefix;
+  final List<(SecretKind, String, String)> items;
+  final Set<SecretKind> configuredSecrets;
+  final bool loadingSecrets;
+  final Future<void> Function(SecretKind kind, String? value) onSaveSecret;
+  @override State<_SecretGroup> createState() => _SecretGroupState();
+}
+
+class _SecretGroupState extends State<_SecretGroup> {
   SecretKind? _editing;
   final _ctrl = TextEditingController();
   bool _saving = false;
@@ -595,20 +748,15 @@ class _EvKeysSettingsPaneState extends State<EvKeysSettingsPane> {
   @override
   Widget build(BuildContext context) {
     final t = EvTheme.of(context), s = EvScale.of(context);
-    const items = [
-      (SecretKind.openAi, 'OpenAI', 'AI 字幕听写与翻译'), (SecretKind.gemini, 'Gemini', 'AI 字幕翻译'),
-      (SecretKind.assrt, '射手网 assrt', '字幕检索'), (SecretKind.openSubtitles, 'OpenSubtitles', '字幕检索'),
-    ];
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      evPaneTitle(t, s, '密钥'),
-      EvSettingsGroup(title: '存在本机钥匙串，不上传', children: [
-        for (final (kind, title, sub) in items) () {
+    return EvSettingsGroup(title: widget.title, children: [
+        ...widget.prefix,
+        for (final (kind, title, sub) in widget.items) () {
           final ok = widget.configuredSecrets.contains(kind);
           return EvSettingsRow(
             key: Key('ev_secret_row_${kind.name}'), title: title, subtitle: sub,
             bottom: _editing == kind ? Padding(padding: EdgeInsets.only(top: s.rem(0.625)), child: Row(children: [
               Expanded(child: EvSettingsTextField(key: Key('ev_secret_input_${kind.name}'), controller: _ctrl, obscureText: true,
-                placeholder: '输入 $title 密钥（遮蔽输入，仅存本机钥匙串）', onSubmitted: (_) => _commit(kind, _ctrl.text.trim()))),
+                placeholder: '输入密钥（仅存本机钥匙串）', onSubmitted: (_) => _commit(kind, _ctrl.text.trim()))),
               SizedBox(width: s.rem(0.5)),
               EvButton.primary(key: Key('ev_secret_save_${kind.name}'), small: true, label: '保存', onPressed: _saving ? null : () => _commit(kind, _ctrl.text.trim())),
               if (ok) ...[
@@ -628,7 +776,6 @@ class _EvKeysSettingsPaneState extends State<EvKeysSettingsPane> {
             ]),
           );
         }(),
-      ]),
     ]);
   }
 }
