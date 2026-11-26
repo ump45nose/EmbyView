@@ -57,8 +57,8 @@ class BoundSubtitlePanel implements SubtitlePanel {
   Completer<void>? _tapFinished;
   AiRun? _preparing;
   Future<void>? _closing;
-  var _timeline = 0, _resumeAfterBoundary = false;
-  String? _audioId, _expectedAudioId;
+  var _timeline = 0, _runNumber = 0, _resumeAfterBoundary = false;
+  String? _audioId, _expectedAudioId, _liveTrackId;
   @override
   SubtitleSnapshot snapshot = const SubtitleSnapshot(generation: 0);
   @override
@@ -82,16 +82,22 @@ class BoundSubtitlePanel implements SubtitlePanel {
         play.phase != PlaybackPhase.failed;
     if (!identical(_scope?.source, valid ? source : null)) {
       final previous = _scope?.source;
-      final restoring =
-          valid &&
-          (_scope?.autoSelectionSettled == true || _scope?.userApplied == true) &&
-          previous?.target.itemId == source.target.itemId &&
-          previous?.mediaSourceId == source.mediaSourceId;
+      final sameMedia =
+          valid && previous?.target.itemId == source.target.itemId && previous?.mediaSourceId == source.mediaSourceId;
+      final restoring = sameMedia && (_scope?.autoSelectionSettled == true || _scope?.userApplied == true);
+      final resumeAi = sameMedia && (_liveTrackId != null || _scope?.resumeAi == true);
+      final reselect = _liveTrackId != null
+          ? snapshot.selectedTrackId == _liveTrackId
+          : _scope?.reselectRevision == input.subtitleSelectionRevision;
       _scope?.close();
-      _resetAudio();
-      _resumeAfterBoundary = false;
       _scope = !valid ? null : _PanelScope(source, sources.openScope());
+      _resumeAfterBoundary = false;
+      _resetAudio();
       if (restoring) _scope!.userApplied = true;
+      if (resumeAi) {
+        _scope!.resumeAi = true;
+        _scope!.reselectRevision = reselect ? input.subtitleSelectionRevision : null;
+      }
       _audioId = play.selectedAudioId;
       _expectedAudioId = null;
     }
@@ -103,15 +109,25 @@ class BoundSubtitlePanel implements SubtitlePanel {
           _expectedAudioId = null;
         } else if (_run != null) {
           _resumeAfterBoundary = true;
-          _resetAudio();
+          _resetAudio(continueLive: true);
         }
       }
       if (!scope.scanning && (play.phase == PlaybackPhase.playing || play.phase == PlaybackPhase.paused)) {
         scope.scanning = true;
+        if (scope.resumeAi) {
+          // Some engine track switches reopen the same file. Continue with
+          // its new generation as soon as the new playhead is available.
+          scheduleMicrotask(() {
+            if (identical(scope, _scope) && scope.resumeAi) {
+              unawaited(_startAi(resume: scope.reselectRevision != input.subtitleSelectionRevision));
+            }
+          });
+        }
         unawaited(_loadNas(scope, play.selectedSubtitleId));
       }
       for (final track in play.subtitleTracks) {
-        if ((track.id == play.selectedSubtitleId || scope.hasNas && track.source == PlaybackTrackSource.embyExternal) &&
+        if (track.id != _liveTrackId &&
+            (track.id == play.selectedSubtitleId || scope.hasNas && track.source == PlaybackTrackSource.embyExternal) &&
             !scope.retained.containsKey(track.id) &&
             !scope.documents.containsKey(track.id)) {
           unawaited(_document(scope, track.id));
@@ -148,7 +164,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
                   candidateId: scope.retained[track.id]?.candidateId,
                 ),
             ],
-      cues: scope?.dialogue[selected],
+      cues: selected != null && selected == _liveTrackId ? _ai.run?.cues ?? const [] : scope?.dialogue[selected],
       ai: scope == null ? null : _preparing ?? _ai.run,
     );
     _changes.add(snapshot);
@@ -210,6 +226,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
   Future<SubtitleScan> _scan(_PanelScope scope) => scope.scan ??= _media(scope).then(store.scan);
 
   Future<void> _loadNas(_PanelScope scope, String? initiallySelected) async {
+    final selection = input.subtitleSelectionRevision;
     try {
       final scan = await _scan(scope);
       _check(scope);
@@ -265,6 +282,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
       if (!preferences().autoSelectChineseSubtitle ||
           play.subtitleTracks.any((track) => track.id == initiallySelected && isChineseSubtitle(track.language)) ||
           play.selectedSubtitleId != initiallySelected ||
+          selection != input.subtitleSelectionRevision ||
           scope.userApplied) {
         return;
       }
@@ -348,10 +366,16 @@ class BoundSubtitlePanel implements SubtitlePanel {
     );
   }
 
+  bool Function() _selectionRequest(_PanelScope scope) {
+    scope.userApplied = true;
+    final request = ++scope.selectionRequest, selection = input.subtitleSelectionRevision;
+    return () => scope.selectionRequest == request && input.subtitleSelectionRevision == selection;
+  }
+
   @override
   Future<void> useCandidate(SubtitleCandidate candidate) async {
     final scope = _active;
-    scope.userApplied = true;
+    final select = _selectionRequest(scope);
     final data = await scope.search.download(candidate);
     final language = data.language ?? candidate.language;
     final SubtitleDocument document;
@@ -364,23 +388,20 @@ class BoundSubtitlePanel implements SubtitlePanel {
     } on FormatException {
       throw const EmbyViewFailure('下载的字幕无法读取。');
     }
-    await _use(scope, document, language, SubtitleOrigin.online, candidateId: candidate.id);
+    await _use(scope, document, language, SubtitleOrigin.online, select: select, candidateId: candidate.id);
   }
 
-  Future<String> _register(_PanelScope scope, StoredSubtitle track, {List<SubtitleCue>? cues}) async {
+  Future<String> _register(
+    _PanelScope scope,
+    StoredSubtitle track, {
+    List<SubtitleCue>? cues,
+    String? liveTrackId,
+  }) async {
     _check(scope);
-    final id = await store.register(track, input, generation: scope.source.generation);
+    final id = await store.register(track, input, generation: scope.source.generation, liveTrackId: liveTrackId);
     _check(scope);
     scope.retained[id] = track;
     scope.dialogue[id] = cues ?? track.document.cues;
-    return id;
-  }
-
-  Future<String> _apply(_PanelScope scope, StoredSubtitle track, {List<SubtitleCue>? cues}) async {
-    final id = await _register(scope, track, cues: cues);
-    _check(scope);
-    await session.selectSubtitle(id);
-    _check(scope);
     return id;
   }
 
@@ -389,6 +410,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
     SubtitleDocument document,
     String? language,
     SubtitleOrigin origin, {
+    required bool Function() select,
     String? candidateId,
     Iterable<TimeRange>? coverage,
   }) async {
@@ -401,7 +423,9 @@ class BoundSubtitlePanel implements SubtitlePanel {
       candidateId: candidateId,
       coverage: coverage,
     );
-    final id = await _apply(scope, track);
+    final id = await _register(scope, track);
+    if (select()) await session.selectSubtitle(id);
+    _check(scope);
     unawaited(_save(scope, id, track));
   }
 
@@ -447,6 +471,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
 
   Future<void> _edit(String id, {required bool align}) async {
     final scope = _active;
+    final select = _selectionRequest(scope);
     final cancellation = SubtitleAiCancellation();
     scope.edits.add(cancellation);
     if (align) {
@@ -476,7 +501,6 @@ class BoundSubtitlePanel implements SubtitlePanel {
       if (identical(document, edited)) {
         throw const EmbyViewFailure('未找到足够一致的对白锚点，无法校正。', code: 'subtitle_alignment_unavailable');
       }
-      scope.userApplied = true;
       final language = play.subtitleTracks.where((track) => track.id == id).firstOrNull?.language;
       final original = scope.retained[id], duration = play.duration;
       await _use(
@@ -484,6 +508,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
         edited,
         align ? language : 'zh',
         align ? (original?.origin ?? SubtitleOrigin.nas) : SubtitleOrigin.ai,
+        select: select,
         coverage:
             original?.coverage ?? (align || duration == null ? null : [TimeRange(start: Duration.zero, end: duration)]),
       );
@@ -528,14 +553,20 @@ class BoundSubtitlePanel implements SubtitlePanel {
   @override
   Future<void> startAi() => _startAi();
 
-  Future<void> _startAi({Duration? position, int? streamIndex}) async {
+  Future<void> _startAi({Duration? position, int? streamIndex, bool resume = false}) async {
     final scope = _active;
+    scope.resumeAi = false;
+    ++_runNumber;
     final play = session.snapshot, timeline = _timeline;
     final start = position ?? play.position;
     final index = streamIndex ?? int.tryParse(play.selectedAudioId?.split(':').last ?? '');
     final language = play.audioTracks.where((track) => track.id == '${play.generation}:$index').firstOrNull?.language;
     _run?.cancel();
     _ai.invalidate();
+    final liveId = _liveTrackId = resume && _liveTrackId != null
+        ? _liveTrackId!
+        : '${play.generation}:live-${const Uuid().v4()}';
+    scope.userApplied = true;
     final cancellation = _run = SubtitleAiCancellation();
     final finished = _tapFinished = Completer<void>();
     bool current() => identical(_scope, scope) && timeline == _timeline && identical(_run, cancellation);
@@ -544,6 +575,8 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final reader = StreamIterator(_audio(scope.source, start, play.duration, index, cancellation));
     var independent = false;
     try {
+      await input.setLiveSubtitle(liveId, generation: play.generation, select: !resume);
+      if (!current()) return;
       await (checkAi ?? processor.checkGeneration)();
       final mediaContext = await _translationContext(scope);
       if (!current()) return;
@@ -584,29 +617,29 @@ class BoundSubtitlePanel implements SubtitlePanel {
         cancellation: cancellation,
       );
       if (output != null && current()) {
-        await _persistAi(scope, output, current, apply: session.snapshot.phase != PlaybackPhase.ended);
+        await _persistAi(scope, output, current, liveId: session.snapshot.phase == PlaybackPhase.ended ? null : liveId);
       }
-    } on EmbyViewFailure catch (failure) {
+    } catch (error) {
       if (current()) {
+        final failure = error is EmbyViewFailure ? error : const EmbyViewFailure('无法启用此轮 AI 字幕。', retryable: true);
         _preparing = AiRun(generation: play.generation, state: AiRunState.failed, startedAt: start, failure: failure);
         _emit();
       }
     } finally {
       await reader.cancel();
-      if (identical(_run, cancellation)) {
-        _tapFinished = null;
-        _run = null;
-        if (session.snapshot.phase == PlaybackPhase.ended) _refresh();
+      try {
+        if (current()) await _retireLive(liveId);
+      } finally {
+        if (identical(_run, cancellation)) {
+          _tapFinished = null;
+          _run = null;
+          if (session.snapshot.phase == PlaybackPhase.ended) _refresh();
+        }
       }
     }
   }
 
-  Future<void> _persistAi(
-    _PanelScope scope,
-    SubtitleAiOutput output,
-    bool Function() current, {
-    bool apply = true,
-  }) async {
+  Future<void> _persistAi(_PanelScope scope, SubtitleAiOutput output, bool Function() current, {String? liveId}) async {
     final pair = const Uuid().v4(), media = await _media(scope);
     Future<StoredSubtitle> retain(SubtitleDocument document, String? language) => store.retain(
       media,
@@ -619,38 +652,45 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final original = await retain(output.original, isChineseSubtitle(output.language) ? null : output.language);
     final chinese = await retain(output.chinese, 'zh');
     if (!current()) return;
-    if (!apply) {
+    if (liveId == null) {
       final saved = await store.save(original);
       if (saved.state == SubtitleSaveState.saved) await store.save(chinese);
       return;
     }
-    final id = await _register(scope, chinese, cues: output.cues);
-    if (!current()) return;
-    scope.userApplied = true;
-    await session.selectSubtitle(id);
-    _check(scope);
+    final id = await _register(scope, chinese, cues: output.cues, liveTrackId: liveId);
     if (!current()) return;
     scope.originals[id] = original;
     unawaited(_save(scope, id, chinese, original: original));
+    if (_ai.run?.state == AiRunState.completed) {
+      await input.endLiveSubtitle(liveId, replacementId: id);
+    }
   }
 
   @override
   Future<void> cancelAi() async {
-    final scope = _scope, timeline = _timeline;
+    final scope = _scope, timeline = _timeline, runNumber = _runNumber;
+    if (scope != null) scope.resumeAi = false;
     final output = _ai.cancel();
     _resumeAfterBoundary = false;
     _run?.cancel();
     _run = null;
     _tapFinished = null;
     _preparing = null;
+    final liveId = _liveTrackId;
+    if (liveId != null) await _retireLive(liveId);
     _emit();
-    bool current() => identical(scope, _scope) && timeline == _timeline && _run == null;
+    bool current() => identical(scope, _scope) && timeline == _timeline && runNumber == _runNumber;
     if (scope != null && output != null) {
-      await _persistAi(scope, output, current, apply: false);
+      await _persistAi(scope, output, current);
     }
   }
 
-  void _resetAudio() {
+  Future<void> _retireLive(String id) {
+    if (_liveTrackId == id) _liveTrackId = null;
+    return input.endLiveSubtitle(id);
+  }
+
+  void _resetAudio({bool continueLive = false}) {
     ++_timeline;
     _alignment?.cancel();
     _run?.cancel();
@@ -658,13 +698,24 @@ class BoundSubtitlePanel implements SubtitlePanel {
     _run = null;
     _preparing = null;
     _ai.invalidate();
+    final liveId = _liveTrackId;
+    if (liveId == null) return;
+    if (continueLive && _scope != null) {
+      // Keep the viewer's current choice through the seek/track-change gap.
+      // A fresh ID invalidates pending registration, selection and old cues.
+      final generation = _scope!.source.generation;
+      final next = _liveTrackId = '$generation:live-${const Uuid().v4()}';
+      unawaited(input.setLiveSubtitle(next, generation: generation, select: false).catchError((Object _) {}));
+    } else {
+      unawaited(_retireLive(liveId).catchError((Object _) {}));
+    }
   }
 
   void _audioBoundary(SubtitleAudioBoundary boundary) {
     if (boundary.sourceGeneration != _scope?.source.generation || session.snapshot.phase == PlaybackPhase.ended) return;
     if (!boundary.ready) {
       _resumeAfterBoundary |= _run != null;
-      _resetAudio();
+      _resetAudio(continueLive: _resumeAfterBoundary);
       _emit();
     } else if (_resumeAfterBoundary) {
       _resumeAfterBoundary = false;
@@ -673,7 +724,13 @@ class BoundSubtitlePanel implements SubtitlePanel {
         final expected = '${boundary.sourceGeneration}:$index';
         _expectedAudioId = expected == _audioId ? null : expected;
       }
-      unawaited(_startAi(position: boundary.position, streamIndex: boundary.streamIndex).catchError((Object _) {}));
+      unawaited(
+        _startAi(
+          position: boundary.position,
+          streamIndex: boundary.streamIndex,
+          resume: true,
+        ).catchError((Object _) {}),
+      );
     }
   }
 
@@ -705,6 +762,9 @@ class _PanelScope {
   final edits = <SubtitleAiCancellation>{};
   Future<SubtitleItem>? item;
   Future<SubtitleScan>? scan;
+  bool resumeAi = false;
+  int? reselectRevision;
+  var selectionRequest = 0;
   var scanning = false, userApplied = false, hasNas = false, autoSelectionSettled = false;
 
   Future<T> guard<T>(Future<T> work) => Future.any([work, _closed.future.then<T>((_) => throw _expired)]);

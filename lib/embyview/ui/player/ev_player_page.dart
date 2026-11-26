@@ -182,7 +182,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     setState(() => _subSnap = next);
     if (next.generation == _snap.generation && next.ai?.state == AiRunState.generating && prevAi != AiRunState.generating) {
       _auroraFlashTimer?.cancel(); setState(() => _flashAuroraTip = true);
-      _showToast('AI 字幕已开始显示 · 边看边生成', icon: EvIcons.ok);
+      _showToast('AI 字幕正在生成', icon: EvIcons.ok);
       _auroraFlashTimer = Timer(const Duration(seconds: 3), () { if (mounted) setState(() => _flashAuroraTip = false); });
     }
   }
@@ -210,6 +210,17 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
         setState(() => _controlsVisible = false);
       }
     });
+  }
+
+  Future<void> _selectSubtitle(String? id) async {
+    final session = widget.session, generation = _snap.generation;
+    try {
+      await session.selectSubtitle(id);
+    } catch (error) {
+      if (mounted && identical(widget.session, session) && session.snapshot.generation == generation) {
+        _showToast(error is EmbyViewFailure ? error.reason : '无法切换字幕，请重试。');
+      }
+    }
   }
 
   void _showToast(String message, {EvIconData? icon}) {
@@ -383,7 +394,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
               open: _panelOpen && !creditsActive, activeTab: _panelTab, snapshot: _snap, subtitleSnapshot: _activeSubSnap,
               subtitlePanel: _subtitlePanel, subtitles: _resolvedSubtitles, initialLowerTab: widget.initialLowerTab,
               onSelectTab: (tab) => setState(() => _panelTab = tab), onClose: _closePanel,
-              onSelectSubtitle: (id) => unawaited(widget.session.selectSubtitle(id)), onSelectAudio: (id) => unawaited(widget.session.selectAudio(id)),
+              onSelectSubtitle: (id) => unawaited(_selectSubtitle(id)), onSelectAudio: (id) => unawaited(widget.session.selectAudio(id)),
               onSeek: (p) => unawaited(widget.session.seek(p)), onToggleAnime4k: () => unawaited(widget.session.setAnime4k(!_snap.anime4k.requested)),
               onStartCompare: () => _startCompare(persistent: true), onToast: _showToast,
             ),

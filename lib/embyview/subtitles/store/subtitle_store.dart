@@ -210,7 +210,7 @@ final class SubtitleStore {
     );
   }
 
-  Future<String> register(StoredSubtitle track, PlaybackSubtitleInput input, {required int generation}) async {
+  Future<String> register(StoredSubtitle track, PlaybackSubtitleInput input, {required int generation, String? liveTrackId}) async {
     final current = input.subtitleSource;
     if (current == null ||
         current.generation != generation ||
@@ -227,6 +227,7 @@ final class SubtitleStore {
       title: track.filename,
       codec: track.document.format,
       contentKey: track.registrationKey,
+      liveTrackId: liveTrackId,
       source: origin,
     );
   }

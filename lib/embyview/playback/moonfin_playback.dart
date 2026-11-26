@@ -228,6 +228,9 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   final _indexedExternalIds = <String, int>{};
   int? _selectedExternal;
   int? _pendingExternal;
+  String? _liveSubtitleId, _previousSubtitleId;
+  bool _wantsLiveSubtitle = false, _liveRendererReady = false;
+  int _subtitleChoice = 0;
   int _subtitleMediaEpoch = 0;
   bool _reloadExternal = false;
   Future<void> _subtitleOperations = Future.value();
@@ -408,6 +411,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       _pendingExternal = null;
       _reloadExternal = false;
       _subtitleSource = null;
+      _clearLiveSubtitle();
       _sources.add(null);
       _thumbnails.clear();
       _intent
@@ -432,6 +436,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     _redirectTime = address?.elapsed;
     _cacheHit = address?.cacheHit;
     _openingAt = _intent.elapsed;
+    _clearLiveSubtitle();
     _native = NativePlaybackSnapshot(sourceGeneration: generation);
     _acceptNativeEvents = true;
     if (_subtitleSource?.mediaSourceId != result.mediaSourceId) {
@@ -623,6 +628,8 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       audioTracks: _tracks(resolution?.mediaStreams ?? [], 'Audio'),
       subtitleTracks: [
         ..._tracks(resolution?.mediaStreams ?? [], 'Subtitle'),
+        if (_liveSubtitleId case final liveId?)
+          PlaybackTrack(id: liveId, name: '简体中文 · AI 生成', language: 'zh', source: PlaybackTrackSource.ai),
         for (var i = 0; i < _externalSubtitles.length; i++)
           if (_indexedExternalIds[_externalSubtitles[i].contentKey] == null)
             PlaybackTrack(
@@ -634,7 +641,10 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
             ),
       ],
       selectedAudioId: trackId(_manager.audioStreamIndex),
-      selectedSubtitleId: _selectedExternal != null
+      subtitleOverlayId: _wantsLiveSubtitle && _liveRendererReady ? _liveSubtitleId : null,
+      selectedSubtitleId: _wantsLiveSubtitle
+          ? _liveSubtitleId
+          : _selectedExternal != null
           ? _visibleExternalId(_selectedExternal!)
           : _pendingExternal != null
           ? null
@@ -727,63 +737,139 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   Future<void> selectAudio(String trackId) => _control(() => _manager.changeAudioTrack(_trackIndex(trackId)));
 
   @override
-  Future<void> selectSubtitle(String? trackId) {
+  int get subtitleSelectionRevision => _subtitleChoice;
+
+  void _clearLiveSubtitle() {
+    _previousSubtitleId = null;
+    _liveSubtitleId = null;
+    _wantsLiveSubtitle = false;
+    _liveRendererReady = false;
+  }
+
+  @override
+  Future<void> setLiveSubtitle(String trackId, {required int generation, required bool select}) async {
+    _checkSubtitleGeneration(generation);
+    final follow = select || _wantsLiveSubtitle;
+    _liveSubtitleId = trackId;
+    if (follow) {
+      if (_wantsLiveSubtitle && _liveRendererReady) {
+        if (select) ++_subtitleChoice;
+      } else {
+        return selectSubtitle(trackId);
+      }
+    }
+    _emit();
+  }
+
+  @override
+  Future<void> endLiveSubtitle(String trackId, {String? replacementId}) {
+    if (trackId != _liveSubtitleId) return Future.value();
+    if (replacementId == null || !_wantsLiveSubtitle) {
+      final restore = _wantsLiveSubtitle, previous = _previousSubtitleId;
+      _clearLiveSubtitle();
+      _emit();
+      return restore && _current && !_ended && !_failed && _acceptNativeEvents
+          ? selectSubtitle(previous)
+          : Future.value();
+    }
     final generation = _snapshot.generation;
     return _subtitleOperation(() async {
-      _checkSubtitleGeneration(generation);
-      final source = _subtitleSource!;
-      final mediaEpoch = _subtitleMediaEpoch;
-      int? externalIndex, streamIndex;
-      if (trackId != null && trackId.startsWith('$generation:external')) {
-        externalIndex = int.tryParse(trackId.split('external').last);
-        if (externalIndex == null || externalIndex < 0 || externalIndex >= _externalSubtitles.length) {
-          throw const EmbyViewFailure('字幕已更新，请重新选择。', retryable: true);
-        }
-      } else if (trackId != null) {
-        streamIndex = _trackIndex(trackId);
-        final retained = _externalSubtitles.indexWhere((track) => _indexedExternalIds[track.contentKey] == streamIndex);
-        // The surviving Emby ID represents the same subtitle. The retained
-        // local delivery remains selectable without another server download.
-        if (retained >= 0) externalIndex = retained;
-      }
-      if (externalIndex != null) {
-        if (_selectedExternal == externalIndex) return;
-        final subtitle = _externalSubtitles[externalIndex];
-        // An already active local sidecar can be replaced directly: turning
-        // it off first would lose the current subtitle when loading fails.
-        if (_selectedExternal == null) {
-          await _manager.disableSubtitles();
-          _checkSubtitleGeneration(generation);
-        }
-        try {
-          await _loadExternal(subtitle, generation, select: true);
-        } catch (_) {
-          if (_current && generation == _snapshot.generation) _emit();
-          rethrow;
-        }
-        _checkSubtitleGeneration(generation);
-        _selectedExternal = externalIndex;
-        _pendingExternal = null;
+      bool current() => _current && trackId == _liveSubtitleId && _wantsLiveSubtitle;
+      if (trackId != _liveSubtitleId) return;
+      if (current()) {
+        _liveRendererReady = false;
         _emit();
+        await _selectNativeSubtitle(replacementId, generation, current);
+      }
+      if (trackId == _liveSubtitleId) {
+        _clearLiveSubtitle();
+        _emit();
+      }
+    });
+  }
+
+  @override
+  Future<void> selectSubtitle(String? trackId) async {
+    final generation = _snapshot.generation;
+    if (trackId != null && trackId != _liveSubtitleId && !trackId.startsWith('$generation:external')) {
+      _trackIndex(trackId); // Reject a retired row before changing the current selection.
+    }
+    final choice = ++_subtitleChoice;
+    final live = trackId != null && trackId == _liveSubtitleId;
+    if (live && !_wantsLiveSubtitle) _previousSubtitleId = _snapshot.selectedSubtitleId;
+    _wantsLiveSubtitle = live;
+    _liveRendererReady = false;
+    _emit();
+    return _subtitleOperation(() async {
+      bool current() => choice == _subtitleChoice && (!live || trackId == _liveSubtitleId);
+      if (!current()) return;
+      await _selectNativeSubtitle(live ? null : trackId, generation, current);
+      if (current()) {
+        _liveRendererReady = live;
+        _emit();
+      }
+    });
+  }
+
+  Future<void> _selectNativeSubtitle(String? trackId, int generation, bool Function() current) async {
+    _checkSubtitleGeneration(generation);
+    final source = _subtitleSource!;
+    final mediaEpoch = _subtitleMediaEpoch;
+    int? externalIndex, streamIndex;
+    if (trackId != null && trackId.startsWith('$generation:external')) {
+      externalIndex = int.tryParse(trackId.split('external').last);
+      if (externalIndex == null || externalIndex < 0 || externalIndex >= _externalSubtitles.length) {
+        throw const EmbyViewFailure('字幕已更新，请重新选择。', retryable: true);
+      }
+    } else if (trackId != null) {
+      streamIndex = _trackIndex(trackId);
+      final retained = _externalSubtitles.indexWhere((track) => _indexedExternalIds[track.contentKey] == streamIndex);
+      // The surviving Emby ID represents the same subtitle. The retained
+      // local delivery remains selectable without another server download.
+      if (retained >= 0) externalIndex = retained;
+    }
+    if (externalIndex != null) {
+      if (_selectedExternal == externalIndex) return;
+      final subtitle = _externalSubtitles[externalIndex];
+      // An already active local sidecar can be replaced directly: turning
+      // it off first would lose the current subtitle when loading fails.
+      if (_selectedExternal == null) {
+        await _manager.disableSubtitles();
+        _checkSubtitleGeneration(generation);
+        if (!current()) return;
+      }
+      try {
+        await _loadExternal(subtitle, generation, select: true);
+      } catch (_) {
+        if (_current && generation == _snapshot.generation) _emit();
+        rethrow;
+      }
+      _checkSubtitleGeneration(generation);
+      if (!current()) {
+        // This RPC changed the renderer. A queued choice must reapply its
+        // own delivery even if it was the previously committed sidecar.
+        _selectedExternal = null;
         return;
       }
-      if (streamIndex == null) {
-        await _manager.disableSubtitles();
-      } else {
-        await _manager.changeSubtitleTrack(streamIndex);
-      }
-      // The manager may rebuild the same media source to apply the choice.
-      // Only commit it after success; never clear a successor item's state.
-      if (!_current ||
-          mediaEpoch != _subtitleMediaEpoch ||
-          _subtitleSource?.target.itemId != source.target.itemId ||
-          _subtitleSource?.mediaSourceId != source.mediaSourceId) {
-        throw const EmbyViewFailure('字幕所属的影片已变更。', retryable: true);
-      }
-      _selectedExternal = null;
+      _selectedExternal = externalIndex;
       _pendingExternal = null;
-      _emit();
-    });
+      return;
+    }
+    if (streamIndex == null) {
+      await _manager.disableSubtitles();
+    } else {
+      await _manager.changeSubtitleTrack(streamIndex);
+    }
+    // The manager may rebuild the same media source to apply the choice.
+    // Only commit it after success; never clear a successor item's state.
+    if (!_current ||
+        mediaEpoch != _subtitleMediaEpoch ||
+        _subtitleSource?.target.itemId != source.target.itemId ||
+        _subtitleSource?.mediaSourceId != source.mediaSourceId) {
+      throw const EmbyViewFailure('字幕所属的影片已变更。', retryable: true);
+    }
+    _selectedExternal = null;
+    _pendingExternal = null;
   }
 
   @override
@@ -839,9 +925,16 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     String? language,
     String? codec,
     String? contentKey,
+    String? liveTrackId,
     PlaybackTrackSource source = PlaybackTrackSource.online,
   }) => _subtitleOperation(() async {
-    _checkSubtitleGeneration(generation);
+    void checkRegistration() {
+      _checkSubtitleGeneration(generation);
+      if (liveTrackId != null && liveTrackId != _liveSubtitleId) {
+        throw const EmbyViewFailure('此轮字幕生成已结束。');
+      }
+    }
+    checkRegistration();
     if (_indexedExternalIds[contentKey] case final index?) {
       return '$generation:$index';
     }
@@ -851,7 +944,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         ? _externalSubtitles[existing]
         : _SessionSubtitle(url, title, language, codec, contentKey, source);
     await _loadExternal(subtitle, generation, select: false);
-    _checkSubtitleGeneration(generation);
+    checkRegistration();
     if (existing >= 0) return _visibleExternalId(existing);
     final index = _externalSubtitles.length;
     _externalSubtitles.add(subtitle);

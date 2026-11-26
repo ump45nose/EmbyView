@@ -5,7 +5,7 @@ import 'package:moonfin/embyview/ui/kit.dart';
 const _kWhite = Color(0xFFFFFFFF);
 
 /// Renders live AI-generated subtitle cues directly over the video surface
-/// while [AiRun] is in `generating` or `catchingUp` state (`.sub` in `proto.css`).
+/// only after the selected run has taken over from the native renderer.
 class EvLiveSubtitleLayer extends StatelessWidget {
   const EvLiveSubtitleLayer({
     super.key, required this.snapshot, this.subtitleSnapshot,
@@ -25,29 +25,13 @@ class EvLiveSubtitleLayer extends StatelessWidget {
     return null;
   }
 
-  bool _shouldRenderAiTrack() {
-    final run = subtitleSnapshot?.ai;
-    if (run == null || (run.state != AiRunState.generating && run.state != AiRunState.catchingUp)) return false;
-    final selId = snapshot.selectedSubtitleId ?? subtitleSnapshot?.selectedTrackId;
-    if (selId != null) {
-      for (final t in snapshot.subtitleTracks) {
-        if (t.id == selId) return t.source == PlaybackTrackSource.ai;
-      }
-      for (final t in subtitleSnapshot?.tracks ?? const <SubtitleTrackState>[]) {
-        if (t.trackId == selId) return t.origin == SubtitleOrigin.ai;
-      }
-      return true;
-    }
-    final subTracks = subtitleSnapshot?.tracks ?? const <SubtitleTrackState>[];
-    if (subTracks.any((t) => t.active && t.origin == SubtitleOrigin.ai)) return true;
-    return snapshot.subtitleTracks.isEmpty && subTracks.isEmpty;
-  }
-
   SubtitleCue? _resolveCue() {
-    if (!_shouldRenderAiTrack()) return null;
-    final run = subtitleSnapshot?.ai;
-    final cues = (run != null && run.cues.isNotEmpty) ? run.cues : (subtitleSnapshot?.cues ?? const <SubtitleCue>[]);
-    return cues.isEmpty ? null : activeCueAt(cues, snapshot.position);
+    final id = snapshot.subtitleOverlayId, subtitles = subtitleSnapshot;
+    if (id == null || snapshot.selectedSubtitleId != id || subtitles == null ||
+        subtitles.generation != snapshot.generation || subtitles.selectedTrackId != id) {
+      return null;
+    }
+    return activeCueAt(subtitles.cues ?? const [], snapshot.position);
   }
 
   @override
@@ -76,24 +60,13 @@ class EvLiveSubtitleLayer extends StatelessWidget {
           child: Center(
             child: Padding(
               padding: EdgeInsets.symmetric(horizontal: scale.rem(1.5)),
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 350), switchInCurve: EvCurves.out, switchOutCurve: EvCurves.soft,
-                transitionBuilder: (child, anim) => FadeTransition(
-                  opacity: anim,
-                  child: AnimatedBuilder(
-                    animation: anim,
-                    builder: (_, c) => Transform.translate(offset: Offset(0, (1.0 - anim.value) * scale.rem(0.25)), child: c),
-                    child: child,
-                  ),
-                ),
-                child: text == null
-                    ? const SizedBox.shrink(key: ValueKey('ev_live_sub_empty'))
-                    : Padding(
-                        key: ValueKey('ev_live_sub_${cue!.id}_$text'),
-                        padding: EdgeInsets.symmetric(horizontal: scale.rem(1.0)),
-                        child: Text(text, textAlign: TextAlign.center, maxLines: 3, overflow: TextOverflow.ellipsis, style: style),
-                      ),
-              ),
+              child: text == null
+                  ? const SizedBox.shrink(key: ValueKey('ev_live_sub_empty'))
+                  : Padding(
+                      key: ValueKey('ev_live_sub_${cue!.id}_$text'),
+                      padding: EdgeInsets.symmetric(horizontal: scale.rem(1.0)),
+                      child: Text(text, textAlign: TextAlign.center, maxLines: 3, overflow: TextOverflow.ellipsis, style: style),
+                    ),
             ),
           ),
         ),

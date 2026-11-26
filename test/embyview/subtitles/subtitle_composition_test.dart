@@ -70,6 +70,22 @@ void main() {
     expect(fixture.panel.snapshot.tracks, isEmpty);
   });
 
+  test('a slow online subtitle download registers without overriding a later explicit off', () async {
+    final f = await _Fixture.open();
+    addTearDown(f.close);
+    final candidate = (await f.panel.search(null)).first.candidates.single;
+    final download = f.download = Completer<http.Response>();
+    final saved = f.panel.changes.firstWhere((state) => state.tracks.any((t) => t.save == SubtitleSaveState.failed));
+    final pending = f.panel.useCandidate(candidate);
+    await f.downloading.future;
+    await f.playback.selectSubtitle(null);
+    download.complete(http.Response.bytes(utf8.encode(_srt), 200));
+    await pending;
+    await saved;
+    expect(f.panel.snapshot.tracks, hasLength(1));
+    expect(f.panel.snapshot.selectedTrackId, isNull);
+  });
+
   test('a NAS pair restores AI attribution and dialogue onto an indexed track with auto-select off', () async {
     final fixture = await _Fixture.open();
     addTearDown(fixture.close);
@@ -125,7 +141,15 @@ void main() {
     TestWidgetsFlutterBinding.ensureInitialized();
     final fixture = await _Fixture.open();
     addTearDown(fixture.close);
+    fixture.playback.open(
+      _movie,
+      2,
+      subtitles: const [PlaybackTrack(id: '2:1', name: '原字幕', source: PlaybackTrackSource.embedded)],
+    );
+    await fixture.playback.selectSubtitle('2:1');
     await fixture.panel.startAi();
+    expect(fixture.panel.snapshot.selectedTrackId, '2:1');
+    expect(fixture.playback.snapshot.subtitleTracks, hasLength(1));
     expect(fixture.panel.snapshot.ai?.state, AiRunState.failed);
     expect(fixture.panel.snapshot.ai?.failure?.reason, contains('翻译密钥'));
     expect(fixture.playback.audioInput.started.isCompleted, isFalse);
@@ -144,8 +168,8 @@ void main() {
     expect(fixture.playback.audioInput.started.isCompleted, isFalse);
   });
 
-  for (final seek in [true, false]) {
-    test('a late native subtitle registration cannot select after ${seek ? "seek" : "cancel"}', () async {
+  for (final action in ['seek', 'cancel', 'next', 'old', 'off', 'reselect']) {
+    test('the current choice owns subtitle registration after $action', () async {
       TestWidgetsFlutterBinding.ensureInitialized();
       final f = await _Fixture.open();
       addTearDown(f.close);
@@ -183,11 +207,22 @@ void main() {
         }),
         200,
       );
-      f.playback.open(_movie, 2, duration: const Duration(seconds: 20));
+      f.playback.open(
+        _movie,
+        2,
+        duration: const Duration(seconds: 20),
+        subtitles: const [PlaybackTrack(id: '2:1', name: '旧字幕', source: PlaybackTrackSource.embedded)],
+      );
+      await f.playback.selectSubtitle('2:1');
       final gate = f.playback.registrationGate = Completer<void>();
       final pending = f.panel.startAi();
+      final live = f.playback.snapshot.selectedSubtitleId!;
+      expect(live, isNot('2:1'));
+      expect(f.playback.snapshot.subtitleTracks.last.name, '简体中文 · AI 生成');
+      expect(f.panel.snapshot.tracks.where((t) => t.active).single.trackId, live);
       await f.playback.registrationStarted.future;
-      if (seek) {
+      expect(f.panel.snapshot.cues?.single.text, 'Hi');
+      if (action == 'seek') {
         f.audioBoundaries.add((
           sourceGeneration: 2,
           kind: SubtitleAudioBoundaryKind.seek,
@@ -195,13 +230,43 @@ void main() {
           position: const Duration(seconds: 9),
           streamIndex: null,
         ));
-      } else {
+      } else if (action == 'next') {
+        f.playback.open(const PlayTarget(itemId: 'next'), 3);
+      } else if (action == 'cancel') {
         await f.panel.cancelAi();
+      } else {
+        await f.playback.selectSubtitle('2:1');
+        expect(f.panel.snapshot.cues, isNull);
+        await f.playback.selectSubtitle(null);
+        expect(f.panel.snapshot.selectedTrackId, isNull);
+        if (action == 'old') await f.playback.selectSubtitle('2:1');
+        if (action == 'reselect') {
+          await f.playback.selectSubtitle(live);
+          expect(f.panel.snapshot.cues?.single.text, 'Hi');
+        }
       }
+      final aborted = ['seek', 'cancel', 'next'].contains(action);
+      final save = aborted
+          ? null
+          : f.panel.changes.firstWhere((state) => state.tracks.any((t) => t.save == SubtitleSaveState.failed));
       gate.complete();
       await pending;
-      expect(f.playback.rendered, isNull);
-      expect(f.panel.snapshot.selectedTrackId, isNull);
+      if (aborted) {
+        expect(f.playback.registered, isEmpty);
+        expect(f.playback.rendered, isNull);
+        expect(f.panel.snapshot.selectedTrackId, isNot(live));
+      } else {
+        expect(f.panel.snapshot.tracks.any((t) => t.trackId == live), isFalse);
+        expect(f.playback.registered, hasLength(1));
+        if (action == 'reselect') {
+          expect(f.playback.rendered, contains('Hi'));
+        } else {
+          expect(f.panel.snapshot.selectedTrackId, action == 'old' ? '2:1' : null);
+          expect(f.playback.rendered, isNull);
+        }
+        // The asynchronous NAS save can still have a local write in flight.
+        await save;
+      }
     });
   }
 
@@ -280,15 +345,19 @@ void main() {
     addTearDown(() => messenger.setMockMethodCallHandler(asr, null));
     final requests = StreamController<(int?, String?)>();
     final heard = StreamIterator(requests.stream);
-    final reply = Completer<http.Response>();
+    final replies = <Completer<http.Response>>[];
     fixture.aiRequest = (request) {
       final instructions = jsonDecode(request.body)['messages'][0]['content'] as String;
       final language = RegExp(r'原文语言：(ja|en)').firstMatch(instructions)?.group(1);
       requests.add((streamIndex, language));
+      final reply = Completer<http.Response>();
+      replies.add(reply);
       return reply.future;
     };
     addTearDown(() async {
-      if (!reply.isCompleted) reply.complete(http.Response('', 503));
+      for (final reply in replies) {
+        if (!reply.isCompleted) reply.complete(http.Response('', 400));
+      }
       await heard.cancel();
       await requests.close();
     });
@@ -318,14 +387,33 @@ void main() {
       }
     }
 
+    await fixture.playback.selectSubtitle(null);
     switchedTo(8);
     expect(await heard.moveNext(), isTrue);
     expect(heard.current, (8, 'en'));
+    expect(fixture.playback.snapshot.selectedSubtitleId, isNull);
     switchedTo(99);
     expect(await heard.moveNext(), isTrue);
     expect(heard.current, (99, 'en')); // Falls back to the detected language.
+    // The engine may reopen the same media to switch a burned-in track or
+    // change audio. Work follows the new source without reclaiming subtitles.
+    fixture.playback.open(_movie, 3, duration: const Duration(seconds: 20));
+    // Let a cancelled request return its slot in the shared translation pool.
+    replies[0].complete(http.Response('', 400));
+    expect(await heard.moveNext().timeout(const Duration(seconds: 3)), isTrue);
+    expect(fixture.playback.snapshot.selectedSubtitleId, isNull);
+    final live = fixture.playback.snapshot.subtitleTracks.single;
+    expect(live.source, PlaybackTrackSource.ai);
+    await fixture.playback.selectSubtitle(live.id);
+    fixture.playback.open(_movie, 4, duration: const Duration(seconds: 20));
+    replies[1].complete(http.Response('', 400));
+    expect(await heard.moveNext().timeout(const Duration(seconds: 3)), isTrue);
+    expect(fixture.playback.snapshot.selectedSubtitleId, fixture.playback.snapshot.subtitleTracks.single.id);
+    expect(fixture.playback.snapshot.selectedSubtitleId, isNot(live.id));
     await fixture.panel.cancelAi();
-    reply.complete(http.Response('', 503));
+    for (final reply in replies) {
+      if (!reply.isCompleted) reply.complete(http.Response('', 400));
+    }
     await started;
   });
 }
@@ -436,7 +524,9 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
   late PlaybackSubtitleSource subtitleSource;
   @override
   final _Audio audioInput = _Audio();
-  String? rendered;
+  String? rendered, liveTrack, previousTrack;
+  @override
+  int subtitleSelectionRevision = 0;
   Completer<void>? registrationGate;
   final registrationStarted = Completer<void>();
   final registered = <String, String>{};
@@ -459,6 +549,8 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
       userAgent: 'Mozilla/5.0',
     );
     rendered = null;
+    liveTrack = null;
+    previousTrack = null;
     registered.clear();
     snapshot = PlaybackSnapshot(
       generation: generation,
@@ -472,20 +564,56 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     events.add(snapshot);
   }
 
-  @override
-  Future<void> selectSubtitle(String? trackId) async {
-    rendered = registered[trackId];
+  void _publish(String? selected, List<PlaybackTrack> tracks) {
+    rendered = registered[selected];
     snapshot = PlaybackSnapshot(
       generation: snapshot.generation,
       target: snapshot.target,
       phase: snapshot.phase,
       duration: snapshot.duration,
-      subtitleTracks: snapshot.subtitleTracks,
-      selectedSubtitleId: trackId,
+      position: snapshot.position,
+      subtitleTracks: tracks,
+      selectedSubtitleId: selected,
+      subtitleOverlayId: selected == liveTrack ? liveTrack : null,
       audioTracks: snapshot.audioTracks,
       selectedAudioId: snapshot.selectedAudioId,
     );
     events.add(snapshot);
+  }
+
+  @override
+  Future<void> selectSubtitle(String? trackId) async {
+    subtitleSelectionRevision++;
+    if (trackId != null && trackId == liveTrack && snapshot.selectedSubtitleId != liveTrack) {
+      previousTrack = snapshot.selectedSubtitleId;
+    }
+    _publish(trackId, snapshot.subtitleTracks);
+  }
+
+  @override
+  Future<void> setLiveSubtitle(String trackId, {required int generation, required bool select}) async {
+    if (snapshot.generation != generation) throw const EmbyViewFailure('播放已变更。');
+    final previous = liveTrack;
+    if (select && (previous == null || previous != snapshot.selectedSubtitleId)) {
+      previousTrack = snapshot.selectedSubtitleId;
+    }
+    liveTrack = trackId;
+    final selected = select || previous != null && snapshot.selectedSubtitleId == previous;
+    if (selected) subtitleSelectionRevision++;
+    _publish(selected ? trackId : snapshot.selectedSubtitleId, [
+      ...snapshot.subtitleTracks.where((t) => t.id != previous),
+      PlaybackTrack(id: trackId, name: '简体中文 · AI 生成', language: 'zh', source: PlaybackTrackSource.ai),
+    ]);
+  }
+
+  @override
+  Future<void> endLiveSubtitle(String trackId, {String? replacementId}) async {
+    if (trackId != liveTrack) return;
+    liveTrack = null;
+    _publish(
+      snapshot.selectedSubtitleId == trackId ? replacementId ?? previousTrack : snapshot.selectedSubtitleId,
+      snapshot.subtitleTracks.where((t) => t.id != trackId).toList(),
+    );
   }
 
   void end() {
@@ -501,28 +629,21 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     String? language,
     String? codec,
     String? contentKey,
+    String? liveTrackId,
     PlaybackTrackSource source = PlaybackTrackSource.online,
   }) async {
     if (!registrationStarted.isCompleted) registrationStarted.complete();
     await registrationGate?.future;
     final id = '$generation:external${registered.length}';
     final text = await File.fromUri(Uri.parse(url)).readAsString();
-    expect(generation, snapshot.generation);
+    if (generation != snapshot.generation || liveTrackId != null && liveTrackId != liveTrack) {
+      throw const EmbyViewFailure('播放或生成已变更。');
+    }
     registered[id] = text;
-    snapshot = PlaybackSnapshot(
-      generation: generation,
-      target: snapshot.target,
-      phase: PlaybackPhase.playing,
-      duration: snapshot.duration,
-      selectedSubtitleId: snapshot.selectedSubtitleId,
-      audioTracks: snapshot.audioTracks,
-      selectedAudioId: snapshot.selectedAudioId,
-      subtitleTracks: [
-        ...snapshot.subtitleTracks,
-        PlaybackTrack(id: id, name: title ?? 'subtitle', language: language, source: source, format: codec),
-      ],
-    );
-    events.add(snapshot);
+    _publish(snapshot.selectedSubtitleId, [
+      ...snapshot.subtitleTracks,
+      PlaybackTrack(id: id, name: title ?? 'subtitle', language: language, source: source, format: codec),
+    ]);
     return id;
   }
 

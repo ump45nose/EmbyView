@@ -99,6 +99,7 @@ PlaybackSnapshot _snap({
   Duration position = const Duration(minutes: 6, seconds: 12),
   Duration? duration = const Duration(minutes: 24),
   String? selectedSubtitleId = 'emb',
+  String? subtitleOverlayId,
   String? selectedAudioId = 'ja',
   List<PlaybackTrack>? subtitleTracks,
   List<PlaybackTrack>? audioTracks,
@@ -109,7 +110,7 @@ PlaybackSnapshot _snap({
     generation: generation,
     target: PlayTarget(itemId: card.id, seriesId: card.seriesId, seasonId: card.seasonId, episodeNumber: card.episodeNumber),
     item: card, phase: PlaybackPhase.playing, position: position, duration: duration,
-    selectedSubtitleId: selectedSubtitleId, selectedAudioId: selectedAudioId,
+    selectedSubtitleId: selectedSubtitleId, subtitleOverlayId: subtitleOverlayId, selectedAudioId: selectedAudioId,
     subtitleTracks: subtitleTracks ?? const [
       PlaybackTrack(id: 'emb', name: '简体中文', language: 'zh', source: PlaybackTrackSource.embedded, format: 'ASS'),
       PlaybackTrack(id: 'en', name: 'English', language: 'en', source: PlaybackTrackSource.embedded, format: 'SRT'),
@@ -316,6 +317,39 @@ void main() {
       expect(find.text('重新生成'), findsOneWidget);
     });
 
+    testWidgets('live, old and off rows select exactly one track while generation continues', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      const live = '1:live-test', old = '1:1';
+      const tracks = [
+        PlaybackTrack(id: old, name: '旧字幕', source: PlaybackTrackSource.embedded),
+        PlaybackTrack(id: live, name: '简体中文 · AI 生成', source: PlaybackTrackSource.ai),
+      ];
+      const state = SubtitleSnapshot(generation: 1, ai: AiRun(
+        generation: 1, state: AiRunState.generating, startedAt: Duration.zero,
+      ));
+      final panel = _FakeSubtitlePanel(state);
+      String? selected = live;
+      await tester.pumpWidget(_wrap(child: StatefulBuilder(builder: (_, update) => EvPlayerPanel(
+        open: true, activeTab: 'subs', snapshot: _snap(selectedSubtitleId: selected, subtitleTracks: tracks),
+        subtitleSnapshot: state, subtitlePanel: panel,
+        onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (id) => update(() => selected = id),
+        onSelectAudio: (_) {}, onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
+      ))));
+      await tester.pump(const Duration(milliseconds: 500));
+      String checked() => tester.widgetList<EvPanelTrackRow>(find.byType(EvPanelTrackRow)).singleWhere((row) => row.selected).title;
+      expect(checked(), '简体中文 · AI 生成');
+      for (final (id, name) in [(old, '旧字幕'), ('off', '关闭字幕'), (live, '简体中文 · AI 生成')]) {
+        final row = find.byKey(Key('ev_sub_track_$id'));
+        await tester.ensureVisible(row);
+        await tester.tap(row);
+        await tester.pump();
+        expect(checked(), name);
+        expect(find.byKey(const Key('ev_ai_cancel')), findsOneWidget);
+      }
+      expect(panel.cancelAiCalls, 0);
+    });
+
     testWidgets('EvLiveSubtitleLayer renders active cue translation and hides during pause/scrub/credits', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1440, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -328,24 +362,43 @@ void main() {
           SubtitleCue(id: '2', start: Duration(seconds: 5), end: Duration(seconds: 10), text: 'Run', translation: '天亮之前越过山脊'),
         ],
       );
-      final snap = _snap(
-        position: const Duration(seconds: 2),
-        selectedSubtitleId: 'ai_1',
-        subtitleTracks: const [PlaybackTrack(id: 'ai_1', name: 'AI 中字', source: PlaybackTrackSource.ai)],
-      );
-
-      await tester.pumpWidget(_wrap(
-        child: EvLiveSubtitleLayer(snapshot: snap, subtitleSnapshot: SubtitleSnapshot(generation: 1, ai: run), controlsVisible: true, panelOpen: false),
-      ));
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('ev_player_live_subtitle')), findsOneWidget);
+      const liveId = 'live-1';
+      const subTracks = [
+        PlaybackTrack(id: liveId, name: '简体中文 · AI 生成', source: PlaybackTrackSource.ai),
+        PlaybackTrack(id: 'sidecar', name: '之前生成的字幕', source: PlaybackTrackSource.ai),
+      ];
+      final sub = SubtitleSnapshot(generation: 1, selectedTrackId: liveId, cues: run.cues, ai: run);
+      Future<void> show(String? id, int second, {String? overlay = liveId, int generation = 1}) async {
+        await tester.pumpWidget(_wrap(
+          child: EvLiveSubtitleLayer(
+            snapshot: _snap(generation: generation, position: Duration(seconds: second), selectedSubtitleId: id,
+                subtitleOverlayId: overlay, subtitleTracks: subTracks),
+            subtitleSnapshot: sub, controlsVisible: true, panelOpen: false,
+          ),
+        ));
+        await tester.pump();
+      }
+      await show(liveId, 2);
+      expect(find.text('城墙上的火把熄灭了'), findsOneWidget);
+      await show(liveId, 5);
+      expect(find.text('天亮之前越过山脊'), findsOneWidget);
+      expect(find.text('城墙上的火把熄灭了'), findsNothing);
+      for (final id in ['sidecar', null, liveId]) {
+        await show(id, 2, overlay: null);
+        expect(find.text('城墙上的火把熄灭了'), findsNothing);
+      }
+      await show(liveId, 10);
+      expect(find.text('天亮之前越过山脊'), findsNothing);
+      await show(liveId, 2, generation: 2);
+      expect(find.text('城墙上的火把熄灭了'), findsNothing);
+      await show(liveId, 2);
       expect(find.text('城墙上的火把熄灭了'), findsOneWidget);
 
       // Advance to second cue and pause -> opacity 0
       await tester.pumpWidget(_wrap(
         child: EvLiveSubtitleLayer(
-          snapshot: _snap(position: const Duration(seconds: 7), selectedSubtitleId: 'ai_1', subtitleTracks: snap.subtitleTracks),
-          subtitleSnapshot: SubtitleSnapshot(generation: 1, ai: run), controlsVisible: false, panelOpen: true, paused: true,
+          snapshot: _snap(position: const Duration(seconds: 7), selectedSubtitleId: liveId, subtitleOverlayId: liveId, subtitleTracks: subTracks),
+          subtitleSnapshot: sub, controlsVisible: false, panelOpen: true, paused: true,
         ),
       ));
       await tester.pumpAndSettle();
@@ -537,7 +590,7 @@ void main() {
     testWidgets('all 3 panel tabs + compare + live subtitle render cleanly at 1440x900 & 2560x1440 in cinema & paper', (tester) async {
       addTearDown(() => tester.binding.setSurfaceSize(null));
       final subSnap = SubtitleSnapshot(
-        generation: 1, cues: _makeCues(20),
+        generation: 1, selectedTrackId: 'live-1', cues: _makeCues(20),
         ai: AiRun(generation: 1, state: AiRunState.generating, startedAt: Duration.zero, coverageEnd: const Duration(minutes: 9, seconds: 44), cues: _makeCues(5)),
       );
       final panel = _FakeSubtitlePanel(subSnap);
@@ -555,7 +608,7 @@ void main() {
               size: size, mode: mode,
               child: Stack(fit: StackFit.expand, children: [
                 EvAnime4kCompareOverlay(active: true, anime4k: activeA4k, onSplitChanged: (_) {}, onEnd: () {}),
-                EvLiveSubtitleLayer(snapshot: _snap(position: const Duration(seconds: 2), selectedSubtitleId: null, subtitleTracks: const []), subtitleSnapshot: subSnap, controlsVisible: true, panelOpen: true),
+                EvLiveSubtitleLayer(snapshot: _snap(position: const Duration(seconds: 2), selectedSubtitleId: 'live-1', subtitleOverlayId: 'live-1'), subtitleSnapshot: subSnap, controlsVisible: true, panelOpen: true),
                 EvPlayerPanel(
                   open: true, activeTab: tab, snapshot: snap, subtitleSnapshot: subSnap, subtitlePanel: panel,
                   onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},

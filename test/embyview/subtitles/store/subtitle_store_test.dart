@@ -34,6 +34,7 @@ final class _Input implements PlaybackSubtitleInput {
     String? language,
     String? codec,
     String? contentKey,
+    String? liveTrackId,
     PlaybackTrackSource source = PlaybackTrackSource.online,
   }) async {
     expect(generation, subtitleSource.generation);

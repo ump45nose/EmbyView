@@ -26,6 +26,7 @@ class _Backend extends PlayerBackend implements AetherBackend {
   final starts = <Duration>[];
   bool failOpen = false, playing = false;
   bool failDisableSubtitle = false, failSelectSubtitle = false;
+  int subtitleDisables = 0;
   Completer<void>? subtitleDisableGate, subtitleSelectGate;
   int asyncFailureOpens = 0;
   Duration at = Duration.zero;
@@ -60,6 +61,7 @@ class _Backend extends PlayerBackend implements AetherBackend {
   @override
   Future<void> disableSubtitleTrack() async {
     await subtitleDisableGate?.future;
+    subtitleDisables++;
     if (failDisableSubtitle) throw StateError('disable failed');
   }
 
@@ -518,6 +520,61 @@ void main() {
     expect(session.snapshot.selectedSubtitleId, embedded);
     await session.selectSubtitle(null);
     expect(session.snapshot.selectedSubtitleId, isNull);
+  });
+  test('live selection waits for native off before drawing and late sidecar selection yields to cancellation or the viewer', () async {
+    final backend = _Backend();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager, client: _Client(), native: native, audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.test/movie'))),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+    final session = adapter.open(const PlayTarget(itemId: 'movie'));
+    await pumpEventQueue(times: 30);
+    final input = session as PlaybackSubtitleInput, gen = session.snapshot.generation;
+    final old = await input.registerExternalSubtitle('file:///old.srt', generation: gen);
+    final formal = await input.registerExternalSubtitle('file:///generated.srt', generation: gen);
+    await session.selectSubtitle(old);
+    for (final action in ['cancel', 'old', 'new']) {
+      final live = '$gen:live-$action';
+      final off = backend.subtitleDisableGate = Completer<void>();
+      final start = input.setLiveSubtitle(live, generation: gen, select: true);
+      expect(session.snapshot.selectedSubtitleId, live);
+      expect(session.snapshot.subtitleOverlayId, isNull);
+      final before = backend.subtitleDisables;
+      off.complete();
+      await start;
+      expect(backend.subtitleDisables, greaterThan(before));
+      expect(session.snapshot.subtitleOverlayId, live);
+
+      final gate = native.selectGate = Completer<void>();
+      final entered = native.selecting = Completer<void>();
+      final handoff = input.endLiveSubtitle(live, replacementId: formal);
+      await entered.future;
+      expect(session.snapshot.subtitleOverlayId, isNull);
+      final disablesBeforeChoice = backend.subtitleDisables;
+      final superseding = switch (action) {
+        'cancel' => input.endLiveSubtitle(live),
+        'old' => session.selectSubtitle(old),
+        _ => input.setLiveSubtitle('$gen:new', generation: gen, select: true),
+      };
+      gate.complete();
+      await Future.wait([handoff, superseding]);
+      expect(session.snapshot.selectedSubtitleId, switch (action) {
+        'cancel' || 'old' => old, _ => '$gen:new',
+      });
+      expect(session.snapshot.subtitleTracks.any((t) => t.id == live), isFalse);
+      if (action == 'new') {
+        expect(backend.subtitleDisables, greaterThan(disablesBeforeChoice));
+      } else {
+        expect(native.externalLoads.last, (gen, 'file:///old.srt', true));
+      }
+    }
   });
   test(
     'Anime4K defaults follow known anime library and latest preferences without extra item reads',

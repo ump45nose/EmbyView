@@ -32,6 +32,21 @@ abstract interface class PlaybackSubtitleInput {
   PlaybackSubtitleSource? get subtitleSource;
   Stream<PlaybackSubtitleSource?> get subtitleSources;
   NativePlaybackAudioInput get audioInput;
+
+  /// Changes as soon as a selection is requested, including an explicit off.
+  int get subtitleSelectionRevision;
+
+  /// Replace the previous run's row. A timeline restart follows the viewer's
+  /// current choice, while an explicit start selects the new row immediately.
+  Future<void> setLiveSubtitle(
+    String trackId, {
+    required int generation,
+    required bool select,
+  });
+
+  /// Retire this run. Only a viewer still on its live row follows the handoff.
+  Future<void> endLiveSubtitle(String trackId, {String? replacementId});
+
   /// Register a playable sidecar without changing the selected subtitle.
   /// The returned ID is immediately available in the session snapshot.
   Future<String> registerExternalSubtitle(
@@ -41,6 +56,7 @@ abstract interface class PlaybackSubtitleInput {
     String? language,
     String? codec,
     String? contentKey,
+    String? liveTrackId,
     PlaybackTrackSource source = PlaybackTrackSource.online,
   });
 

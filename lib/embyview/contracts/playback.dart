@@ -89,6 +89,7 @@ class PlaybackSnapshot {
     this.subtitleTracks = const [],
     this.selectedAudioId,
     this.selectedSubtitleId,
+    this.subtitleOverlayId,
     this.volume = 1,
     this.muted = false,
     this.nextEpisode,
@@ -114,11 +115,15 @@ class PlaybackSnapshot {
   final MediaQuality? quality;
   final List<ChapterMark> chapters;
   final List<PlaybackTrack> audioTracks;
+
   /// All available tracks, including registered (but not necessarily selected)
   /// sidecars. Track IDs belong to this source generation.
   final List<PlaybackTrack> subtitleTracks;
   final String? selectedAudioId;
   final String? selectedSubtitleId;
+
+  /// The live track allowed to draw over video after native captions are off.
+  final String? subtitleOverlayId;
   final double volume;
   final bool muted;
   final MediaCard? nextEpisode;
@@ -173,6 +178,7 @@ abstract interface class PlaybackSession {
   Future<void> setVolume(double fraction);
   Future<void> setMuted(bool muted);
   Future<void> selectAudio(String trackId);
+
   /// Select an available subtitle track, or turn subtitles off with null.
   Future<void> selectSubtitle(String? trackId);
   Future<void> setAnime4k(bool enabled);
