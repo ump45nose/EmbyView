@@ -5,9 +5,10 @@ enum ThemeMode { cinema, paper, automatic }
 
 enum NavigationStyle { icon, iconAndText, text }
 
-enum SecretKind { openAi, gemini, assrt, openSubtitles }
+enum SecretKind { openAi, assrt, openSubtitles }
 
-enum TranslationProvider { gemini, openAi }
+const defaultTranslationBaseUrl = 'https://api.openai.com/v1';
+const defaultTranslationModel = 'gpt-5.4-mini';
 
 enum MediaFolderState { unconfigured, authorized, denied, unmounted, invalid }
 
@@ -53,7 +54,8 @@ class LocalPreferences {
       SubtitleSource.openSubtitles,
       SubtitleSource.anime,
     },
-    this.translationProvider = TranslationProvider.gemini,
+    this.translationBaseUrl = defaultTranslationBaseUrl,
+    this.translationModel = defaultTranslationModel,
     this.monthlyBudgetMicros = 30000000,
     this.mediaFolder = const MediaFolderStatus(
       state: MediaFolderState.unconfigured,
@@ -82,7 +84,8 @@ class LocalPreferences {
   final List<String> subtitleLanguages;
   final bool autoSelectChineseSubtitle;
   final Set<SubtitleSource> subtitleSources;
-  final TranslationProvider translationProvider;
+  final String translationBaseUrl;
+  final String translationModel;
   final int monthlyBudgetMicros;
   final MediaFolderStatus mediaFolder;
   final List<ZonePreference> zones;

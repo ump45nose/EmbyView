@@ -326,7 +326,6 @@ void main() {
         sources: sources,
         processor: SubtitleAiProcessor(
           readSecret: (_) async => null,
-          translationProvider: () => TranslationProvider.openAi,
           meter: <T>(_, invoke) async => (await invoke()).value,
         ),
         preferences: () => LocalPreferences(autoSelectChineseSubtitle: autoSelect),

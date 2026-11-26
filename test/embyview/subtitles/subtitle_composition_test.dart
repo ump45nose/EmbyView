@@ -121,6 +121,29 @@ void main() {
     expect(cue.translation, '中文字幕');
   });
 
+  test('start AI displays the missing key or unready model reason before acquiring audio', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final fixture = await _Fixture.open();
+    addTearDown(fixture.close);
+    await fixture.panel.startAi();
+    expect(fixture.panel.snapshot.ai?.state, AiRunState.failed);
+    expect(fixture.panel.snapshot.ai?.failure?.reason, contains('翻译密钥'));
+    expect(fixture.playback.audioInput.started.isCompleted, isFalse);
+
+    fixture.aiRequest = (_) async => throw StateError('No network request expected');
+    const asr = MethodChannel('embyview/asr');
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(
+      asr,
+      (_) async => {'state': 'notDownloaded', 'receivedBytes': 0, 'totalBytes': 50},
+    );
+    addTearDown(() => messenger.setMockMethodCallHandler(asr, null));
+    await fixture.panel.startAi();
+    expect(fixture.panel.snapshot.ai?.state, AiRunState.failed);
+    expect(fixture.panel.snapshot.ai?.failure?.reason, contains('设置'));
+    expect(fixture.playback.audioInput.started.isCompleted, isFalse);
+  });
+
   test('normal playback end flushes a short final segment in the following mode', () async {
     final fixture = await _Fixture.open();
     addTearDown(fixture.close);
@@ -128,6 +151,15 @@ void main() {
     final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     const channel = MethodChannel('embyview/audio_control');
     final pcm = Uint8List(48000 * 4);
+    fixture.aiRequest = (_) async => throw StateError('Unexpected translation for silence');
+    const asr = MethodChannel('embyview/asr');
+    var transcriptions = 0;
+    messenger.setMockMethodCallHandler(asr, (call) async {
+      if (call.method == 'modelStatus') return {'state': 'ready', 'receivedBytes': 1, 'totalBytes': 1};
+      transcriptions++;
+      return {'language': 'ja', 'segments': []};
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(asr, null));
     messenger.setMockMethodCallHandler(channel, (call) async {
       expect(call.method, 'readIndependent');
       return [
@@ -153,6 +185,7 @@ void main() {
     fixture.playback.end();
     await run;
     expect(fixture.requestedAiKey, isTrue);
+    expect(transcriptions, 1);
   });
 
   test('AI audio and its language follow the switched stream before the playback snapshot catches up', () async {
@@ -171,13 +204,25 @@ void main() {
       ];
     });
     addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    const asr = MethodChannel('embyview/asr');
+    messenger.setMockMethodCallHandler(
+      asr,
+      (call) async => call.method == 'modelStatus'
+          ? {'state': 'ready', 'receivedBytes': 1, 'totalBytes': 1}
+          : {
+              'language': 'en',
+              'segments': [
+                {'startUs': 0, 'endUs': 100000, 'text': 'Hello'},
+              ],
+            },
+    );
+    addTearDown(() => messenger.setMockMethodCallHandler(asr, null));
     final requests = StreamController<(int?, String?)>();
     final heard = StreamIterator(requests.stream);
     final reply = Completer<http.Response>();
     fixture.aiRequest = (request) {
-      final language = RegExp(r'name="language"\r\n\r\n([a-z]+)')
-          .firstMatch(latin1.decode(request.bodyBytes))
-          ?.group(1);
+      final instructions = jsonDecode(request.body)['messages'][0]['content'] as String;
+      final language = RegExp(r'原文语言：(ja|en)').firstMatch(instructions)?.group(1);
       requests.add((streamIndex, language));
       return reply.future;
     };
@@ -217,7 +262,7 @@ void main() {
     expect(heard.current, (8, 'en'));
     switchedTo(99);
     expect(await heard.moveNext(), isTrue);
-    expect(heard.current, (99, null));
+    expect(heard.current, (99, 'en')); // Falls back to the detected language.
     await fixture.panel.cancelAi();
     reply.complete(http.Response('', 503));
     await started;
@@ -271,7 +316,6 @@ class _Fixture {
           fixture.requestedAiKey = true;
           return fixture.aiRequest == null ? null : 'mock-key';
         },
-        translationProvider: () => TranslationProvider.openAi,
         meter: <T>(_, invoke) async => (await invoke()).value,
         clientFactory: () => MockClient(fixture.aiRequest ?? (_) async => http.Response('', 503)),
       ),

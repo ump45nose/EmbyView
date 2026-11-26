@@ -33,6 +33,15 @@ void main() {
   });
   tearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
+  test('old preferences take the standard translation defaults and keep unrelated choices', () async {
+    SharedPreferences.setMockInitialValues({'embyview.machine.v1': '{"theme":"paper","translationProvider":"gemini"}'});
+    final prefs = await MachinePreferences.open();
+    expect(prefs.current.theme, ThemeMode.paper);
+    expect(prefs.current.translationBaseUrl, 'https://api.openai.com/v1');
+    expect(prefs.current.translationModel, 'gpt-5.4-mini');
+    await prefs.close();
+  });
+
   test('machine choices and zone order survive reopening', () async {
     final builtin = _zone('movies');
     final custom = _zone('genre');
@@ -40,6 +49,8 @@ void main() {
     await prefs.update(
       LocalPreferences(
         theme: ThemeMode.paper,
+        translationBaseUrl: 'https://gateway.example/custom/v1',
+        translationModel: 'custom-model',
         chooseUserOnStartup: false,
         zones: [builtin],
       ),
@@ -49,6 +60,8 @@ void main() {
     final restored = await MachinePreferences.open(defaultZones: [builtin]);
     expect(restored.current.theme, ThemeMode.paper);
     expect(restored.current.chooseUserOnStartup, false);
+    expect(restored.current.translationBaseUrl, 'https://gateway.example/custom/v1');
+    expect(restored.current.translationModel, 'custom-model');
     expect(restored.current.zones.map((z) => z.id), ['genre', 'movies']);
     await prefs.close();
     await restored.close();

@@ -8,11 +8,12 @@ typedef SubtitleAiMeter = Future<T> Function<T>(int estimatedCostMicros, Future<
 
 /// A successful HTTP call can be charged even when its content is unusable.
 final class SubtitleAiCharge<T> {
-  const SubtitleAiCharge({required this.value, required this.costMicros, this.requestId});
+  const SubtitleAiCharge({required this.value, required this.costMicros, this.requestId, this.unmetered = false});
 
   final T value;
   final int costMicros;
   final String? requestId;
+  final bool unmetered;
 }
 
 final class SubtitleAiCancellation {

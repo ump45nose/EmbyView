@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
 import '../../contracts/common.dart';
+import '../../contracts/preferences.dart';
 import '../../contracts/subtitles.dart';
 import '../../playback/playback_subtitle_input.dart';
 import '../ai/subtitle_ai_processor.dart';
@@ -51,6 +52,7 @@ final class SubtitleEpisodeContext {
     required this.availability,
     required this.authorizationId,
     this.language,
+    this.mediaContext = '',
     this.streamIndex,
     this.checkAuthorization,
   });
@@ -61,6 +63,7 @@ final class SubtitleEpisodeContext {
   final SubtitleAvailability availability;
   final String authorizationId;
   final String? language;
+  final String mediaContext;
   final int? streamIndex;
   final Future<void> Function()? checkAuthorization;
 
@@ -93,19 +96,20 @@ typedef SubtitleEpisodeResolver = Future<SubtitleEpisodeContext> Function(String
 typedef SubtitleEpisodeGenerator = Future<String> Function(SubtitleEpisodeContext context, SubtitleEpisodeRun run);
 
 final class SubtitleSeasonQueue {
-  SubtitleSeasonQueue._(this._file, this._entries, this._ledger, this._resolve, this._generate);
+  SubtitleSeasonQueue._(this._file, this._entries, this._ledger, this._resolve, this._generate, this._preferences);
 
   static Future<SubtitleSeasonQueue> open({
     required Directory localDirectory,
     required SubtitleUsageLedger ledger,
     required SubtitleEpisodeResolver resolve,
     required SubtitleEpisodeGenerator generate,
+    LocalPreferences Function()? preferences,
   }) async {
     await localDirectory.create(recursive: true);
     final file = File(p.join(localDirectory.path, 'seasons.json'));
     final saved = await readJobJson(file);
     final entries = saved == null ? <_Season>[] : (saved['jobs'] as List).map(_Season.fromJson).toList();
-    final queue = SubtitleSeasonQueue._(file, entries, ledger, resolve, generate);
+    final queue = SubtitleSeasonQueue._(file, entries, ledger, resolve, generate, preferences);
     queue.wake();
     return queue;
   }
@@ -115,6 +119,7 @@ final class SubtitleSeasonQueue {
   final SubtitleUsageLedger _ledger;
   final SubtitleEpisodeResolver _resolve;
   final SubtitleEpisodeGenerator _generate;
+  final LocalPreferences Function()? _preferences;
   final _mutations = SubtitleJobSerial();
   final _changes = StreamController<List<SeasonJob>>.broadcast();
   bool _foregroundStrm = false, _closed = false, _wakeRequested = false;
@@ -137,8 +142,8 @@ final class SubtitleSeasonQueue {
 
   Future<String> queueSeason(SubtitleSeasonRequest request, SeasonQuote quote) async {
     final (season, fresh) = await _prepare(request);
-    if (fresh.id != quote.id) {
-      throw const EmbyViewFailure('季、媒体源或授权已变化，请重新估价。', code: 'subtitle_quote_changed');
+    if (fresh.id != quote.id || fresh.estimatedCostMicros > quote.estimatedCostMicros) {
+      throw const EmbyViewFailure('季、媒体源、授权或预估费用已变化，请重新估价。', code: 'subtitle_quote_changed');
     }
     if (fresh.budget != BudgetState.available) {
       throw EmbyViewFailure(fresh.reason!, retryable: true, code: 'subtitle_season_budget');
@@ -175,6 +180,7 @@ final class SubtitleSeasonQueue {
       throw const EmbyViewFailure('该季没有可确定的剧集列表。', code: 'subtitle_season_episodes');
     }
     final rows = <_Episode>[];
+    final prefs = _preferences?.call() ?? const LocalPreferences();
     var estimate = 0;
     for (final (_, episode) in episodes) {
       final context = await _authorized(request.accountId, episode);
@@ -190,8 +196,7 @@ final class SubtitleSeasonQueue {
       if (alreadyComplete) continue;
       final uncovered = missingSubtitleCoverage(context.duration, context.availability.coverage);
       final duration = uncovered.fold(Duration.zero, (sum, span) => sum + span.end - span.start);
-      final transcription = estimateSubtitleTranscriptionMicros(duration);
-      estimate += transcription + (transcription / 3).ceil(); // Approximate translation allowance for the quote.
+      estimate += estimateSubtitleTranslationMicros(prefs, duration);
     }
     final identity = [
       request.accountId,

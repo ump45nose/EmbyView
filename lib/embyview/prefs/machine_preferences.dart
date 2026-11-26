@@ -252,7 +252,8 @@ class MachinePreferences implements EmbyViewPreferences {
     'subtitleLanguages': p.subtitleLanguages,
     'autoChinese': p.autoSelectChineseSubtitle,
     'subtitleSources': p.subtitleSources.map((s) => s.name).toList(),
-    'translationProvider': p.translationProvider.name,
+    'translationBaseUrl': p.translationBaseUrl,
+    'translationModel': p.translationModel,
     'budget': p.monthlyBudgetMicros,
     'zones': p.zones.map(_zoneJson).toList(),
   };
@@ -294,11 +295,8 @@ class MachinePreferences implements EmbyViewPreferences {
           (s) => (p['subtitleSources'] as List).contains(s.name),
         ),
       ),
-      translationProvider: _enum(
-        TranslationProvider.values,
-        p['translationProvider'],
-        d.translationProvider,
-      ),
+      translationBaseUrl: (p['translationBaseUrl'] as String?)?.trim() ?? d.translationBaseUrl,
+      translationModel: (p['translationModel'] as String?)?.trim() ?? d.translationModel,
       monthlyBudgetMicros: (p['budget'] as int).clamp(0, 1000000000000),
       mediaFolder: mediaFolder,
       zones: List.unmodifiable(

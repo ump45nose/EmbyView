@@ -23,7 +23,8 @@ final class SubtitleUsageLedger {
     required this.sharedRoot,
     required this.machineName,
     required this.budgetMicros,
-    required this.credentialsAvailable,
+    required this.checkGeneration,
+    this.translationMetered,
     DateTime Function()? clock,
   }) : _clock = clock ?? DateTime.now {
     if (machineName.isEmpty ||
@@ -38,7 +39,8 @@ final class SubtitleUsageLedger {
   final FutureOr<Directory?> Function() sharedRoot;
   final String machineName;
   final int Function() budgetMicros;
-  final FutureOr<bool> Function() credentialsAvailable;
+  final FutureOr<void> Function() checkGeneration;
+  final bool Function()? translationMetered;
   final DateTime Function() _clock;
   final _serial = SubtitleJobSerial();
   final _episodeZoneKey = Object();
@@ -54,9 +56,15 @@ final class SubtitleUsageLedger {
   Future<AiUsage> usage() => _serial.run(() => _usage(_month));
 
   Future<(BudgetState, String?)> episodeBudget() async {
-    if (!await credentialsAvailable()) {
-      return (BudgetState.missingCredentials, '请先在设置中配置听写和翻译凭据。');
+    try {
+      await checkGeneration();
+    } on EmbyViewFailure catch (failure) {
+      return (
+        failure.code == 'subtitle_ai_credentials' ? BudgetState.missingCredentials : BudgetState.unknown,
+        failure.reason,
+      );
     }
+    if (translationMetered?.call() == false) return (BudgetState.available, null);
     return _budget(await usage());
   }
 
@@ -79,15 +87,19 @@ final class SubtitleUsageLedger {
     final episode = Zone.current[_episodeZoneKey] as ({String id, Future<void> Function()? checkAuthorization})?;
     return _serial.run(() async {
       final month = _month;
-      final (state, reason) = _budget(await _usage(month));
-      // This machine admits one request at a time while any budget remains.
-      if (state != BudgetState.available) throw SubtitleBudgetBlocked(reason!, state);
+      if (estimatedCostMicros > 0) {
+        // This machine admits one paid request at a time while any budget remains.
+        final (state, reason) = _budget(await _usage(month));
+        if (state != BudgetState.available) throw SubtitleBudgetBlocked(reason!, state);
+      }
       final own = await _readLocal(month);
       final checkAuthorization = episode?.checkAuthorization;
       if (checkAuthorization != null) await checkAuthorization();
       final response = await invoke();
       final requestId = response.requestId?.trim();
-      final key = requestId == null || requestId.isEmpty ? const Uuid().v4() : requestId;
+      final id = requestId == null || requestId.isEmpty ? const Uuid().v4() : requestId;
+      final key = response.unmetered ? 'unmetered:$id' : id;
+      if (response.unmetered) own.unmetered.add(key);
       own.calls.putIfAbsent(
         key,
         () => (response.costMicros >= 0 ? response.costMicros : estimatedCostMicros, episode?.id),
@@ -163,6 +175,7 @@ final class SubtitleUsageLedger {
         budgetMicros: budgetMicros(),
         usedMicros: calls == null ? null : sum(calls),
         completedEpisodes: completed.length,
+        unmeteredCalls: records?.unmetered.length ?? 0,
         averageEpisodeMicros: completed.isEmpty
             ? null
             : sum(calls!.where((call) => completed.contains(call.$2))) ~/ completed.length,
@@ -207,6 +220,9 @@ final class _UsageRecords {
       }
       if (data['completed'] case final List rows when rows.every((row) => row is String)) {
         result.completed.addAll(rows.cast<String>());
+        if (data['unmetered'] case final List ids) {
+          result.unmetered.addAll(ids.whereType<String>().where(result.calls.containsKey));
+        }
         return result;
       }
     }
@@ -215,6 +231,7 @@ final class _UsageRecords {
 
   final calls = <String, (int, String?)>{};
   final completed = <String>{};
+  final unmetered = <String>{};
   bool merge(_UsageRecords other) {
     var changed = false;
     for (final row in other.calls.entries) {
@@ -224,6 +241,9 @@ final class _UsageRecords {
         calls[row.key] = (cost, original?.$2 ?? row.value.$2);
         changed = true;
       }
+    }
+    for (final id in other.unmetered) {
+      if (unmetered.add(id)) changed = true;
     }
     for (final episode in other.completed) {
       if (completed.add(episode)) changed = true;
@@ -236,5 +256,6 @@ final class _UsageRecords {
       for (final row in calls.entries) row.key: [row.value.$1, row.value.$2],
     },
     'completed': completed.toList(),
+    if (unmetered.isNotEmpty) 'unmetered': unmetered.toList(),
   };
 }

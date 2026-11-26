@@ -424,6 +424,8 @@ void main() {
         theme: ThemeMode.cinema,
         navigation: NavigationStyle.icon,
         themeVolume: 0.42,
+        translationBaseUrl: 'https://gateway.example/custom/v1',
+        translationModel: 'custom-model',
       ),
       resumes: const [],
     );
@@ -466,6 +468,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(h.prefs.current.theme, ThemeMode.paper);
     expect(h.prefs.current.themeVolume, 0.42); // preserved
+    expect(h.prefs.current.translationBaseUrl, 'https://gateway.example/custom/v1');
+    expect(h.prefs.current.translationModel, 'custom-model');
 
     ctrl.open();
     await tester.pumpAndSettle();

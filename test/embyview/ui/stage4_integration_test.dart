@@ -121,7 +121,7 @@ LocalPreferences _copyPrefs(LocalPreferences b, {List<ZonePreference>? zones}) =
   preResolve115: b.preResolve115, readAheadBytes: b.readAheadBytes, autoPlayNext: b.autoPlayNext,
   anime4kForAnime: b.anime4kForAnime, anime4kForOther: b.anime4kForOther, subtitleLanguages: b.subtitleLanguages,
   autoSelectChineseSubtitle: b.autoSelectChineseSubtitle, subtitleSources: b.subtitleSources,
-  translationProvider: b.translationProvider, monthlyBudgetMicros: b.monthlyBudgetMicros,
+  translationBaseUrl: b.translationBaseUrl, translationModel: b.translationModel, monthlyBudgetMicros: b.monthlyBudgetMicros,
   mediaFolder: b.mediaFolder, zones: zones ?? b.zones,
 );
 

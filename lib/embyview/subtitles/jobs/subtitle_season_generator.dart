@@ -80,6 +80,7 @@ final class SubtitleSeasonGenerator {
               segment,
               cancellation: run.cancellation,
               language: language,
+              mediaContext: context.mediaContext,
               onStage: run.setStage,
             );
             language ??= piece.language;

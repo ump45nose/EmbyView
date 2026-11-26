@@ -82,7 +82,8 @@ class BoundSubtitlePanel implements SubtitlePanel {
         play.phase != PlaybackPhase.failed;
     if (!identical(_scope?.source, valid ? source : null)) {
       final previous = _scope?.source;
-      final restoring = valid &&
+      final restoring =
+          valid &&
           (_scope?.autoSelectionSettled == true || _scope?.userApplied == true) &&
           previous?.target.itemId == source.target.itemId &&
           previous?.mediaSourceId == source.mediaSourceId;
@@ -184,6 +185,16 @@ class BoundSubtitlePanel implements SubtitlePanel {
       },
     ),
   );
+
+  Future<String> _translationContext(_PanelScope scope) async {
+    try {
+      return subtitleTranslationContext((await _item(scope)).item);
+    } on EmbyViewFailure {
+      // Cached audio and subtitle text remain usable when optional metadata is unavailable.
+      _check(scope);
+      return '';
+    }
+  }
 
   Future<SubtitleMedia> _media(_PanelScope scope) async {
     final media = SubtitleMedia.fromPlayback(scope.source, duration: session.snapshot.duration);
@@ -456,7 +467,11 @@ class BoundSubtitlePanel implements SubtitlePanel {
               _audio(scope.source, Duration.zero, play.duration, audioIndex, cancellation),
               cancellation: cancellation,
             )
-          : await processor.translate(document, cancellation: cancellation);
+          : await processor.translate(
+              document,
+              cancellation: cancellation,
+              mediaContext: await _translationContext(scope),
+            );
       cancellation.check();
       if (identical(document, edited)) {
         throw const EmbyViewFailure('未找到足够一致的对白锚点，无法校正。', code: 'subtitle_alignment_unavailable');
@@ -529,7 +544,8 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final reader = StreamIterator(_audio(scope.source, start, play.duration, index, cancellation));
     var independent = false;
     try {
-      await checkAi?.call();
+      await (checkAi ?? processor.checkGeneration)();
+      final mediaContext = await _translationContext(scope);
       if (!current()) return;
       try {
         final measured = Stopwatch()..start();
@@ -564,6 +580,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
         followsPlayhead: !independent,
         isCurrent: current,
         language: language,
+        mediaContext: mediaContext,
         cancellation: cancellation,
       );
       if (output != null && current()) {

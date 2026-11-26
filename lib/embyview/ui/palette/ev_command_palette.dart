@@ -552,6 +552,6 @@ LocalPreferences _copyPreferences(LocalPreferences b, {ThemeMode? theme, Navigat
   hideUnwatchedOverview: b.hideUnwatchedOverview, preResolve115: b.preResolve115, readAheadBytes: b.readAheadBytes,
   autoPlayNext: b.autoPlayNext, anime4kForAnime: b.anime4kForAnime, anime4kForOther: b.anime4kForOther,
   subtitleLanguages: b.subtitleLanguages, autoSelectChineseSubtitle: b.autoSelectChineseSubtitle,
-  subtitleSources: b.subtitleSources, translationProvider: b.translationProvider,
+  subtitleSources: b.subtitleSources, translationBaseUrl: b.translationBaseUrl, translationModel: b.translationModel,
   monthlyBudgetMicros: b.monthlyBudgetMicros, mediaFolder: b.mediaFolder, zones: b.zones,
 );

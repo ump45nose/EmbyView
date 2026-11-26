@@ -32,6 +32,7 @@ final class SubtitleAiRunController {
     required bool followsPlayhead,
     required bool Function() isCurrent,
     String? language,
+    String mediaContext = '',
     SubtitleAiCancellation? cancellation,
   }) async {
     if (_closed) throw StateError('The subtitle run controller is closed');
@@ -65,7 +66,12 @@ final class SubtitleAiRunController {
       while (_current(work)) {
         final segment = await buffer.next();
         if (!_current(work) || segment == null) break;
-        final result = await processor.process(segment, cancellation: work.cancellation, language: language);
+        final result = await processor.process(
+          segment,
+          cancellation: work.cancellation,
+          language: language,
+          mediaContext: mediaContext,
+        );
         if (!_current(work)) return null;
         if (result.cues.isNotEmpty) work.language ??= result.language;
         work.coverage = mergeSubtitleAiCoverage([...work.coverage, result.coverage]);

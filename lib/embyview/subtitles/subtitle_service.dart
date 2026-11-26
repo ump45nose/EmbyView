@@ -76,17 +76,13 @@ class SubtitleRuntime {
     },
     machineName: Platform.localHostname.replaceAll(RegExp(r'[^a-zA-Z0-9_.-]'), '_'),
     budgetMicros: () => preferences.current.monthlyBudgetMicros,
-    credentialsAvailable: () async {
-      final provider = preferences.current.translationProvider;
-      final keys = await preferences.configuredSecrets();
-      return keys.contains(SecretKind.openAi) &&
-          (provider == TranslationProvider.openAi || keys.contains(SecretKind.gemini));
-    },
+    checkGeneration: processor.checkGeneration,
+    translationMetered: () => isSubtitleTranslationMetered(preferences.current),
   );
   late final ledger = _openLedger();
   late final processor = SubtitleAiProcessor(
     readSecret: preferences.readSecret,
-    translationProvider: () => preferences.current.translationProvider,
+    preferences: () => preferences.current,
     meter: <T>(cost, invoke) async => (await ledger).charge<T>(cost, invoke),
   );
   late final queue = _openQueue();
@@ -95,6 +91,7 @@ class SubtitleRuntime {
     ledger: await ledger,
     resolve: _resolve,
     generate: SubtitleSeasonGenerator(processor: processor).generate,
+    preferences: () => preferences.current,
   );
 
   (String, String, String) _credentials(String account) {
@@ -183,6 +180,7 @@ class SubtitleRuntime {
           await authorization(identity);
         },
         availability: await library.availability(item, store),
+        mediaContext: subtitleTranslationContext(item.item),
         streamIndex: item.audioIndex,
         language:
             item.streams

@@ -234,6 +234,7 @@ class AiUsage {
     this.budgetMicros = 30000000,
     this.completedEpisodes = 0,
     this.averageEpisodeMicros,
+    this.unmeteredCalls = 0,
     this.reason,
   });
 
@@ -243,6 +244,7 @@ class AiUsage {
   final int budgetMicros;
   final int completedEpisodes;
   final int? averageEpisodeMicros;
+  final int unmeteredCalls;
   final String? reason;
 }
 
