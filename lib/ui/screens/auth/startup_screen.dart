@@ -11,8 +11,10 @@ import '../../../auth/repositories/session_repository.dart';
 import '../../../auth/store/authentication_preferences.dart';
 import '../../../auth/store/credential_store.dart';
 import '../../../data/services/connectivity_service.dart';
+import '../../../embyview/entry.dart';
 import '../../../l10n/app_localizations.dart';
 import '../../../util/pin_code_util.dart';
+import '../../../util/platform_detection.dart';
 import '../../../preference/preference_constants.dart';
 import '../../navigation/destinations.dart';
 import '../../widgets/adaptive/adaptive_dialog.dart';
@@ -36,6 +38,17 @@ class _StartupScreenState extends State<StartupScreen>
     with SingleTickerProviderStateMixin {
   late final AnimationController _fadeController;
   late final Animation<double> _fadeAnimation;
+  String? _embyServerName;
+
+  bool get _useEmbyViewSplash {
+    if (!PlatformDetection.isMacOS) return false;
+    try {
+      final servers = GetIt.instance<ServerRepository>().servers;
+      return servers.every((s) => s.serverType == ServerType.emby);
+    } catch (_) {
+      return true;
+    }
+  }
 
   @override
   void initState() {
@@ -95,9 +108,32 @@ class _StartupScreenState extends State<StartupScreen>
 
     await serverRepo.loadStoredServers();
 
+    if (PlatformDetection.isMacOS && mounted) {
+      final lastId = authPrefs.savedLastServerId;
+      final candidate = (lastId.isNotEmpty ? serverRepo.getServer(lastId) : null) ??
+          serverRepo.servers
+              .where((s) => s.serverType == ServerType.emby)
+              .firstOrNull;
+      if (candidate != null &&
+          candidate.serverType == ServerType.emby &&
+          candidate.name.isNotEmpty) {
+        setState(() => _embyServerName = candidate.name);
+      }
+    }
+
     if (widget.bootstrapActiveSession && session.activeUserId != null) {
       await _waitForNetworkSettle();
-      if (mounted) context.go(Destinations.home);
+      if (!mounted) return;
+      final activeServer = session.activeServerId == null
+          ? null
+          : serverRepo.getServer(session.activeServerId!);
+      if (PlatformDetection.isMacOS &&
+          activeServer?.serverType == ServerType.emby) {
+        await ensureMoonfinEmbyViewEntry();
+        if (mounted) context.go(embyViewHomePath);
+      } else if (mounted) {
+        context.go(Destinations.home);
+      }
       return;
     }
 
@@ -162,10 +198,46 @@ class _StartupScreenState extends State<StartupScreen>
       }
 
       await _waitForNetworkSettle();
-      if (mounted) context.go(Destinations.home);
+      if (!mounted) return;
+      final activeServer = session.activeServerId == null
+          ? null
+          : serverRepo.getServer(session.activeServerId!);
+      if (PlatformDetection.isMacOS &&
+          activeServer?.serverType == ServerType.emby) {
+        final entry = await ensureMoonfinEmbyViewEntry();
+        if (!mounted) return;
+        final chooseUser =
+            entry.services.preferences.current.chooseUserOnStartup;
+        context.go(
+          resolveEmbyViewColdStartRoute(chooseUserOnStartup: chooseUser),
+        );
+      } else {
+        context.go(Destinations.home);
+      }
     } else {
       if (mounted) {
-        if (targetServerId != null && targetServerId.isNotEmpty) {
+        final targetServer = targetServerId != null && targetServerId.isNotEmpty
+            ? serverRepo.getServer(targetServerId)
+            : null;
+        if (PlatformDetection.isMacOS) {
+          if (targetServer != null &&
+              targetServer.serverType != ServerType.emby) {
+            context.go('${Destinations.server}?serverId=$targetServerId');
+          } else if (targetServer != null &&
+              targetServer.serverType == ServerType.emby) {
+            context.go(
+              embyViewLoginRoute(
+                step: EvLoginStep.users,
+                serverId: targetServer.id,
+              ),
+            );
+          } else if (serverRepo.servers
+              .every((s) => s.serverType == ServerType.emby)) {
+            context.go(embyViewLoginRoute(step: EvLoginStep.server));
+          } else {
+            context.go(Destinations.serverSelect);
+          }
+        } else if (targetServerId != null && targetServerId.isNotEmpty) {
           // A previously-used server is known — go straight to user selection
           // for that server rather than the Add Server page.
           context.go('${Destinations.server}?serverId=$targetServerId');
@@ -208,6 +280,9 @@ class _StartupScreenState extends State<StartupScreen>
       RequestInitialFocus(child: _buildContent(context));
 
   Widget _buildContent(BuildContext context) {
+    if (_useEmbyViewSplash) {
+      return EmbyViewSplashHost(serverName: _embyServerName);
+    }
     final gradientColors = [
       AppColorScheme.background,
       AppColorScheme.surfaceVariant,

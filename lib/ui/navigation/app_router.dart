@@ -94,6 +94,7 @@ const _authRoutes = {
   Destinations.webDiagnostics,
   Destinations.server,
   Destinations.login,
+  embyViewLoginPath,
 };
 
 /// Whether first-run setup still has something to ask about.
@@ -215,11 +216,23 @@ final appRouter = GoRouter(
       return Destinations.startup;
     }
 
+    final serverId = session.activeServerId;
+    final server = serverId == null
+        ? null
+        : GetIt.instance<ServerRepository>().getServer(serverId);
+    final isEmby = server?.serverType == ServerType.emby;
+
     // Has to sit above every other rule and below the signed-out one: the
     // wizard needs a user to set up, and nothing else is worth showing until
     // it has had its turn. Exempting its own path is what stops it redirecting
-    // to itself forever.
-    if (path != Destinations.setup && _shouldRunSetupWizard()) {
+    // to itself forever. EmbyView on macOS short-circuits the legacy 5-step
+    // wizard in favor of its own first-run readiness card.
+    if (!shouldSkipSetupWizardForEmbyView(
+          isMacOS: PlatformDetection.isMacOS,
+          isEmby: isEmby,
+        ) &&
+        path != Destinations.setup &&
+        _shouldRunSetupWizard()) {
       return Destinations.setup;
     }
 
@@ -253,14 +266,13 @@ final appRouter = GoRouter(
       return Destinations.externalPlayer;
     }
 
-    final serverId = session.activeServerId;
-    final server = serverId == null
-        ? null
-        : GetIt.instance<ServerRepository>().getServer(serverId);
     final verifiedEmby = PlatformDetection.isMacOS &&
-        server?.serverType == ServerType.emby &&
+        isEmby &&
         session.state == SessionState.ready && session.activeUserId != null;
-    if (verifiedEmby && (path == Destinations.home || isEmbyViewPath(path))) {
+    if (verifiedEmby &&
+        (path == Destinations.home ||
+            path == Destinations.setup ||
+            isEmbyViewPath(path))) {
       await ensureMoonfinEmbyViewEntry();
       if (session.activeServerId != serverId || session.state != SessionState.ready) {
         return Destinations.home;
@@ -269,13 +281,14 @@ final appRouter = GoRouter(
     return embyViewRouteRedirect(
       path: path,
       isMacOS: PlatformDetection.isMacOS,
-      isEmby: server?.serverType == ServerType.emby,
+      isEmby: isEmby,
       authenticated:
           session.state == SessionState.ready &&
           session.activeUserId != null &&
           server != null,
       legacyHome: Destinations.home,
       signedOut: Destinations.startup,
+      setupPath: Destinations.setup,
       homeRegistered: embyViewRegistration.stageThreeHome != null,
     );
   },
@@ -289,7 +302,29 @@ final appRouter = GoRouter(
       },
     ),
     GoRoute(
+      path: embyViewLoginPath,
+      builder: (context, state) {
+        final stepName = state.uri.queryParameters['step'];
+        final step = EvLoginStep.values
+                .where((v) => v.name == stepName)
+                .firstOrNull ??
+            EvLoginStep.server;
+        return EmbyViewLoginHost(
+          initialStep: step,
+          initialServerId: state.uri.queryParameters['serverId'],
+        );
+      },
+    ),
+    GoRoute(
       path: Destinations.serverSelect,
+      redirect: (context, state) {
+        if (!PlatformDetection.isMacOS) return null;
+        final servers = GetIt.instance<ServerRepository>().servers;
+        if (servers.every((s) => s.serverType == ServerType.emby)) {
+          return embyViewLoginPath;
+        }
+        return null;
+      },
       builder: (context, state) => const ServerSelectScreen(),
     ),
     GoRoute(
@@ -315,6 +350,20 @@ final appRouter = GoRouter(
     ),
     GoRoute(
       path: Destinations.server,
+      redirect: (context, state) {
+        if (!PlatformDetection.isMacOS) return null;
+        final serverId = state.uri.queryParameters['serverId'];
+        final server = serverId == null
+            ? null
+            : GetIt.instance<ServerRepository>().getServer(serverId);
+        if (server?.serverType == ServerType.emby) {
+          return embyViewLoginRoute(
+            step: EvLoginStep.users,
+            serverId: serverId,
+          );
+        }
+        return null;
+      },
       builder: (context, state) {
         final serverId = state.uri.queryParameters['serverId'] ?? '';
         return ServerScreen(serverId: serverId);
@@ -328,9 +377,17 @@ final appRouter = GoRouter(
         final server = serverId == null
             ? null
             : GetIt.instance<ServerRepository>().getServer(serverId);
-        return server?.serverType == ServerType.plex
-            ? Destinations.plexSignIn
-            : null;
+        if (server?.serverType == ServerType.plex) {
+          return Destinations.plexSignIn;
+        }
+        if (PlatformDetection.isMacOS &&
+            server?.serverType == ServerType.emby) {
+          return embyViewLoginRoute(
+            step: EvLoginStep.users,
+            serverId: serverId,
+          );
+        }
+        return null;
       },
       builder: (context, state) {
         final serverId = state.uri.queryParameters['serverId'] ?? '';

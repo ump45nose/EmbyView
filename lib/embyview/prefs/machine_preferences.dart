@@ -250,6 +250,7 @@ class MachinePreferences implements EmbyViewPreferences {
     'navigation': p.navigation.name,
     'seriesSort': p.seriesSort.name,
     'chooseUser': p.chooseUserOnStartup,
+    'onboardingDismissed': p.onboardingDismissed,
     'autoSwitchServerAddress': p.autoSwitchServerAddress,
     'serverAddresses': {
       for (final entry in p.serverAddresses.entries)
@@ -288,6 +289,9 @@ class MachinePreferences implements EmbyViewPreferences {
       navigation: _enum(NavigationStyle.values, p['navigation'], d.navigation),
       seriesSort: _enum(ShelfSort.values, p['seriesSort'], d.seriesSort),
       chooseUserOnStartup: p['chooseUser'] as bool,
+      onboardingDismissed: p['onboardingDismissed'] is bool
+          ? p['onboardingDismissed'] as bool
+          : d.onboardingDismissed,
       autoSwitchServerAddress: p['autoSwitchServerAddress'] is bool
           ? p['autoSwitchServerAddress'] as bool
           : d.autoSwitchServerAddress,

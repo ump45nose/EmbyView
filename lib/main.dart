@@ -245,9 +245,19 @@ Future<void> _restoreWindowGeometry() async {
     minimumSize: const Size(minW, minH),
     center: !hasSavedGeometry && !startMaximized,
     skipTaskbar: false,
+    titleBarStyle: PlatformDetection.isMacOS
+        ? TitleBarStyle.hidden
+        : TitleBarStyle.normal,
+    windowButtonVisibility: true,
   );
 
   await windowManager.waitUntilReadyToShow(options, () async {
+    if (PlatformDetection.isMacOS) {
+      await windowManager.setTitleBarStyle(
+        TitleBarStyle.hidden,
+        windowButtonVisibility: true,
+      );
+    }
     if (bounds != null) {
       await windowManager.setPosition(bounds.topLeft);
     }

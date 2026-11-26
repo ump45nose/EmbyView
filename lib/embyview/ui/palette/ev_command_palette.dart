@@ -547,7 +547,9 @@ String? _formatMovieSubtitle(MediaCard card, String? groupName) {
 
 LocalPreferences _copyPreferences(LocalPreferences b, {ThemeMode? theme, NavigationStyle? navigation}) => LocalPreferences(
   theme: theme ?? b.theme, navigation: navigation ?? b.navigation, seriesSort: b.seriesSort,
-  chooseUserOnStartup: b.chooseUserOnStartup, backgroundVideo: b.backgroundVideo, backgroundVideoDelay: b.backgroundVideoDelay,
+  chooseUserOnStartup: b.chooseUserOnStartup, onboardingDismissed: b.onboardingDismissed,
+  autoSwitchServerAddress: b.autoSwitchServerAddress, serverAddresses: b.serverAddresses,
+  backgroundVideo: b.backgroundVideo, backgroundVideoDelay: b.backgroundVideoDelay,
   detailTrailerDelay: b.detailTrailerDelay, themeMusic: b.themeMusic, themeVolume: b.themeVolume, quickLook: b.quickLook,
   hideUnwatchedOverview: b.hideUnwatchedOverview, preResolve115: b.preResolve115, readAheadBytes: b.readAheadBytes,
   autoPlayNext: b.autoPlayNext, anime4kForAnime: b.anime4kForAnime, anime4kForOther: b.anime4kForOther,

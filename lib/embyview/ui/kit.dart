@@ -2,6 +2,9 @@
 library;
 
 export 'icons/ev_icons.dart';
+export 'login/ev_login_models.dart';
+export 'login/ev_login_page.dart';
+export 'onboard/ev_onboarding_card.dart';
 export 'shelf/ev_artwork.dart';
 export 'shelf/ev_card.dart';
 export 'shelf/ev_shelf.dart';

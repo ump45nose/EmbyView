@@ -55,6 +55,7 @@ class LocalPreferences {
     this.navigation = NavigationStyle.icon,
     this.seriesSort = ShelfSort.added,
     this.chooseUserOnStartup = true,
+    this.onboardingDismissed = false,
     this.autoSwitchServerAddress = true,
     this.serverAddresses = const {},
     this.backgroundVideo = true,
@@ -90,6 +91,7 @@ class LocalPreferences {
   final NavigationStyle navigation;
   final ShelfSort seriesSort;
   final bool chooseUserOnStartup;
+  final bool onboardingDismissed;
   final bool autoSwitchServerAddress;
   final Map<String, List<ServerAddressEntry>> serverAddresses;
   final bool backgroundVideo;

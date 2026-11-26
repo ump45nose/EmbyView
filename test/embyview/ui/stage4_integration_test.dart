@@ -73,7 +73,13 @@ MediaCard _card(
 
 class _FakePrefs implements EmbyViewPreferences {
   _FakePrefs([LocalPreferences? initial])
-    : _current = initial ?? const LocalPreferences(zones: _kDefaultZonePrefs, detailTrailerDelay: null);
+    : _current =
+          initial ??
+          const LocalPreferences(
+            zones: _kDefaultZonePrefs,
+            detailTrailerDelay: null,
+            onboardingDismissed: true,
+          );
   LocalPreferences _current;
   final _changes = StreamController<LocalPreferences>.broadcast();
 
@@ -116,6 +122,7 @@ class _FakePrefs implements EmbyViewPreferences {
 
 LocalPreferences _copyPrefs(LocalPreferences b, {List<ZonePreference>? zones}) => LocalPreferences(
   theme: b.theme, navigation: b.navigation, seriesSort: b.seriesSort, chooseUserOnStartup: b.chooseUserOnStartup,
+  onboardingDismissed: b.onboardingDismissed,
   backgroundVideo: b.backgroundVideo, backgroundVideoDelay: b.backgroundVideoDelay, detailTrailerDelay: b.detailTrailerDelay,
   themeMusic: b.themeMusic, themeVolume: b.themeVolume, quickLook: b.quickLook, hideUnwatchedOverview: b.hideUnwatchedOverview,
   preResolve115: b.preResolve115, readAheadBytes: b.readAheadBytes, autoPlayNext: b.autoPlayNext,

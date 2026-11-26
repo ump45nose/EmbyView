@@ -948,6 +948,7 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     navigation: p.navigation,
     seriesSort: p.seriesSort,
     chooseUserOnStartup: p.chooseUserOnStartup,
+    onboardingDismissed: p.onboardingDismissed,
     autoSwitchServerAddress: p.autoSwitchServerAddress,
     serverAddresses: Map.unmodifiable(addresses),
     backgroundVideo: p.backgroundVideo,

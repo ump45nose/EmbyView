@@ -33,15 +33,18 @@ import 'subtitles/subtitle_service.dart';
 import 'ui/detail/ev_detail_page.dart';
 import 'ui/home/ev_home_page.dart';
 import 'ui/kit.dart';
+import 'ui/login/ev_moonfin_login_backend.dart';
 import 'ui/palette/ev_command_palette.dart';
 import 'ui/player/ev_player_page.dart';
 import 'ui/quicklook/ev_quicklook.dart';
 import 'ui/search/ev_search_page.dart';
 import 'ui/settings/ev_settings_page.dart';
+import 'ui/splash/ev_splash_page.dart';
 import 'ui/users/ev_users_page.dart';
 import 'ui/wall/ev_wall_page.dart';
 import 'ui/zone/ev_zone_page.dart';
 
+export 'ui/login/ev_login_models.dart' show EvLoginStep;
 export 'ui/settings/ev_settings_page.dart' show EvSettingsSection;
 
 typedef EmbyViewSessionFactory = FutureOr<EmbyViewSessionServices> Function(
@@ -175,14 +178,27 @@ EmbyViewRegistration _registerStageFive(EmbyViewRegistration registration) {
   return registration;
 }
 
-Widget _buildStageThreeShell(EmbyViewServices services, {EvShellDestination? initialDestination, _S4Entry? initialEntry}) =>
-    _StageFourShellHost(services: services, initialDestination: initialDestination, initialEntry: initialEntry);
+Widget _buildStageThreeShell(
+  EmbyViewServices services, {
+  EvShellDestination? initialDestination,
+  _S4Entry? initialEntry,
+  bool showOnboardingOverlay = true,
+}) => _StageFourShellHost(
+  services: services,
+  initialDestination: initialDestination,
+  initialEntry: initialEntry,
+  showOnboardingOverlay: showOnboardingOverlay,
+);
 
 /// Test and smoke-verification helper mounting the full Stage 4 EmbyView host.
 Widget buildStageFourTestShell({
   required EmbyViewServices services, EvShellDestination? initialDestination,
   String? initialDetailId, bool initialSearch = false, EvSettingsSection? initialSettings,
   bool initialUsers = false, bool openZoneEditorOnMount = false,
+  bool showOnboardingOverlay = false,
+  VoidCallback? onSignedOutToUserPicker,
+  VoidCallback? onSwitchServer,
+  VoidCallback? onAddAccount,
 }) => KeyedSubtree(
   key: ValueKey(services.sessionId),
   child: _StageFourShellHost(
@@ -191,6 +207,10 @@ Widget buildStageFourTestShell({
         : initialSearch ? const _S4Search(0)
         : initialSettings != null ? _S4Settings(0, section: initialSettings, openZoneEditor: openZoneEditorOnMount)
         : initialUsers ? const _S4Users(0) : null,
+    showOnboardingOverlay: showOnboardingOverlay,
+    onSignedOutToUserPicker: onSignedOutToUserPicker,
+    onSwitchServer: onSwitchServer,
+    onAddAccount: onAddAccount,
   ),
 );
 
@@ -253,10 +273,22 @@ typedef _StageSnap = ({
 });
 
 class _StageFourShellHost extends StatefulWidget {
-  const _StageFourShellHost({required this.services, this.initialDestination, this.initialEntry});
+  const _StageFourShellHost({
+    required this.services,
+    this.initialDestination,
+    this.initialEntry,
+    this.showOnboardingOverlay = true,
+    this.onSignedOutToUserPicker,
+    this.onSwitchServer,
+    this.onAddAccount,
+  });
   final EmbyViewServices services;
   final EvShellDestination? initialDestination;
   final _S4Entry? initialEntry;
+  final bool showOnboardingOverlay;
+  final VoidCallback? onSignedOutToUserPicker;
+  final VoidCallback? onSwitchServer;
+  final VoidCallback? onAddAccount;
   @override State<_StageFourShellHost> createState() => _StageFourShellHostState();
 }
 
@@ -272,7 +304,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   final _shellScope = FocusScopeNode(debugLabel: 'ev_shell_scope');
   final _s4Scope = FocusScopeNode(debugLabel: 'ev_stage4_scope'), _s4MenuScope = FocusScopeNode(debugLabel: 'ev_stage4_menu_scope');
   final List<({_S4Entry entry, _StageSnap? saved, FocusNode? savedFocus})> _s4Stack = [];
-  bool _shellMounted = true, _avatarMenuOpen = false;
+  bool _shellMounted = true, _avatarMenuOpen = false, _onboardingDismissedLocally = false;
   int _nextEntryId = 1, _zonesToken = 0;
 
   @override
@@ -283,8 +315,9 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
       initial: widget.initialDestination ?? const EvHomeDestination(),
       onOpenDetail: _openDetail, onOpenSearch: _openSearch, onOpenSettings: _openSettings,
       onOpenUsers: _openUsers, onManageZones: () => _openSettings(section: EvSettingsSection.zones),
-      onSignedOutToUserPicker: _openUsers,
-      onAddAccount: _openUsers,
+      onSignedOutToUserPicker: _handleSignedOutToUserPicker,
+      onSwitchServer: _handleSwitchServer,
+      onAddAccount: _handleAddAccount,
     )..addListener(_onShellChanged);
     _lastShellDest = _shell.current;
     if (widget.initialEntry != null) { _s4Stack.add((entry: widget.initialEntry!, saved: null, savedFocus: null)); _shellMounted = false; }
@@ -424,8 +457,71 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     _restoreFocusLater(popped.savedFocus, backToShell: backToShell);
   }
 
+  String? get _currentServerId =>
+      _account.current?.serverId ?? _account.profiles.firstOrNull?.serverId;
+
+  void _handleSignedOutToUserPicker() {
+    if (!mounted) return;
+    if (widget.onSignedOutToUserPicker != null) {
+      widget.onSignedOutToUserPicker!();
+      return;
+    }
+    final router = GoRouter.maybeOf(context);
+    if (router != null) {
+      router.go(
+        embyViewLoginRoute(
+          step: EvLoginStep.users,
+          serverId: _currentServerId,
+        ),
+      );
+      return;
+    }
+    _openUsers();
+  }
+
+  void _handleSwitchServer() {
+    if (!mounted) return;
+    if (widget.onSwitchServer != null) {
+      widget.onSwitchServer!();
+      return;
+    }
+    final router = GoRouter.maybeOf(context);
+    if (router != null) {
+      router.go(embyViewLoginRoute(step: EvLoginStep.server));
+    }
+  }
+
+  void _handleAddAccount() {
+    if (!mounted) return;
+    if (widget.onAddAccount != null) {
+      widget.onAddAccount!();
+      return;
+    }
+    final router = GoRouter.maybeOf(context);
+    if (router != null) {
+      router.go(
+        embyViewLoginRoute(
+          step: EvLoginStep.users,
+          serverId: _currentServerId,
+        ),
+      );
+      return;
+    }
+    _openUsers();
+  }
+
   void _onUserSelected(AccountProfile _) {
     if (!mounted) return;
+    if (widget.initialEntry is _S4Users) {
+      final router = GoRouter.maybeOf(context);
+      if (router != null) {
+        router.go(embyViewHomePath);
+        return;
+      }
+      _closeOverlays(rebuild: false);
+      setState(() { _s4Stack.clear(); _shellMounted = true; });
+      return;
+    }
     if (widget.services.accounts.snapshot.sessionId != widget.services.sessionId) {
       _closeOverlays(rebuild: false); setState(() { _s4Stack.clear(); _shellMounted = true; }); return;
     }
@@ -457,13 +553,18 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   @override
   Widget build(BuildContext context) {
     final showingStageFour = _s4Stack.isNotEmpty;
+    final showOnboarding = widget.showOnboardingOverlay &&
+        !showingStageFour &&
+        !_onboardingDismissedLocally &&
+        !_prefs.onboardingDismissed &&
+        _shell.current is EvHomeDestination;
     return EvThemeScope(
       preferences: widget.services.preferences,
       child: EvScope(
         services: widget.services, stage: _runtime.stage, immersion: _runtime.immersion, shell: _shell,
         child: EvQuickLookHost(
           controller: _quickLook,
-          isSuppressed: () => _palette.isOpen || ModalRoute.of(context)?.isCurrent == false,
+          isSuppressed: () => showOnboarding || _palette.isOpen || ModalRoute.of(context)?.isCurrent == false,
           resolveFocusTarget: _resolveEpisodeQuickLook, onOpenDetail: _openDetail,
           child: EvCommandPaletteHost(
             controller: _palette, onBeforeOpen: _quickLook.close,
@@ -473,7 +574,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
             child: Stack(fit: StackFit.expand, children: [
               if (_shellMounted)
                 ExcludeFocus(
-                  excluding: showingStageFour,
+                  excluding: showingStageFour || showOnboarding,
                   child: Offstage(
                     offstage: showingStageFour,
                     child: TickerMode(
@@ -490,6 +591,17 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
                     ),
                   ),
                 ),
+              if (showOnboarding)
+                Positioned.fill(
+                  child: EvOnboardingCard(
+                    preferences: widget.services.preferences,
+                    profile: _account.current,
+                    onDismissed: () {
+                      if (mounted) setState(() => _onboardingDismissedLocally = true);
+                    },
+                    onOpenAiSettings: () => _openSettings(section: EvSettingsSection.ai),
+                  ),
+                ),
               if (showingStageFour) Positioned.fill(child: _buildStageFourFrame(context, _s4Stack.last.entry)),
             ]),
           ),
@@ -504,9 +616,11 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
       _S4Search(:final id, :final zoneId, :final initialQuery) => EvSearchPage(
         key: ValueKey('s4_search_$id'), zoneId: zoneId, initialQuery: initialQuery, onOpenItem: _openDetail, onOpenPalette: _palette.open),
       _S4Settings(:final id, :final section, :final openZoneEditor) => EvSettingsPage(
-        key: ValueKey('s4_settings_$id'), initialSection: section, openZoneEditorOnMount: openZoneEditor, onOpenUsers: _openUsers),
+        key: ValueKey('s4_settings_$id'), initialSection: section, openZoneEditorOnMount: openZoneEditor, onOpenUsers: _openUsers,
+        onSignedOutToUserPicker: _handleSignedOutToUserPicker, onSwitchServer: _handleSwitchServer, onAddAccount: _handleAddAccount),
       _S4Users(:final id) => EvUsersPage(
-        key: ValueKey('s4_users_$id'), onSelected: _onUserSelected),
+        key: ValueKey('s4_users_$id'), onSelected: _onUserSelected,
+        onSignedOutToUserPicker: _handleSignedOutToUserPicker, onSwitchServer: _handleSwitchServer),
     };
     return Builder(builder: (context) {
       final theme = EvTheme.of(context), scale = EvScale.of(context);
@@ -989,6 +1103,30 @@ class EmbyViewEntry extends ChangeNotifier {
 }
 
 const embyViewHomePath = '/embyview';
+const embyViewLoginPath = '/embyview-login';
+
+String embyViewLoginRoute({
+  EvLoginStep step = EvLoginStep.server,
+  String? serverId,
+}) {
+  final params = <String, String>{
+    if (step != EvLoginStep.server) 'step': step.name,
+    if (serverId != null && serverId.isNotEmpty) 'serverId': serverId,
+  };
+  return params.isEmpty
+      ? embyViewLoginPath
+      : Uri(path: embyViewLoginPath, queryParameters: params).toString();
+}
+
+/// Whether the legacy 5-step Moonfin setup wizard must be bypassed for EmbyView.
+bool shouldSkipSetupWizardForEmbyView({
+  required bool isMacOS,
+  required bool isEmby,
+}) => isMacOS && isEmby;
+
+/// Cold-start destination after restoring an EmbyView session.
+String resolveEmbyViewColdStartRoute({required bool chooseUserOnStartup}) =>
+    chooseUserOnStartup ? '$embyViewHomePath/users' : embyViewHomePath;
 
 bool isEmbyViewPath(String path) =>
     path == embyViewHomePath || path.startsWith('$embyViewHomePath/');
@@ -1001,15 +1139,187 @@ String? embyViewRouteRedirect({
   required bool authenticated,
   required String legacyHome,
   required String signedOut,
+  String? setupPath,
   bool homeRegistered = true,
 }) {
   final allowed = isMacOS && isEmby && authenticated;
   if (isEmbyViewPath(path) && !allowed) {
     return authenticated ? legacyHome : signedOut;
   }
+  if (setupPath != null && path == setupPath && allowed) {
+    return homeRegistered ? embyViewHomePath : legacyHome;
+  }
   if (path == embyViewHomePath && allowed && !homeRegistered) return legacyHome;
   if (path == legacyHome && allowed && homeRegistered) return embyViewHomePath;
   return null;
+}
+
+/// Themed host for [EvSplashPage] used by [StartupScreen] on macOS EmbyView launches.
+class EmbyViewSplashHost extends StatefulWidget {
+  const EmbyViewSplashHost({
+    super.key,
+    this.serverName,
+    this.statusText,
+    this.preferences,
+  });
+
+  final String? serverName;
+  final String? statusText;
+  final EmbyViewPreferences? preferences;
+
+  @override
+  State<EmbyViewSplashHost> createState() => _EmbyViewSplashHostState();
+}
+
+class _EmbyViewSplashHostState extends State<EmbyViewSplashHost> {
+  MachinePreferences? _ownedPrefs;
+
+  EmbyViewPreferences? get _effectivePrefs =>
+      widget.preferences ?? installedEmbyViewEntry?.services.preferences ?? _ownedPrefs;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_effectivePrefs == null) {
+      unawaited(_openPrefs());
+    }
+  }
+
+  Future<void> _openPrefs() async {
+    try {
+      final prefs = await MachinePreferences.open();
+      if (!mounted) {
+        await prefs.close();
+        return;
+      }
+      setState(() => _ownedPrefs = prefs);
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    final owned = _ownedPrefs;
+    if (owned != null) unawaited(owned.close());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final prefs = _effectivePrefs;
+    return EvThemeScope(
+      preferences: prefs,
+      themeMode: prefs == null ? ThemeMode.cinema : null,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          EvSplashPage(
+            serverName: widget.serverName,
+            statusText: widget.statusText,
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 52,
+            child: _buildMacWindowDragArea(context),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Themed host for [EvLoginPage] wired to Moonfin repositories and frameless drag.
+class EmbyViewLoginHost extends StatefulWidget {
+  const EmbyViewLoginHost({
+    super.key,
+    this.initialStep = EvLoginStep.server,
+    this.initialServerId,
+    this.backend,
+    this.preferences,
+    this.onSignedIn,
+  });
+
+  final EvLoginStep initialStep;
+  final String? initialServerId;
+  final EvLoginBackend? backend;
+  final EmbyViewPreferences? preferences;
+  final VoidCallback? onSignedIn;
+
+  @override
+  State<EmbyViewLoginHost> createState() => _EmbyViewLoginHostState();
+}
+
+class _EmbyViewLoginHostState extends State<EmbyViewLoginHost> {
+  late final EvLoginBackend _backend =
+      widget.backend ?? MoonfinEvLoginBackend();
+  MachinePreferences? _ownedPrefs;
+
+  EmbyViewPreferences? get _effectivePrefs =>
+      widget.preferences ?? installedEmbyViewEntry?.services.preferences ?? _ownedPrefs;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(
+      _macWin(
+        () => windowManager.setTitleBarStyle(
+          TitleBarStyle.hidden,
+          windowButtonVisibility: true,
+        ),
+      ),
+    );
+    if (_effectivePrefs == null) {
+      unawaited(_openPrefs());
+    }
+  }
+
+  Future<void> _openPrefs() async {
+    try {
+      final prefs = await MachinePreferences.open();
+      if (!mounted) {
+        await prefs.close();
+        return;
+      }
+      setState(() => _ownedPrefs = prefs);
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    final owned = _ownedPrefs;
+    if (owned != null) unawaited(owned.close());
+    super.dispose();
+  }
+
+  Future<void> _handleSignedIn() async {
+    if (widget.onSignedIn != null) {
+      widget.onSignedIn!();
+      return;
+    }
+    try {
+      final entry = await ensureMoonfinEmbyViewEntry();
+      await entry.services.accounts.restore();
+    } catch (_) {}
+    if (!mounted) return;
+    GoRouter.maybeOf(context)?.go(embyViewHomePath);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final prefs = _effectivePrefs;
+    return EvThemeScope(
+      preferences: prefs,
+      themeMode: prefs == null ? ThemeMode.cinema : null,
+      child: EvLoginPage(
+        backend: _backend,
+        initialStep: widget.initialStep,
+        initialServerId: widget.initialServerId,
+        windowDragBuilder: _buildMacWindowDragArea,
+        onSignedIn: () => unawaited(_handleSignedIn()),
+      ),
+    );
+  }
 }
 
 List<RouteBase> buildEmbyViewRoutes({
@@ -1044,7 +1354,25 @@ class _EmbyViewHome extends StatelessWidget {
           builder: (context, _) {
             final services = entry.services;
             final home = registration.stageThreeHome;
-            if (home == null || !services.signedIn) return legacyHome(context);
+            if (home == null) return legacyHome(context);
+            if (!services.signedIn) {
+              final snap = services.accounts.snapshot;
+              return switch (snap.phase) {
+                AccountPhase.choosing => EmbyViewLoginHost(
+                  initialStep: EvLoginStep.users,
+                  initialServerId: snap.profiles.firstOrNull?.serverId,
+                  preferences: services.preferences,
+                ),
+                AccountPhase.signedOut => EmbyViewLoginHost(
+                  initialStep: EvLoginStep.server,
+                  preferences: services.preferences,
+                ),
+                _ => EmbyViewSplashHost(
+                  serverName: snap.serverName,
+                  preferences: services.preferences,
+                ),
+              };
+            }
             return KeyedSubtree(
               key: ValueKey(services.sessionId),
               child: home(context, services),
