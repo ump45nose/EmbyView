@@ -55,6 +55,7 @@
     --report build/embyview-release/install-remote.json
   ```
 - **直接安装已签名 App**：改用 `--app <path/to/signed/EmbyView.app>`（可选 `--identity <name-or-sha1>` 仅用于 `--candidate` 模式）。
+- **仅签名安装不启动**：传入 `--skip-launch` 可完成验签与原子替换，跳过 `open -n` 启动及窗口检测（适用于无人值守预装或延迟启动场景）。
 - **回退**：替换后若验签或启动检查失败且存在备份，脚本自动恢复 `previous.app` 并重新核验；也可手动回退：
   ```bash
   scripts/embyview/install-macos.sh --rollback [--host <ssh-host>]

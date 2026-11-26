@@ -9,6 +9,7 @@ CI_RUN_ID=""
 OUTPUT_DIR="build/embyview-release"
 EXPECTED_COMMIT=""
 SKIP_BUILD=0
+ALLOW_SDK_MISMATCH=0
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -19,8 +20,9 @@ while [[ $# -gt 0 ]]; do
     --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
     --commit) EXPECTED_COMMIT="${2:-}"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
+    --allow-sdk-mismatch) ALLOW_SDK_MISMATCH=1; shift ;;
     -h|--help)
-      echo "Usage: $0 [--source local|ci|auto] [--ci-run-id <id>] [--output-dir <dir>] [--commit <sha>] [--skip-build]"
+      echo "Usage: $0 [--source local|ci|auto] [--ci-run-id <id>] [--output-dir <dir>] [--commit <sha>] [--skip-build] [--allow-sdk-mismatch]"
       exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
@@ -43,7 +45,7 @@ fi
 
 LOCKFILES=(pubspec.lock macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved macos/Packages/Whisper/Package.swift)
 check_lockfiles() {
-  git diff --exit-code -- "${LOCKFILES[@]}" >/dev/null || die "Lockfile drift detected in: ${LOCKFILES[*]}"
+  git diff HEAD --exit-code -- "${LOCKFILES[@]}" >/dev/null || die "Lockfile drift detected in: ${LOCKFILES[*]}"
 }
 rm_tree() { python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' "$1"; }
 
@@ -67,17 +69,24 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
       CI_RUN_ID="$(gh run list --workflow build.yml --commit "$HEAD_COMMIT" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
       [[ -n "$CI_RUN_ID" ]] || die "No successful build.yml CI run for $HEAD_COMMIT (pass --ci-run-id or --source local)"
     fi
+    RUN_INFO="$(gh run view "$CI_RUN_ID" --json headSha,conclusion --jq '[.headSha, .conclusion] | @tsv')" || die "Failed to inspect CI run $CI_RUN_ID"
+    IFS=$'\t' read -r RUN_SHA RUN_CONC <<< "$RUN_INFO"
+    [[ "$RUN_CONC" == "success" ]] || die "CI run $CI_RUN_ID conclusion is '${RUN_CONC:-unknown}', expected 'success'"
+    [[ "$RUN_SHA" == "$HEAD_COMMIT" ]] || die "CI run $CI_RUN_ID commit ($RUN_SHA) != HEAD ($HEAD_COMMIT)"
     STAGE_DIR="$(mktemp -d)"
     trap 'rm_tree "$STAGE_DIR"' EXIT
     gh run download "$CI_RUN_ID" -n macos-release-arm64-unsigned -D "$STAGE_DIR"
-    [[ -f "$STAGE_DIR/$ARCHIVE_NAME" ]] || die "CI artifact missing $ARCHIVE_NAME"
+    [[ -f "$STAGE_DIR/$ARCHIVE_NAME" && -f "$STAGE_DIR/SHA256SUMS" ]] || die "CI artifact missing $ARCHIVE_NAME or SHA256SUMS"
+    sed -E "s|^([0-9a-fA-F]{64}[[:space:]]+\*?)([^[:space:]]*/)?(${ARCHIVE_NAME})\$|\1\3|" "$STAGE_DIR/SHA256SUMS" > "$STAGE_DIR/SHA256SUMS.norm"
+    grep -qE "^[0-9a-fA-F]{64}[[:space:]]+\*?${ARCHIVE_NAME}\$" "$STAGE_DIR/SHA256SUMS.norm" || die "CI SHA256SUMS missing entry for $ARCHIVE_NAME"
+    (cd "$STAGE_DIR" && shasum -a 256 -c SHA256SUMS.norm >/dev/null) || die "CI artifact SHA256SUMS verification failed"
     mkdir -p "$STAGE_DIR/unpacked"
     ditto -x -k "$STAGE_DIR/$ARCHIVE_NAME" "$STAGE_DIR/unpacked"
     [[ -d "$STAGE_DIR/unpacked/EmbyView.app" ]] || die "CI archive missing EmbyView.app (build.yml may still package Moonfin.app)"
     rm_tree "$APP_PATH"
     ditto "$STAGE_DIR/unpacked/EmbyView.app" "$APP_PATH"
     cp "$STAGE_DIR/$ARCHIVE_NAME" "$ARCHIVE_PATH"
-    (cd "$OUTPUT_DIR" && shasum -a 256 "$ARCHIVE_NAME" > SHA256SUMS)
+    cp "$STAGE_DIR/SHA256SUMS.norm" "$SUMS_PATH"
   else
     DERIVED_DATA="$ROOT_DIR/build/macos"
     SPM_SOURCE_DIR="$DERIVED_DATA/SourcePackages"
@@ -85,12 +94,10 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
     mkdir -p "$SPM_SOURCE_DIR" "$SPM_CACHE_DIR"
 
     if ! flutter pub get --enforce-lockfile; then
-      CI_FLUTTER="$(sed -n "s/^[[:space:]]*FLUTTER_VERSION:[[:space:]]*'\\([^']*\\)'/\\1/p" .github/workflows/build.yml | head -n 1)"
-      LOCAL_FLUTTER="$(flutter --version 2>/dev/null | awk 'NR==1{print $2}')"
-      if [[ -n "$CI_FLUTTER" && -n "$LOCAL_FLUTTER" && "$LOCAL_FLUTTER" != "$CI_FLUTTER" && -f .dart_tool/package_config.json ]]; then
-        echo "WARN: flutter pub get --enforce-lockfile failed under local Flutter $LOCAL_FLUTTER (build.yml pins $CI_FLUTTER); reusing .dart_tool/package_config.json with clean pubspec.lock" >&2
+      if [[ "$ALLOW_SDK_MISMATCH" -eq 1 && -f .dart_tool/package_config.json ]]; then
+        echo "WARN: flutter pub get --enforce-lockfile failed; --allow-sdk-mismatch enabled, reusing existing .dart_tool/package_config.json" >&2
       else
-        die "flutter pub get --enforce-lockfile failed"
+        die "flutter pub get --enforce-lockfile failed (pass --allow-sdk-mismatch only to reuse existing .dart_tool/package_config.json)"
       fi
     fi
 
@@ -186,7 +193,16 @@ if (app_fw / "Resources/flutter_assets/kernel_blob.bin").exists():
 if not (app_fw / "Resources/flutter_assets/AssetManifest.bin").exists():
     fail("App.framework missing flutter_assets/AssetManifest.bin")
 
-for bin_path in [flutter_fw / "FlutterMacOS", app_fw / "App", whisper_fw / "whisper"]:
+def fw_binary(fw: pathlib.Path) -> pathlib.Path:
+    for rel in ("Resources/Info.plist", "Versions/Current/Resources/Info.plist"):
+        if (p := fw / rel).is_file():
+            if exe := plistlib.loads(p.read_bytes()).get("CFBundleExecutable"):
+                return fw / exe
+    return fw / fw.stem
+
+for bin_path in [flutter_fw / "FlutterMacOS", app_fw / "App", whisper_fw / "whisper", *(fw_binary(p) for p in aether_fws)]:
+    if not bin_path.exists():
+        fail(f"Missing framework binary: {bin_path}")
     subprocess.run(["lipo", str(bin_path), "-verify_arch", "arm64"], check=True)
 nm_out = subprocess.check_output(["nm", "-gU", str(app_fw / "App")], text=True)
 if "_kDartSnapshotText" not in nm_out and "_kDartVmSnapshotInstructions" not in nm_out:

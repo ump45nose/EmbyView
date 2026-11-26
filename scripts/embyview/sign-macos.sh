@@ -22,36 +22,45 @@ def run(cmd, timeout=None, **kw):
         return subprocess.CompletedProcess(cmd, 124, "", f"timed out after {t}s (keychain may be locked or missing codesign partition authorization)")
 
 def keychain_unlocked(kc):
+    sec = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    vp = ctypes.c_void_p
+    sec.SecKeychainOpen.argtypes, sec.SecKeychainOpen.restype = [ctypes.c_char_p, ctypes.POINTER(vp)], ctypes.c_int32
+    sec.SecKeychainGetStatus.argtypes, sec.SecKeychainGetStatus.restype = [vp, ctypes.POINTER(ctypes.c_uint32)], ctypes.c_int32
+    cf.CFRelease.argtypes, cf.CFRelease.restype = [vp], None
+    ref, st = vp(), ctypes.c_uint32()
     try:
-        sec, ref, st = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security"), ctypes.c_void_p(), ctypes.c_uint32()
-        if sec.SecKeychainOpen(kc.encode(), ctypes.byref(ref)) == 0 and sec.SecKeychainGetStatus(ref, ctypes.byref(st)) == 0:
-            return bool(st.value & 1)
-    except Exception: pass
-    return run(["security", "show-keychain-info", kc], timeout=5).returncode == 0
+        return bool(sec.SecKeychainOpen(kc.encode(), ctypes.byref(ref)) == 0 and ref.value and sec.SecKeychainGetStatus(ref, ctypes.byref(st)) == 0 and (st.value & 1))
+    finally:
+        if ref.value: cf.CFRelease(ref)
 
 def inspect_cert(pem):
-    txt = run(["/usr/bin/openssl", "x509", "-noout", "-enddate", "-text", "-subject"], input=pem).stdout
-    m_end, m_cn = re.search(r"notAfter=(.+)", txt), re.search(r"CN\s*=\s*([^,/\n]+)", txt)
-    dt = datetime.datetime.strptime(re.sub(r"\s+", " ", m_end.group(1).strip()), "%b %d %H:%M:%S %Y %Z") if m_end else None
-    return {"expired": (dt is None or dt <= datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)), "dt": dt,
-            "notAfter": dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None, "cn": m_cn.group(1).strip() if m_cn else None,
-            "codeSigning": bool(re.search(r"X509v3 Extended Key Usage:.*\n\s*.*Code Signing", txt))}
+    txt = run(["/usr/bin/openssl", "x509", "-noout", "-startdate", "-enddate", "-subject", "-text"], input=pem).stdout
+    pdt = lambda m: datetime.datetime.strptime(re.sub(r"\s+", " ", m.group(1).strip()), "%b %d %H:%M:%S %Y %Z") if m else None
+    nb, na = pdt(re.search(r"^notBefore=(.+)$", txt, re.M)), pdt(re.search(r"^notAfter=(.+)$", txt, re.M))
+    sub = re.search(r"^subject=(.+)$", txt, re.M)
+    m_cn = re.search(r"(?:^|[,/]\s*)CN\s*=\s*([^,/\n]+)", sub.group(1)) if sub else None
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    return {"expired": not (nb and na and nb <= now < na), "dt": na,
+            "notBefore": nb.strftime("%Y-%m-%dT%H:%M:%SZ") if nb else None, "notAfter": na.strftime("%Y-%m-%dT%H:%M:%SZ") if na else None,
+            "cn": m_cn.group(1).strip() if m_cn else None, "codeSigning": bool(re.search(r"X509v3 Extended Key Usage:.*\n\s*.*Code Signing", txt))}
 
 def resolve_identity(query, kc, rep):
     r_id = run(["security", "find-identity", "-p", "codesigning", kc])
     if r_id.returncode != 0: return None, f"failed to query keychain {kc}: {(r_id.stderr or r_id.stdout).strip()}", False
-    has_key = {h.upper(): n for h, n in re.findall(r'\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"]+)"', r_id.stdout.split("Valid identities only", 1)[0])}
+    has_key = {h.upper(): (n, fl or "") for h, n, fl in re.findall(r'\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"]+)"(?:\s*\(([^)]+)\))?', r_id.stdout.split("Valid identities only", 1)[0])}
     is_sha = bool(re.fullmatch(r"[0-9A-Fa-f]{40}", query))
     c_cmd = ["security", "find-certificate", "-a", "-Z", "-p", *([] if is_sha else ["-c", query]), kc]
     certs = {h.upper(): p + "\n" for h, p in re.findall(r"SHA-1 hash:\s*([0-9A-Fa-f]{40}).*?(-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----)", run(c_cmd).stdout, re.S)}
     valid, bad, last = [], None, None
     for sha1, pem in certs.items():
         if is_sha and sha1 != query.upper(): continue
-        m = inspect_cert(pem); name = has_key.get(sha1) or m["cn"] or sha1
+        m = inspect_cert(pem); kn, fl = has_key.get(sha1, (None, "")); name = kn or m["cn"] or sha1
         if query not in (name, m["cn"]) and query.upper() != sha1: continue
         last = (sha1, name, m)
-        if not m["codeSigning"]: bad = f"certificate '{name}' ({sha1}) lacks Code Signing EKU"
-        elif m["expired"]: bad = f"certificate '{name}' ({sha1}) is expired (notAfter={m['notAfter']})"
+        if "CSSMERR_TP_CERT_REVOKED" in fl: bad = f"certificate '{name}' ({sha1}) is revoked (CSSMERR_TP_CERT_REVOKED)"
+        elif "CSSMERR_TP_CERT_EXPIRED" in fl or m["expired"]: bad = f"certificate '{name}' ({sha1}) is not valid at current time (notBefore={m['notBefore']}, notAfter={m['notAfter']})"
+        elif not m["codeSigning"]: bad = f"certificate '{name}' ({sha1}) lacks Code Signing EKU"
         elif sha1 not in has_key: bad = f"certificate '{name}' ({sha1}) has no usable private key in keychain"
         else: valid.append((sha1, name, m))
     if valid: return max(valid, key=lambda x: x[2]["dt"] or datetime.datetime.min), None, True
@@ -95,12 +104,15 @@ def main():
     def must(cmd, label, st="error", timeout=None):
         if (r := run(cmd, timeout=timeout)).returncode != 0: done(1, "blocked" if r.returncode == 124 else st, f"{label}: {(r.stderr or r.stdout).strip()}")
         return r
-    def set_partition():
-        if kc_pass: must(["security", "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", kc_pass, kc], "set-key-partition-list failed", "blocked", timeout=15)
+    def sec_i(sub, args, label, timeout=15):
+        if any("\n" in x or "\r" in x for x in args): done(1, "blocked", f"{label}: invalid newline in argument")
+        q = lambda s: '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        r = run(["security", "-q", "-i"], input=f"{sub} " + " ".join(q(x) for x in args) + "\n", timeout=timeout)
+        if r.returncode != 0: done(1, "blocked", f"{label}: {(r.stderr or r.stdout).strip()}")
 
     if not id_q or id_q == "-": done(1, "blocked", "ad-hoc signing ('-') is prohibited; persistent code signing identity required")
     if not os.path.exists(kc): done(1, "blocked", f"keychain not found: {kc}")
-    if kc_pass: must(["security", "unlock-keychain", "-p", kc_pass, kc], "failed to unlock keychain", "blocked", timeout=15)
+    if kc_pass: sec_i("unlock-keychain", ["-p", kc_pass, kc], "failed to unlock keychain")
     found, reason, exists = resolve_identity(id_q, kc, rep)
     if a.ensure_identity:
         if not found:
@@ -121,39 +133,40 @@ def main():
             finally: shutil.rmtree(td, ignore_errors=True)
             found, reason, _ = resolve_identity(id_q, kc, rep)
             if not found: done(1, "blocked", reason or "imported identity could not be verified")
-        set_partition()
+        if kc_pass: sec_i("set-key-partition-list", ["-S", "apple-tool:,apple:,codesign:", "-s", "-k", kc_pass, kc], "set-key-partition-list failed")
         rep.update(identityName=found[1], certificateSha1=found[0], certificateValid=True, notAfter=found[2]["notAfter"]); done(0, "ok")
 
     if not found: done(1, "blocked", reason)
-    set_partition()
+    if not keychain_unlocked(kc): done(1, "blocked", f"keychain is locked ({kc}); unlock it or provide EMBYVIEW_KEYCHAIN_PASSWORD")
     sha1, name, meta = found
     rep.update(identityName=name, certificateSha1=sha1, certificateValid=True, notAfter=meta["notAfter"])
     if not os.path.isfile(a.entitlements): done(1, "error", f"entitlements not found: {a.entitlements}")
     tmp = tempfile.mkdtemp(prefix="embyview-sign-work-")
     try:
-        src, unpacked = a.app, False
+        src = a.app
         if a.candidate:
+            if not a.output: done(1, "error", "--output is required with --candidate")
             if not os.path.isfile(a.candidate): done(1, "error", f"candidate not found: {a.candidate}")
             cand, base = json.load(open(a.candidate, encoding="utf-8")), os.path.dirname(os.path.abspath(a.candidate))
             res = lambda p: p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
             arch = res(cand["archivePath"]) if cand.get("archivePath") else None
-            if arch and cand.get("archiveSha256"):
+            if arch:
                 if not os.path.isfile(arch): rep["candidateSha256Verified"] = False; done(1, "blocked", f"archive not found: {arch}")
+                if not cand.get("archiveSha256"): rep["candidateSha256Verified"] = False; done(1, "blocked", "candidate missing archiveSha256")
                 h = hashlib.sha256()
                 with open(arch, "rb") as f:
                     while ch := f.read(1 << 20): h.update(ch)
                 if h.hexdigest().lower() != cand["archiveSha256"].strip().lower(): rep["candidateSha256Verified"] = False; done(1, "blocked", "candidate archive SHA-256 mismatch")
                 rep["candidateSha256Verified"] = True
-            if not src:
-                if cand.get("appPath") and os.path.isdir(res(cand["appPath"])): src = res(cand["appPath"])
-                elif arch and os.path.isfile(arch):
-                    ud = os.path.join(tmp, "unpacked"); os.makedirs(ud)
-                    must(["ditto", "-x", "-k", arch, ud] if arch.endswith(".zip") else ["tar", "-xzf", arch, "-C", ud], "unpack failed")
-                    apps = sorted([os.path.join(dp, d) for dp, ds, _ in os.walk(ud) for d in ds if d.endswith(".app")], key=lambda p: (os.path.basename(p) != "EmbyView.app", p.count(os.sep)))
-                    if not apps: done(1, "error", f"no .app bundle found in {arch}")
-                    src, unpacked = apps[0], True
+                ud = os.path.join(tmp, "unpacked"); os.makedirs(ud)
+                must(["ditto", "-x", "-k", arch, ud], "unpack failed")
+                apps = sorted([os.path.join(dp, d) for dp, ds, _ in os.walk(ud) for d in ds if d.endswith(".app")], key=lambda p: (os.path.basename(p) != "EmbyView.app", p.count(os.sep)))
+                if not apps: done(1, "error", f"no .app bundle found in {arch}")
+                src = apps[0]
+            elif not src and cand.get("appPath") and os.path.isdir(res(cand["appPath"])):
+                src = res(cand["appPath"])
+            if src and os.path.realpath(a.output) == os.path.realpath(src): done(1, "error", "--output must not overwrite candidate bundle in place")
         if not src or not os.path.isdir(src): done(1, "error", "source .app bundle missing")
-        if unpacked and not a.output: done(1, "error", "--output is required when unpacking candidate archive")
         target = src
         if a.output and os.path.realpath(a.output) != os.path.realpath(src):
             if os.path.exists(a.output): shutil.rmtree(a.output)
