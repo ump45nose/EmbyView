@@ -270,7 +270,7 @@ void main() {
     });
   }
 
-  for (final change in ['subtitle', 'seek', 'audio']) {
+  for (final change in ['subtitle', 'beforeFirstWindow', 'seek', 'audio']) {
     test('source reopen after $change only keeps confirmed audio on the same uninterrupted timeline', () async {
       TestWidgetsFlutterBinding.ensureInitialized();
       final f = await _Fixture.open();
@@ -278,14 +278,16 @@ void main() {
       final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       const audio = MethodChannel('embyview/audio_control'), asr = MethodChannel('embyview/asr');
       final reads = <(int, int)>[];
-      final obsoleteRead = Completer<void>();
+      final obsoleteRead = Completer<void>(), firstRead = Completer<void>();
+      final early = change == 'beforeFirstWindow';
       messenger.setMockMethodCallHandler(audio, (call) async {
         if (call.method != 'readIndependent') return null;
         final from = (call.arguments as Map)['startUs'] as int;
         final to = (call.arguments as Map)['endUs'] as int;
         final gen = f.playback.snapshot.generation;
         reads.add((gen, from));
-        if (gen == 2 && from >= 20000000) await obsoleteRead.future;
+        if (gen == 2 && !firstRead.isCompleted) firstRead.complete();
+        if (gen == 2 && (early || from >= 20000000)) await obsoleteRead.future;
         return [
           {'startUs': from, 'sourceUs': from, 'pcm': Uint8List((to - from) * 48000 ~/ 1000000 * 4)},
         ];
@@ -332,8 +334,8 @@ void main() {
       void open(int gen, {int? subtitleSwitchFrom}) => f.playback.open(
         _movie,
         gen,
-        duration: const Duration(seconds: 40),
-        position: Duration(seconds: gen == 2 ? 0 : 6),
+        duration: Duration(seconds: early ? 43 : 40),
+        position: Duration(seconds: gen == 2 ? (early ? 3 : 0) : 6),
         subtitleSwitchFrom: subtitleSwitchFrom,
         audio: [PlaybackTrack(id: '$gen:1', name: 'English', source: PlaybackTrackSource.embedded)],
         selectedAudioId: gen == 3 && change == 'audio' ? '$gen:8' : '$gen:1',
@@ -342,8 +344,8 @@ void main() {
       open(2);
       final firstCue = f.panel.changes.firstWhere((state) => state.ai?.cues.isNotEmpty == true);
       final started = f.panel.startAi();
-      await firstCue;
-      expect(charges, 1);
+      await (early ? firstRead.future : firstCue);
+      expect(charges, early ? 0 : 1);
       await f.playback.selectSubtitle('2:2');
       final saved = f.panel.changes.firstWhere(
         (state) => state.generation == 3 && state.tracks.any((t) => t.save == SubtitleSaveState.failed),
@@ -361,14 +363,28 @@ void main() {
       obsoleteRead.complete();
       await saved;
       await started;
-      final uninterrupted = change == 'subtitle';
-      expect(reads.where((r) => r.$1 == 3).toList(), uninterrupted ? [(3, 20000000)] : [(3, 6000000), (3, 26000000)]);
+      final uninterrupted = change == 'subtitle' || early;
+      final wantedReads = early
+          ? [(3, 3000000), (3, 23000000)]
+          : uninterrupted
+          ? [(3, 20000000)]
+          : [(3, 6000000), (3, 26000000)];
+      expect(reads.where((r) => r.$1 == 3).toList(), wantedReads);
       expect(charges, uninterrupted ? 2 : 3);
       final chinese = f.playback.registered.values.single;
       expect(chinese, uninterrupted ? contains('第一句') : isNot(contains('第一句')));
       expect(chinese, contains('第二句'));
-      expect(f.panel.snapshot.ai?.coverage.single.start, uninterrupted ? Duration.zero : const Duration(seconds: 6));
-      expect(f.panel.snapshot.ai?.coverage.single.end, const Duration(seconds: 40));
+      expect(
+        f.panel.snapshot.ai?.coverage.single.start,
+        Duration(
+          seconds: early
+              ? 3
+              : uninterrupted
+              ? 0
+              : 6,
+        ),
+      );
+      expect(f.panel.snapshot.ai?.coverage.single.end, Duration(seconds: early ? 43 : 40));
     });
   }
 

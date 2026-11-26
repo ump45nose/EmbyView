@@ -18,7 +18,7 @@ const _unreadable = EmbyViewFailure('此轨没有可取得的文本原文。', c
 const _window = Duration(seconds: 20);
 const _minimumLead = Duration(seconds: 12);
 
-typedef _RunCheckpoint = ({Duration start, int? audioIndex, SubtitleAiOutput output});
+typedef _RunCheckpoint = ({Duration start, int? audioIndex, SubtitleAiOutput? output});
 
 class BoundSubtitlePanel implements SubtitlePanel {
   BoundSubtitlePanel({
@@ -97,7 +97,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
       if (resumeAi && !_resumeAfterBoundary && source.subtitleSwitchFrom == previous?.generation) {
         final output = _ai.checkpoint ?? _scope?.checkpoint?.output;
         final start = _ai.run?.startedAt ?? _preparing?.startedAt ?? _scope?.checkpoint?.start;
-        if (output != null && start != null) {
+        if (start != null) {
           checkpoint = (start: start, audioIndex: _scope?.runAudioIndex, output: output);
         }
       }
@@ -615,7 +615,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
     scope.checkpoint = checkpoint?.audioIndex == index ? checkpoint : null;
     final seed = scope.checkpoint;
     final start = seed?.start ?? position ?? play.position;
-    final covered = seed?.output.coverage ?? const <TimeRange>[];
+    final covered = seed?.output?.coverage ?? const <TimeRange>[];
     final language = play.audioTracks.where((track) => track.id == '${play.generation}:$index').firstOrNull?.language;
     _run?.cancel();
     _ai.invalidate();
@@ -631,7 +631,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
       state: AiRunState.preparing,
       startedAt: start,
       coverage: covered,
-      cues: seed?.output.cues ?? const [],
+      cues: seed?.output?.cues ?? const [],
     );
     _emit();
     final reader = StreamIterator(_audio(scope.source, start, play.duration, index, cancellation, covered: covered));

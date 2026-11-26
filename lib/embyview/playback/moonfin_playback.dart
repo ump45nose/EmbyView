@@ -233,7 +233,8 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   int _subtitleChoice = 0;
   int? _subtitleSwitchFrom;
   bool _switchDisables = false, _reopenedWithoutSubtitles = false;
-  ({String? selected, String? previous, bool live})? _beforeSubtitleChoice;
+  int _nativeEnableAttempts = 0;
+  ({String? selected, String? previous, bool live, int nativeEnableAttempts})? _beforeSubtitleChoice;
   int _subtitleMediaEpoch = 0;
   bool _reloadExternal = false;
   Future<void> _subtitleOperations = Future.value();
@@ -812,6 +813,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       selected: _snapshot.selectedSubtitleId,
       previous: _previousSubtitleId,
       live: _wantsLiveSubtitle && _liveRendererReady,
+      nativeEnableAttempts: _nativeEnableAttempts,
     );
     final choice = ++_subtitleChoice;
     final live = trackId != null && trackId == _liveSubtitleId;
@@ -833,7 +835,11 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
           _previousSubtitleId = before.previous;
           // The manager may already have changed its stream index before the
           // renderer rejected the command. Reapply the last committed choice.
-          await _selectNativeSubtitle(restoreLive ? null : restore, generation, current, force: true);
+          // If only a disable was attempted, the native renderer was already
+          // confirmed off for this live track and could never have turned on.
+          if (!restoreLive || before.nativeEnableAttempts != _nativeEnableAttempts) {
+            await _selectNativeSubtitle(restoreLive ? null : restore, generation, current, force: true);
+          }
           if (current()) _liveRendererReady = restoreLive;
         }
         rethrow;
@@ -907,6 +913,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     if (streamIndex == null) {
       await _manager.disableSubtitles();
     } else {
+      ++_nativeEnableAttempts;
       await _manager.changeSubtitleTrack(streamIndex);
     }
     // The manager may rebuild the same media source to apply the choice.
@@ -1036,15 +1043,17 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     }
   }
 
-  Future<void> _loadExternal(_SessionSubtitle subtitle, int generation, {required bool select}) =>
-      _owner.native.loadExternalSubtitle(
-        subtitle.url,
-        title: subtitle.title,
-        language: subtitle.language,
-        codec: subtitle.codec,
-        sourceGeneration: generation,
-        select: select,
-      );
+  Future<void> _loadExternal(_SessionSubtitle subtitle, int generation, {required bool select}) {
+    if (select) ++_nativeEnableAttempts;
+    return _owner.native.loadExternalSubtitle(
+      subtitle.url,
+      title: subtitle.title,
+      language: subtitle.language,
+      codec: subtitle.codec,
+      sourceGeneration: generation,
+      select: select,
+    );
+  }
 
   String _externalId(int index) => '${_snapshot.generation}:external$index';
   String _visibleExternalId(int index) {

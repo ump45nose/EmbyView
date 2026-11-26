@@ -510,6 +510,14 @@ void main() {
     backend.failDisableSubtitle = false;
 
     await session.selectSubtitle(live);
+    final loadsBefore = native.externalLoads.length, disablesBefore = backend.subtitleDisables;
+    backend.failDisableSubtitle = true;
+    await expectLater(session.selectSubtitle(local), throwsStateError);
+    expect(native.externalLoads.length, loadsBefore);
+    expect(backend.subtitleDisables, disablesBefore + 1);
+    expect(session.snapshot.selectedSubtitleId, live);
+    expect(session.snapshot.subtitleOverlayId, live);
+    backend.failDisableSubtitle = false;
     backend.failSelectSubtitle = true;
     final disabled = backend.subtitleDisables;
     await expectLater(session.selectSubtitle(embedded), throwsStateError);
