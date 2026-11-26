@@ -10,7 +10,7 @@ class AppLocalizationsEn extends AppLocalizations {
   AppLocalizationsEn([String locale = 'en']) : super(locale);
 
   @override
-  String get appTitle => 'Moonfin';
+  String get appTitle => 'EmbyView';
 
   @override
   String get animeMarkerFiller => 'Filler';
@@ -177,7 +177,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String appVersionFooter(String version) {
-    return 'Moonfin version $version';
+    return 'EmbyView version $version';
   }
 
   @override
@@ -771,7 +771,7 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get exitApp => 'Exit Moonfin?';
+  String get exitApp => 'Exit EmbyView?';
 
   @override
   String get exitAppConfirmation => 'Are you sure you want to exit?';
@@ -2229,7 +2229,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get shortcutToggleFullscreen => 'Fullscreen on or off';
 
   @override
-  String get shortcutQuit => 'Quit Moonfin';
+  String get shortcutQuit => 'Quit EmbyView';
 
   @override
   String get shortcutPlayPause => 'Play or pause';

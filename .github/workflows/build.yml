@@ -35,8 +35,14 @@ jobs:
           cache: true
       - name: Prepare Flutter and CocoaPods configuration
         run: |
+          app_version="$(sed -nE 's/^version:[[:space:]]*([^[:space:]+]+).*/\1/p' pubspec.yaml | head -n 1)"
+          short_commit="$(git rev-parse --short HEAD)"
+          test -n "$app_version"
+          test -n "$short_commit"
           flutter pub get --enforce-lockfile
-          flutter build macos --release --config-only --no-pub
+          flutter build macos --release --config-only --no-pub \
+            --dart-define="EMBYVIEW_VERSION=${app_version}" \
+            --dart-define="EMBYVIEW_COMMIT=${short_commit}"
           git diff --exit-code -- pubspec.lock macos/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved
       - name: Resolve the committed remote Swift packages
         run: |

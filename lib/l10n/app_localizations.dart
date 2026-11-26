@@ -223,7 +223,7 @@ abstract class AppLocalizations {
   /// The application title
   ///
   /// In en, this message translates to:
-  /// **'Moonfin'**
+  /// **'EmbyView'**
   String get appTitle;
 
   /// Badge on an anime episode that is filler, meaning it is not adapted from the source manga
@@ -511,7 +511,7 @@ abstract class AppLocalizations {
   /// App version shown in footer
   ///
   /// In en, this message translates to:
-  /// **'Moonfin version {version}'**
+  /// **'EmbyView version {version}'**
   String appVersionFooter(String version);
 
   /// Section heading for previously saved servers
@@ -1387,7 +1387,7 @@ abstract class AppLocalizations {
   /// Title of exit confirmation dialog
   ///
   /// In en, this message translates to:
-  /// **'Exit Moonfin?'**
+  /// **'Exit EmbyView?'**
   String get exitApp;
 
   /// Body text of exit confirmation dialog
@@ -3883,7 +3883,7 @@ abstract class AppLocalizations {
   /// What Ctrl+Q does on desktop
   ///
   /// In en, this message translates to:
-  /// **'Quit Moonfin'**
+  /// **'Quit EmbyView'**
   String get shortcutQuit;
 
   /// Player shortcut action

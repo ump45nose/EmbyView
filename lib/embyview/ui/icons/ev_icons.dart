@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart' hide ThemeMode;
+import 'package:flutter/widgets.dart';
+import 'package:moonfin/embyview/ui/theme/ev_scale.dart';
 import 'package:moonfin/embyview/ui/theme/ev_theme.dart';
 
 /// Vector icon definition ported from `.spec/mockups/proto.js`.
@@ -107,6 +108,18 @@ abstract final class EvIcons {
   static const faceFamily = EvIconData('face_family', 'd 9,11.4 | d 15,11.4 | p 9.6,16.2 14.4,16.2 | a 12,13,8.2,205,335', cinemaStrokeWidth: 1.5, doodleStrokeWidth: 1.5);
   static const faceGuest = EvIconData('face_guest', 'a 9,11.6,1.6,200,340 | a 15,11.6,1.6,200,340 | a 12,13.4,3.8,25,155 | p 4.6,7.6 19.4,7.6 | p 7.6,7.6 8.8,3.6 15.2,3.6 16.4,7.6', cinemaStrokeWidth: 1.5, doodleStrokeWidth: 1.5);
 
+  // Stage 7 supplement dual-theme icons (proto.js DSPEC L1469-1480)
+  static const server = EvIconData('server', 'R 4,4,16,6.5 | R 4,13.5,16,6.5 | d 7.5,7.2 | d 7.5,16.7 | p 11,7.2 16.5,7.2 | p 11,16.7 16.5,16.7');
+  static const folder = EvIconData('folder', 'B 3,6 9.5,6 11.5,8.5 21,8.5 21,19 3,19');
+  static const download = EvIconData('download', 'p 12,3.5 12,14.5 | p 7.5,10.5 12,15 16.5,10.5 | p 4,15.5 4,20 20,20 20,15.5');
+  static const lock = EvIconData('lock', 'R 5,10.5,14,10 | a 12,10.5,4.2,180,360 | d 12,15.4');
+  static const logout = EvIconData('logout', 'p 13,4 5,4 5,20 13,20 | p 10,12 20.5,12 | p 17,8.5 20.5,12 17,15.5');
+  static const keyboard = EvIconData('keyboard', 'R 2.5,6,19,12 | d 6.2,9.6 | d 9.8,9.6 | d 13.4,9.6 | d 17,9.6 | p 7,14.4 17,14.4');
+  static const nowifi = EvIconData('nowifi', 'a 12,19,13,228,312 | a 12,19,8.5,226,314 | a 12,19,4,222,318 | d 12,19 | p 4,4 20,20');
+  static const hourglass = EvIconData('hourglass', 'p 6,3 18,3 | p 6,21 18,21 | p 7.5,3 7.5,6.5 12,12 7.5,17.5 7.5,21 | p 16.5,3 16.5,6.5 12,12 16.5,17.5 16.5,21 | F 9,19.8 15,19.8 12,15.8');
+  static const shield = EvIconData('shield', 'B 12,2.8 19.5,5.5 19,13.5 12,21 5,13.5 4.5,5.5 | p 12,8 12,12.6 | d 12,16');
+  static const refresh = EvIconData('refresh', 'a 12,12,7.5,40,320 | p 18.6,3.4 17.8,7.3 13.9,6.6');
+
   /// The 20 selectable icons for custom zones (`ZICONS` in `proto.js`).
   static const List<EvIconData> zoneIcons = [
     navAnime, navMovie, navTv, navDoc, navBox, star, heart, rocket, ghost, music,
@@ -122,11 +135,13 @@ abstract final class EvIcons {
     shuffle, grid, ok, a4k, cmp, palette, lang, stack, edit, zones,
     heart, rocket, ghost, music, balloon, ball, book, globe, crown,
     clock, leaf, flame, cat,
+    server, folder, download, lock, logout, keyboard, nowifi, hourglass, shield, refresh,
     illClock, illTv, illEmpty, illSofa, faceSfw, faceFamily, faceGuest,
   ];
 
   static final Map<String, EvIconData> _byKey = {
     for (final i in all) i.key: i,
+    'no_wifi': nowifi,
     'series': navTv,
     'tvshows': navTv,
     'tv': navTv,
@@ -542,4 +557,347 @@ abstract final class _IconCompiler {
     ..lineTo(16.7, 15.0)
     ..arcToPoint(const Offset(21, 10.7), radius: const Radius.circular(4.3), clockwise: false)
     ..cubicTo(21, 6.4, 17, 3, 12, 3)..close();
+}
+
+/// Code-drawn EmbyView app icon (Final E · Hand-drawn Play) ported from
+/// `appIcon()` / `ICON_SPEC` in `.spec/mockups/proto.js`.
+class EvAppIcon extends StatelessWidget {
+  const EvAppIcon({
+    super.key,
+    this.size = 96,
+    this.dark = false,
+    this.showShadow = true,
+  });
+
+  final double size;
+  final bool dark;
+  final bool showShadow;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(
+        painter: EvAppIconPainter(dark: dark, showShadow: showShadow),
+      ),
+    );
+  }
+}
+
+/// Painter for [EvAppIcon] matching the 1024x1024 Apple icon template canvas
+/// (`rect(100, 100, 824, 824, rx: 186)` + `doodle('iconE', ICON_SPEC, 24, 1.3)`).
+class EvAppIconPainter extends CustomPainter {
+  const EvAppIconPainter({this.dark = false, this.showShadow = true});
+
+  final bool dark;
+  final bool showShadow;
+
+  static const EvIconData iconSpec = EvIconData(
+    'iconE',
+    'c 12,12.4,8.4 | B 9.7,8 16.4,12.4 9.7,16.8 | p 19.8,2.6 19.8,5.4 | p 18.4,4 21.2,4',
+    doodleStrokeWidth: 1.3,
+  );
+
+  static const Color lightBg = Color(0xFFD97757);
+  static const Color lightEdge = Color(0xFFC4643F);
+  static const Color lightInk = Color(0xFF141413);
+  static const Color lightFill = Color(0xFFFAF9F5);
+
+  static const Color darkBg = Color(0xFF1F1E1C);
+  static const Color darkEdge = Color(0xFF33312D);
+  static const Color darkInk = Color(0xFFFAF9F5);
+  static const Color darkFill = Color(0xFFD97757);
+
+  static final RRect _baseRRect = RRect.fromRectAndRadius(
+    const Rect.fromLTWH(100, 100, 824, 824),
+    const Radius.circular(186),
+  );
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final side = size.shortestSide;
+    if (side <= 0) return;
+    final scale = side / 1024.0;
+    canvas.save();
+    canvas.translate((size.width - side) / 2, (size.height - side) / 2);
+    canvas.scale(scale, scale);
+
+    final bg = dark ? darkBg : lightBg;
+    final edge = dark ? darkEdge : lightEdge;
+    final ink = dark ? darkInk : lightInk;
+    final fill = dark ? darkFill : lightFill;
+
+    if (showShadow) {
+      final shadowPaint = Paint()
+        ..color = const Color.fromRGBO(0, 0, 0, 0.28)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 42);
+      canvas.drawRRect(_baseRRect.shift(const Offset(0, 32)), shadowPaint);
+    }
+
+    canvas.drawRRect(
+      _baseRRect,
+      Paint()
+        ..color = bg
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true,
+    );
+    canvas.drawRRect(
+      _baseRRect,
+      Paint()
+        ..color = edge
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 6
+        ..isAntiAlias = true,
+    );
+
+    final compiled = _IconCompiler.compile(iconSpec, isPaper: true);
+    canvas.save();
+    canvas.translate(212, 206);
+    canvas.scale(25.0, 25.0);
+
+    final fillPaint = Paint()
+      ..color = fill
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+    for (final path in compiled.fills) {
+      canvas.drawPath(path, fillPaint);
+    }
+
+    final strokePaint = Paint()
+      ..color = ink
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = iconSpec.doodleStrokeWidth
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..isAntiAlias = true;
+    for (final path in compiled.strokes) {
+      canvas.drawPath(path, strokePaint);
+    }
+
+    canvas.restore();
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(EvAppIconPainter oldDelegate) =>
+      oldDelegate.dark != dark || oldDelegate.showShadow != showShadow;
+}
+
+class _FloaterSpec {
+  const _FloaterSpec(this.icon, this.left, this.top, this.sizeRem, this.deg);
+  final EvIconData icon;
+  final double left, top, sizeRem, deg;
+}
+
+/// Brand radial glow background with gently floating library icons, ported from
+/// `.brandbg`, `.brandbg.calm`, and `floaters()` in `.spec/mockups/proto.css`.
+class EvBrandBackground extends StatefulWidget {
+  const EvBrandBackground({
+    super.key,
+    this.calm = false,
+    this.showFloaters,
+    this.child,
+  });
+
+  /// Calm mode omits colorful glows and floating icons (used by empty/error states).
+  final bool calm;
+
+  /// Explicit override for floating icons; defaults to `!calm`.
+  final bool? showFloaters;
+
+  final Widget? child;
+
+  static const List<_FloaterSpec> _floaters = [
+    _FloaterSpec(EvIcons.navAnime, 0.05, 0.13, 6.0, -12),
+    _FloaterSpec(EvIcons.navMovie, 0.14, 0.56, 4.5, 8),
+    _FloaterSpec(EvIcons.navTv, 0.22, 0.84, 5.5, -6),
+    _FloaterSpec(EvIcons.navDoc, 0.24, 0.30, 3.5, 14),
+    _FloaterSpec(EvIcons.navBox, 0.79, 0.12, 5.5, 10),
+    _FloaterSpec(EvIcons.star, 0.89, 0.42, 4.0, -10),
+    _FloaterSpec(EvIcons.music, 0.74, 0.72, 6.0, 6),
+    _FloaterSpec(EvIcons.ghost, 0.91, 0.83, 3.5, -14),
+    _FloaterSpec(EvIcons.rocket, 0.62, 0.05, 3.5, -4),
+    _FloaterSpec(EvIcons.heart, 0.36, 0.90, 3.5, 12),
+  ];
+
+  @override
+  State<EvBrandBackground> createState() => _EvBrandBackgroundState();
+}
+
+class _EvBrandBackgroundState extends State<EvBrandBackground>
+    with TickerProviderStateMixin {
+  AnimationController? _ctrl;
+
+  bool get _hasFloaters => widget.showFloaters ?? !widget.calm;
+
+  void _syncController(bool disableAnimations) {
+    if (_hasFloaters && !disableAnimations) {
+      _ctrl ??= AnimationController(
+        vsync: this,
+        duration: const Duration(seconds: 32),
+      )..repeat();
+    } else {
+      _ctrl?.dispose();
+      _ctrl = null;
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncController(MediaQuery.disableAnimationsOf(context));
+  }
+
+  @override
+  void didUpdateWidget(EvBrandBackground oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncController(MediaQuery.disableAnimationsOf(context));
+  }
+
+  @override
+  void dispose() {
+    _ctrl?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context);
+    final s = EvScale.of(context);
+    final hasFloaters = _hasFloaters;
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        IgnorePointer(
+          child: ClipRect(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CustomPaint(
+                  painter: _BrandGlowPainter(isPaper: t.isPaper, calm: widget.calm, bg: t.bg, fg: t.fg),
+                ),
+                if (hasFloaters)
+                  LayoutBuilder(
+                    builder: (_, constraints) {
+                      final w = constraints.maxWidth;
+                      final h = constraints.maxHeight;
+                      final drift = s.rem(1.5);
+                      final opacity = t.isPaper ? 0.17 : 0.07;
+                      return Stack(
+                        children: [
+                          for (var i = 0; i < EvBrandBackground._floaters.length; i++)
+                            _buildFloater(EvBrandBackground._floaters[i], i, w, h, drift, opacity, t, s),
+                        ],
+                      );
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ),
+        if (widget.child != null) widget.child!,
+      ],
+    );
+  }
+
+  Widget _buildFloater(
+    _FloaterSpec spec,
+    int index,
+    double width,
+    double height,
+    double drift,
+    double opacity,
+    EvTheme t,
+    EvScale s,
+  ) {
+    final iconSize = s.rem(spec.sizeRem);
+    final iconChild = Opacity(
+      opacity: opacity,
+      child: Transform.rotate(
+        angle: spec.deg * math.pi / 180,
+        child: EvIcon(spec.icon, size: iconSize, color: t.ink, active: false),
+      ),
+    );
+    final ctrl = _ctrl;
+    return Positioned(
+      left: width * spec.left,
+      top: height * spec.top,
+      child: ctrl == null
+          ? iconChild
+          : AnimatedBuilder(
+              animation: ctrl,
+              child: iconChild,
+              builder: (_, child) {
+                // 32s full cycle = 16s up + 16s down, staggered by -2.3s per icon.
+                final phase = (ctrl.value + (index * 2.3 / 32.0)) % 1.0;
+                final wave = 0.5 - 0.5 * math.cos(phase * math.pi * 2);
+                return Transform.translate(
+                  offset: Offset(0, -drift * wave),
+                  child: child,
+                );
+              },
+            ),
+    );
+  }
+}
+
+class _BrandGlowPainter extends CustomPainter {
+  const _BrandGlowPainter({
+    required this.isPaper,
+    required this.calm,
+    required this.bg,
+    required this.fg,
+  });
+
+  final bool isPaper, calm;
+  final Color bg, fg;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    canvas.drawRect(rect, Paint()..color = bg);
+
+    void drawGlow(double cxFrac, double cyFrac, double rxFrac, double ryFrac, Color color) {
+      final cx = size.width * cxFrac;
+      final cy = size.height * cyFrac;
+      final rx = size.width * rxFrac;
+      final ry = size.height * ryFrac;
+      if (rx <= 0 || ry <= 0) return;
+      canvas.save();
+      canvas.translate(cx, cy);
+      canvas.scale(1.0, ry / rx);
+      final paint = Paint()
+        ..shader = RadialGradient(
+          colors: [color, color.withValues(alpha: 0)],
+          stops: const [0.0, 0.70],
+        ).createShader(Rect.fromCircle(center: Offset.zero, radius: rx));
+      canvas.drawCircle(Offset.zero, rx, paint);
+      canvas.restore();
+    }
+
+    if (calm) {
+      if (!isPaper) {
+        drawGlow(0.50, 0.30, 0.70, 0.70, fg.withValues(alpha: 0.05));
+      }
+      return;
+    }
+
+    if (isPaper) {
+      drawGlow(0.16, 0.20, 0.60, 0.70, const Color.fromRGBO(217, 119, 87, 0.13));
+      drawGlow(0.86, 0.82, 0.55, 0.65, const Color.fromRGBO(106, 155, 204, 0.10));
+    } else {
+      drawGlow(0.16, 0.20, 0.60, 0.70, const Color.fromRGBO(217, 119, 87, 0.24));
+      drawGlow(0.86, 0.82, 0.55, 0.65, const Color.fromRGBO(127, 167, 255, 0.16));
+      drawGlow(0.72, 0.08, 0.40, 0.50, const Color.fromRGBO(183, 166, 255, 0.10));
+    }
+  }
+
+  @override
+  bool shouldRepaint(_BrandGlowPainter oldDelegate) =>
+      oldDelegate.isPaper != isPaper ||
+      oldDelegate.calm != calm ||
+      oldDelegate.bg != bg ||
+      oldDelegate.fg != fg;
 }

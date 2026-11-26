@@ -22,17 +22,17 @@
 	<string>$(FLUTTER_BUILD_NAME)</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
-	<!-- moonfin:// deep links, delivered to Dart by app_links. -->
+	<!-- embyview:// deep links, delivered to Dart by app_links. -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>CFBundleURLName</key>
-			<string>org.moonfin.app</string>
+			<string>io.github.ump45nose.embyview</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>moonfin</string>
+				<string>embyview</string>
 			</array>
 		</dict>
 	</array>

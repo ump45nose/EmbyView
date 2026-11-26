@@ -1,10 +1,14 @@
 import 'dart:async';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/widgets.dart' hide ConnectionState, Page;
+import 'package:moonfin/embyview/data/build_info.dart';
+import 'package:moonfin/embyview/data/diagnostics_exporter.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/subtitles/ai/subtitle_ai.dart' show AsrModelState, AsrModelStatus, LocalSubtitleAsr, isSubtitleTranslationMetered;
 import 'package:moonfin/embyview/ui/kit.dart';
 import 'package:moonfin/embyview/ui/settings/ev_settings_widgets.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 T _nearest<T extends num>(T value, List<T> presets) {
   var best = presets.first;
@@ -810,17 +814,255 @@ class _SecretGroupState extends State<_SecretGroup> {
   }
 }
 
-/// 10. About pane (`about`).
-class EvAboutSettingsPane extends StatelessWidget {
-  const EvAboutSettingsPane({super.key});
+/// 10. About pane (`about`) mirroring `paneAbout` in `.spec/mockups/proto.js`.
+class EvAboutSettingsPane extends StatefulWidget {
+  const EvAboutSettingsPane({
+    super.key,
+    this.buildInfo = EvBuildInfo.current,
+    this.asr = const LocalSubtitleAsr(),
+    this.diagnosticsExporter = const EvDiagnosticsExporter(),
+    this.onExportDiagnostics,
+    this.onOpenSourceUrl,
+  });
+
+  final EvBuildInfo buildInfo;
+  final LocalSubtitleAsr asr;
+  final EvDiagnosticsExporter diagnosticsExporter;
+
+  /// Optional override for exporting sanitized diagnostic logs (used by tests or
+  /// custom hosts). When null, prompts with a save dialog and exports via
+  /// [diagnosticsExporter].
+  final Future<EvDiagnosticsExportResult?> Function()? onExportDiagnostics;
+
+  /// Optional override for opening [EvBuildInfo.sourceRepoUrl].
+  final Future<void> Function(Uri uri)? onOpenSourceUrl;
+
+  @override
+  State<EvAboutSettingsPane> createState() => _EvAboutSettingsPaneState();
+}
+
+class _EvAboutSettingsPaneState extends State<EvAboutSettingsPane> {
+  AsrModelStatus? _asrStatus;
+  bool _asrLoaded = false;
+  Timer? _asrTimer;
+  int? _recentLogBytes;
+  bool _exporting = false;
+  String? _exportMessage;
+  bool _exportIsError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_refreshAsrStatus());
+    unawaited(_refreshLogSize());
+  }
+
+  @override
+  void dispose() {
+    _asrTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshAsrStatus() async {
+    _asrTimer?.cancel();
+    try {
+      final status = await widget.asr.modelStatus();
+      if (!mounted) return;
+      setState(() {
+        _asrStatus = status;
+        _asrLoaded = true;
+      });
+      if (status.state == AsrModelState.downloading) {
+        _asrTimer = Timer(const Duration(milliseconds: 500), _refreshAsrStatus);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _asrStatus = null;
+        _asrLoaded = true;
+      });
+    }
+  }
+
+  Future<void> _refreshLogSize() async {
+    try {
+      final bytes = await widget.diagnosticsExporter.estimateRecentLogsBytes();
+      if (!mounted) return;
+      setState(() => _recentLogBytes = bytes);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _recentLogBytes = 0);
+    }
+  }
+
+  Future<void> _handleExport() async {
+    if (_exporting) return;
+    setState(() {
+      _exporting = true;
+      _exportMessage = null;
+      _exportIsError = false;
+    });
+    try {
+      EvDiagnosticsExportResult? result;
+      if (widget.onExportDiagnostics != null) {
+        result = await widget.onExportDiagnostics!();
+      } else {
+        final ts = DateTime.now().toIso8601String().replaceAll(':', '').split('.').first;
+        final path = await FilePicker.saveFile(
+          dialogTitle: '导出诊断日志',
+          fileName: 'EmbyView-diagnostics-$ts.log',
+          type: FileType.custom,
+          allowedExtensions: const ['log', 'txt'],
+        );
+        if (path != null && path.isNotEmpty) {
+          result = await widget.diagnosticsExporter.exportSanitizedBundle(
+            destinationPath: path,
+            buildInfo: widget.buildInfo,
+          );
+        }
+      }
+      if (!mounted) return;
+      if (result != null) {
+        setState(() {
+          _exportMessage = '已导出脱敏日志（${EvDiagnosticsExporter.formatByteSize(result!.byteCount)}）：${result.path}';
+          _exportIsError = false;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _exportMessage = e is EmbyViewFailure ? e.reason : '导出诊断日志失败，请重试。';
+        _exportIsError = true;
+      });
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  Future<void> _handleOpenSource() async {
+    final uri = Uri.parse(widget.buildInfo.sourceRepoUrl);
+    if (widget.onOpenSourceUrl != null) {
+      await widget.onOpenSourceUrl!(uri);
+      return;
+    }
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _exportMessage = '无法打开浏览器，请手动访问 ${widget.buildInfo.sourceRepoUrl}';
+        _exportIsError = true;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = EvTheme.of(context), s = EvScale.of(context);
+    final status = _asrStatus;
+    final state = status?.state;
+    final received = status?.receivedBytes ?? 0;
+    final total = status?.totalBytes ?? 0;
+    final pct = total > 0 ? ((received / total).clamp(0.0, 1.0) * 100).round() : 0;
+    final modelSizeLabel = total > 0 ? '${(total / 1000000).round()} MB' : '574 MB';
+    final (asrLabel, asrTone) = switch (state) {
+      AsrModelState.ready => ('已下载', EvStatusTone.ok),
+      AsrModelState.downloading => ('下载中 $pct%', EvStatusTone.warn),
+      AsrModelState.failed => ('下载失败', EvStatusTone.error),
+      AsrModelState.notDownloaded => (received > 0 ? '已暂停' : '未下载', EvStatusTone.warn),
+      null => (_asrLoaded ? '未下载' : '检测中', EvStatusTone.warn),
+    };
+    final logSizeText = _recentLogBytes == null
+        ? '计算中…'
+        : EvDiagnosticsExporter.formatByteSize(_recentLogBytes!);
+
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      evPaneTitle(t, s, '关于'),
+      Padding(
+        padding: EdgeInsets.only(top: s.rem(0.5), bottom: s.rem(2.0)),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            EvAppIcon(key: const Key('ev_about_app_icon'), size: s.rem(9.0)),
+            SizedBox(height: s.rem(0.25)),
+            Text('EmbyView', style: t.displayStyle(s.font(2.25))),
+            SizedBox(height: s.rem(0.25)),
+            Text(
+              widget.buildInfo.formattedVersion,
+              key: const Key('ev_about_version'),
+              style: t.bodyStyle(s.font(1.0), color: t.ink3)
+                  .copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
+            ),
+            SizedBox(height: s.rem(1.25)),
+            Wrap(
+              spacing: s.rem(0.625),
+              runSpacing: s.rem(0.5),
+              alignment: WrapAlignment.center,
+              children: [
+                EvButton.ghost(
+                  key: const Key('ev_about_export_logs'),
+                  small: true,
+                  icon: EvIcons.download,
+                  label: _exporting ? '正在导出…' : '导出诊断日志…',
+                  onPressed: _exporting ? null : () => unawaited(_handleExport()),
+                ),
+                EvButton.ghost(
+                  key: const Key('ev_about_source_code'),
+                  small: true,
+                  icon: EvIcons.globe,
+                  label: '源代码',
+                  onPressed: () => unawaited(_handleOpenSource()),
+                ),
+              ],
+            ),
+            if (_exportMessage != null) ...[
+              SizedBox(height: s.rem(0.75)),
+              Text(
+                _exportMessage!,
+                key: const Key('ev_about_export_feedback'),
+                textAlign: TextAlign.center,
+                style: t.bodyStyle(
+                  s.font(0.875),
+                  color: _exportIsError ? evDangerColor : t.ink3,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
       EvSettingsGroup(children: [
-        EvSettingsRow(title: 'EmbyView', subtitle: '基于 Moonfin 3.1.1 · GPL-3.0', trailing: evValueText(t, s, '1.0')),
-        EvSettingsRow(title: '播放引擎', subtitle: 'AetherEngine · Anime4K .lineArt', trailing: evValueText(t, s, '已就绪')),
+        EvSettingsRow(
+          title: '基于 ${widget.buildInfo.upstreamBase}',
+          subtitle: '按 ${widget.buildInfo.license} 开源，改过的源代码同样公开',
+          trailing: evValueText(t, s, widget.buildInfo.license),
+        ),
+        const EvSettingsRow(
+          title: '播放引擎',
+          subtitle: 'AetherEngine · Anime4K',
+          trailing: EvStatusIndicator(
+            key: Key('ev_about_engine_status'),
+            label: '就绪',
+            tone: EvStatusTone.ok,
+          ),
+        ),
+        EvSettingsRow(
+          title: '本机听写模型',
+          subtitle: 'whisper large-v3-turbo · $modelSizeLabel',
+          trailing: EvStatusIndicator(
+            key: const Key('ev_about_asr_status'),
+            label: asrLabel,
+            tone: asrTone,
+          ),
+        ),
+        EvSettingsRow(
+          title: '诊断日志',
+          subtitle: '最近 7 天的连接、起播和字幕记录；导出时去掉密码、密钥和服务器地址',
+          trailing: Text(
+            logSizeText,
+            key: const Key('ev_about_log_size'),
+            style: t.bodyStyle(s.font(0.9375), color: t.ink3)
+                .copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
+          ),
+        ),
       ]),
     ]);
   }

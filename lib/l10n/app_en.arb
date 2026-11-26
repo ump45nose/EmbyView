@@ -1,6 +1,6 @@
 {
   "@@locale": "en",
-  "appTitle": "Moonfin",
+  "appTitle": "EmbyView",
   "@appTitle": {
     "description": "The application title"
   },
@@ -246,7 +246,7 @@
   "@selectServer": {
     "description": "Button to navigate back to server selection"
   },
-  "appVersionFooter": "Moonfin version {version}",
+  "appVersionFooter": "EmbyView version {version}",
   "@appVersionFooter": {
     "description": "App version shown in footer",
     "placeholders": {
@@ -928,7 +928,7 @@
       }
     }
   },
-  "exitApp": "Exit Moonfin?",
+  "exitApp": "Exit EmbyView?",
   "@exitApp": {
     "description": "Title of exit confirmation dialog"
   },
@@ -3005,7 +3005,7 @@
   "@shortcutToggleFullscreen": {
     "description": "F11 and Alt+Enter anywhere, F in the player"
   },
-  "shortcutQuit": "Quit Moonfin",
+  "shortcutQuit": "Quit EmbyView",
   "@shortcutQuit": {
     "description": "What Ctrl+Q does on desktop"
   },

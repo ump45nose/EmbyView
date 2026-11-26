@@ -32,6 +32,8 @@ done
 
 HEAD_COMMIT="$(git rev-parse HEAD)"
 SHORT_COMMIT="$(git rev-parse --short HEAD)"
+APP_VERSION="$(sed -nE 's/^version:[[:space:]]*([^[:space:]+]+).*/\1/p' pubspec.yaml | head -n 1)"
+[[ -n "$APP_VERSION" ]] || die "Failed to parse version from pubspec.yaml"
 if [[ -n "$EXPECTED_COMMIT" ]]; then
   RESOLVED_COMMIT="$(git rev-parse --verify "${EXPECTED_COMMIT}^{commit}")" || die "Unknown commit: $EXPECTED_COMMIT"
   [[ "$HEAD_COMMIT" == "$RESOLVED_COMMIT" ]] || die "HEAD ($HEAD_COMMIT) != expected commit ($RESOLVED_COMMIT)"
@@ -101,7 +103,9 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
       fi
     fi
 
-    flutter build macos --release --config-only --no-pub
+    flutter build macos --release --config-only --no-pub \
+      --dart-define="EMBYVIEW_VERSION=${APP_VERSION}" \
+      --dart-define="EMBYVIEW_COMMIT=${SHORT_COMMIT}"
     check_lockfiles
 
     xcodebuild -resolvePackageDependencies \

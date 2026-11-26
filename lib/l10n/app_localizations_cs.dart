@@ -2249,7 +2249,7 @@ class AppLocalizationsCs extends AppLocalizations {
   String get shortcutToggleFullscreen => 'Fullscreen on or off';
 
   @override
-  String get shortcutQuit => 'Quit Moonfin';
+  String get shortcutQuit => 'Quit EmbyView';
 
   @override
   String get shortcutPlayPause => 'Play or pause';

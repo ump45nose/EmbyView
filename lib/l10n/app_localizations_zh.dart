@@ -10,7 +10,7 @@ class AppLocalizationsZh extends AppLocalizations {
   AppLocalizationsZh([String locale = 'zh']) : super(locale);
 
   @override
-  String get appTitle => 'Moonfin';
+  String get appTitle => 'EmbyView';
 
   @override
   String get animeMarkerFiller => '原创剧情';
@@ -173,7 +173,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String appVersionFooter(String version) {
-    return 'Moonfin 版本 $version';
+    return 'EmbyView 版本 $version';
   }
 
   @override
@@ -748,7 +748,7 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get exitApp => '退出 Moonfin？';
+  String get exitApp => '退出 EmbyView？';
 
   @override
   String get exitAppConfirmation => '确定要退出吗？';
@@ -2185,7 +2185,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get shortcutToggleFullscreen => '开启或关闭全屏';
 
   @override
-  String get shortcutQuit => '退出 Moonfin';
+  String get shortcutQuit => '退出 EmbyView';
 
   @override
   String get shortcutPlayPause => '播放或暂停';
