@@ -93,8 +93,21 @@ class Fixture {
                       {'Id': 'g1', 'Name': '科幻'},
                     ],
                   },
-                  '/ExtendedVideoTypes' => ['DolbyVision', 'Hdr10'],
-                  '/AudioLayouts' => ['5.1'],
+                  '/ExtendedVideoTypes' => {
+                    'Items': [
+                      {'Name': 'SDR', 'Id': 'None'},
+                      {'Name': 'HDR 10', 'Id': 'Hdr10'},
+                      {'Name': 'Dolby Vision', 'Id': 'DolbyVision'},
+                    ],
+                    'TotalRecordCount': 3,
+                  },
+                  '/AudioLayouts' => {
+                    'Items': [
+                      {'Name': '5.1'},
+                      {'Name': 'stereo'},
+                    ],
+                    'TotalRecordCount': 2,
+                  },
                   _ => {'Items': [], 'TotalRecordCount': 0},
                 };
                 if (o.path.endsWith('/Views')) {
@@ -658,5 +671,188 @@ void main() {
       throwsA(isA<EmbyViewFailure>().having((e) => e.code, 'code', 'session_changed')),
     );
     expect(f2.requests, isEmpty);
+  });
+
+  test('technology facets parse Emby Id/Name shapes and align custom zone & wall queries', () async {
+    final f = Fixture();
+    addTearDown(f.dispose);
+    final epDv = {
+      'Id': 'e_dv',
+      'Name': 'DV Episode',
+      'Type': 'Episode',
+      'ProductionYear': 2025,
+      'CommunityRating': 9,
+      'Genres': ['科幻'],
+      'GenreItems': [
+        {'Id': 'g1', 'Name': '科幻'},
+      ],
+      'UserData': {'Played': false, 'IsFavorite': false},
+    };
+    final epHdr = {
+      'Id': 'e_hdr',
+      'Name': 'HDR Episode',
+      'Type': 'Episode',
+      'ProductionYear': 2025,
+      'CommunityRating': 8.5,
+      'Genres': ['科幻'],
+      'GenreItems': [
+        {'Id': 'g1', 'Name': '科幻'},
+      ],
+      'UserData': {'Played': false, 'IsFavorite': false},
+    };
+    final allRows = [...f.items, epDv, epHdr];
+    const hdrQuery = 'Hdr10,Hdr10Plus,HyperLogGamma,DolbyVision';
+    const itemVideoTypes = {'b': 'DolbyVision', 'a': 'Hdr10', 'z': 'None', 'n': 'None', 'e_dv': 'DolbyVision', 'e_hdr': 'Hdr10'};
+    const item4k = {'b', 'a', 'e_dv'};
+    const item51 = {'b', 'z', 'e_dv', 'e_hdr'};
+    List<Map<String, dynamic>> extendedVideoTypes = [
+      {'Name': 'SDR', 'Id': 'None'},
+      {'Name': 'HDR 10', 'Id': 'Hdr10'},
+      {'Name': 'Dolby Vision', 'Id': 'DolbyVision'},
+    ];
+
+    f.hook = (o) async {
+      if (o.path == '/ExtendedVideoTypes') {
+        return {'Items': extendedVideoTypes, 'TotalRecordCount': extendedVideoTypes.length};
+      }
+      if (o.path == '/AudioLayouts') {
+        return {
+          'Items': [
+            {'Name': '5.1'},
+            {'Name': 'stereo'},
+          ],
+          'TotalRecordCount': 2,
+        };
+      }
+      if (o.path.endsWith('/Items')) {
+        final p = o.queryParameters;
+        var rows = allRows.toList();
+        if (p['Ids'] != null) {
+          final wanted = p['Ids'].toString().split(',').toSet();
+          rows = rows.where((e) => wanted.contains(e['Id'])).toList();
+        }
+        if (p['ParentId'] == 'movies') {
+          rows = rows.where((e) => e['Type'] == 'Movie').toList();
+        }
+        if (p['IncludeItemTypes'] != null) {
+          final allowed = p['IncludeItemTypes'].toString().split(',').toSet();
+          rows = rows.where((e) => allowed.contains(e['Type'])).toList();
+        }
+        if (p['Is4K'] == true) {
+          rows = rows.where((e) => item4k.contains(e['Id'])).toList();
+        }
+        if (p['ExtendedVideoTypes'] != null) {
+          final allowed = p['ExtendedVideoTypes'].toString().split(',').toSet();
+          rows = rows.where((e) => allowed.contains(itemVideoTypes[e['Id']])).toList();
+        }
+        if (p['AudioLayouts'] == '5.1') {
+          rows = rows.where((e) => item51.contains(e['Id'])).toList();
+        }
+        return {
+          'Items': rows.skip(p['StartIndex'] as int? ?? 0).take(p['Limit'] as int? ?? rows.length).toList(),
+          'TotalRecordCount': rows.length,
+        };
+      }
+      return null;
+    };
+
+    // 1. Custom zone facets expose all 4 tech options with real Emby Id/Name payload and accurate Movie+Episode counts.
+    final zoneFacets = await f.data.customZoneFacets();
+    expect(zoneFacets.technologies.map((e) => (e.value, e.label, e.count)).toList(), [
+      (TechFilter.uhd4k, '4K', 3),
+      (TechFilter.dolbyVision, '杜比视界', 2),
+      (TechFilter.hdr, 'HDR', 4),
+      (TechFilter.surround51, '5.1', 4),
+    ]);
+    final customEvtReq = f.requests.lastWhere((r) => r.path == '/ExtendedVideoTypes');
+    expect(customEvtReq.queryParameters['Recursive'], true);
+    expect(customEvtReq.queryParameters['IncludeItemTypes'], 'Movie,Episode');
+    expect(
+      f.requests.any((r) => r.path.endsWith('/Items') && r.queryParameters['ExtendedVideoTypes'] == 'DolbyVision'),
+      true,
+    );
+    expect(
+      f.requests.any((r) => r.path.endsWith('/Items') && r.queryParameters['ExtendedVideoTypes'] == hdrQuery),
+      true,
+    );
+
+    // 2. Movie library wall facets expose all 4 tech options scoped to Movie + ParentId + Recursive=true.
+    f.requests.clear();
+    final movieWallFacets = await f.data.wallFacets(query(zone: 'movies'));
+    expect(movieWallFacets.technologies.map((e) => (e.value, e.label, e.count)).toList(), [
+      (TechFilter.uhd4k, '4K', 2),
+      (TechFilter.dolbyVision, '杜比视界', 1),
+      (TechFilter.hdr, 'HDR', 2),
+      (TechFilter.surround51, '5.1', 2),
+    ]);
+    final movieEvtReq = f.requests.lastWhere((r) => r.path == '/ExtendedVideoTypes');
+    expect(movieEvtReq.queryParameters['ParentId'], 'movies');
+    expect(movieEvtReq.queryParameters['Recursive'], true);
+    expect(movieEvtReq.queryParameters['IncludeItemTypes'], 'Movie');
+
+    // 3. Custom DolbyVision and HDR zones return matching tile, ZoneData, and WallListing totals & items.
+    f.preferences.addAll([
+      const ZonePreference(
+        id: 'dv',
+        name: '杜比视界',
+        iconKey: 'spark',
+        colorSlot: 1,
+        rule: ZoneRule.technology(TechFilter.dolbyVision),
+      ),
+      const ZonePreference(
+        id: 'hdr',
+        name: 'HDR',
+        iconKey: 'spark',
+        colorSlot: 2,
+        rule: ZoneRule.technology(TechFilter.hdr),
+      ),
+    ]);
+    final tiles = await f.data.zones();
+    expect(tiles.map((t) => (t.id, t.total, t.unit)).toList(), [
+      ('dv', 2, '部 / 集'),
+      ('hdr', 4, '部 / 集'),
+    ]);
+
+    final dvZone = await f.data.zone('dv');
+    expect([dvZone.zone.total, dvZone.latest?.total, dvZone.highRated?.total], [2, 2, 2]);
+    final dvWall = await f.data.openWall(query(zone: 'dv', sort: WallSort.title));
+    expect(dvWall.info.total, 2);
+    expect((await dvWall.page(offset: 0, limit: 10)).items.map((c) => c.id).toSet(), {'b', 'e_dv'});
+
+    final hdrZone = await f.data.zone('hdr');
+    expect([hdrZone.zone.total, hdrZone.latest?.total, hdrZone.highRated?.total], [4, 4, 4]);
+    final hdrWall = await f.data.openWall(query(zone: 'hdr', sort: WallSort.added));
+    expect(hdrWall.info.total, 4);
+    expect((await hdrWall.page(offset: 0, limit: 10)).items.map((c) => c.id).toSet(), {'b', 'a', 'e_dv', 'e_hdr'});
+
+    // Filtering inside HDR custom zone by DolbyVision narrows to DolbyVision intersection.
+    final hdrFilteredDv = await f.data.openWall(query(zone: 'hdr', sort: WallSort.added, tech: TechFilter.dolbyVision));
+    expect(hdrFilteredDv.info.total, 2);
+
+    // 4. HLG-only exposes HDR without DolbyVision; SDR-only exposes neither.
+    extendedVideoTypes = [
+      {'Name': 'SDR', 'Id': 'None'},
+      {'Name': 'HLG', 'Id': 'HyperLogGamma'},
+    ];
+    expect((await f.data.customZoneFacets()).technologies.map((e) => e.value), [
+      TechFilter.uhd4k,
+      TechFilter.hdr,
+      TechFilter.surround51,
+    ]);
+    extendedVideoTypes = [
+      {'Name': 'SDR', 'Id': 'None'},
+    ];
+    expect((await f.data.customZoneFacets()).technologies.map((e) => e.value), [
+      TechFilter.uhd4k,
+      TechFilter.surround51,
+    ]);
+
+    // 5. Bare string lists remain supported alongside Emby Item maps.
+    f.hook = (o) async => switch (o.path) {
+      '/ExtendedVideoTypes' => ['DolbyVision'],
+      '/AudioLayouts' => ['5.1'],
+      _ => null,
+    };
+    expect((await f.data.customZoneFacets()).technologies.map((e) => e.value), TechFilter.values);
   });
 }

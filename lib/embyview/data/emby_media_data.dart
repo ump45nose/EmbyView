@@ -65,6 +65,7 @@ class EmbyMediaData implements EmbyViewData {
   static const _fields =
       'OriginalTitle,SortName,PrimaryImageAspectRatio,Overview,Genres,GenreItems,People,Studios,Taglines,RunTimeTicks,ProductionYear,CommunityRating,UserData,MediaStreams,MediaSources,ChildCount,RecursiveItemCount,DateCreated,DateLastSaved,ParentId,SeriesId,SeasonId,IndexNumber,BackdropImageTags,ParentBackdropItemId,ParentBackdropImageTags,ParentLogoItemId,ParentLogoImageTag';
   static const _featureFields = 'PrimaryImageAspectRatio,RunTimeTicks,CommunityRating,UserData';
+  static const _hdrVideoTypes = ['Hdr10', 'Hdr10Plus', 'HyperLogGamma', 'DolbyVision'];
   static const _indexFields =
       'OriginalTitle,SortName,ProductionYear,GenreItems,Genres,People,UserData,DateLastSaved,PrimaryImageAspectRatio,RunTimeTicks,CommunityRating,ParentId,SeriesId,Collections';
 
@@ -298,9 +299,7 @@ class EmbyMediaData implements EmbyViewData {
         params['Is4K'] = true;
       case TechFilter.dolbyVision:
       case TechFilter.hdr:
-        final values = technology == TechFilter.dolbyVision
-            ? ['DolbyVision']
-            : ['Hdr10', 'Hdr10Plus', 'HyperLogGamma', 'DolbyVision'];
+        final values = technology == TechFilter.dolbyVision ? const ['DolbyVision'] : _hdrVideoTypes;
         final current = params['ExtendedVideoTypes']?.toString().split(',');
         params['ExtendedVideoTypes'] = (current == null ? values : values.where(current.contains)).join(',');
       case TechFilter.surround51:
@@ -672,16 +671,34 @@ class EmbyMediaData implements EmbyViewData {
 
   Future<List<(TechFilter, String)>> _technologyOptions(Json params) async {
     if (params['IncludeItemTypes'] == 'Series' || params['IncludeItemTypes'] == 'BoxSet') return [];
-    final scope = {if (params['ParentId'] != null) 'ParentId': params['ParentId'], 'IncludeItemTypes': 'Movie,Episode'};
-    List<String> values(dynamic raw) => (raw is List ? raw : (raw as Map)['Items'] as List? ?? [])
-        .map((e) => e is Map ? (e['Name'] ?? e['Value']).toString() : e.toString())
-        .toList();
+    final scope = {
+      if (params['ParentId'] != null) 'ParentId': params['ParentId'],
+      'Recursive': true,
+      'IncludeItemTypes': params['IncludeItemTypes'] == 'Movie' ? 'Movie' : 'Movie,Episode',
+    };
+    Set<String> values(dynamic raw) {
+      final rows = raw is List ? raw : (raw is Map ? raw['Items'] as List? : null) ?? const [];
+      final out = <String>{};
+      for (final e in rows) {
+        if (e is Map) {
+          for (final key in const ['Id', 'Value', 'Name']) {
+            final v = e[key]?.toString().trim();
+            if (v != null && v.isNotEmpty) out.add(v);
+          }
+        } else if (e != null) {
+          final v = e.toString().trim();
+          if (v.isNotEmpty) out.add(v);
+        }
+      }
+      return out;
+    }
+
     final videos = values(await _get('videoTypes', params: scope));
     final audio = values(await _get('audioLayouts', params: scope));
     return [
       (TechFilter.uhd4k, '4K'),
       if (videos.contains('DolbyVision')) (TechFilter.dolbyVision, '杜比视界'),
-      if (videos.any(['Hdr10', 'Hdr10Plus', 'HyperLogGamma', 'DolbyVision'].contains)) (TechFilter.hdr, 'HDR'),
+      if (videos.any(_hdrVideoTypes.contains)) (TechFilter.hdr, 'HDR'),
       if (audio.contains('5.1')) (TechFilter.surround51, '5.1'),
     ];
   }
