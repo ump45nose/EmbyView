@@ -77,6 +77,7 @@ class EvShellController extends ChangeNotifier {
     this.onOpenAbout,
     this.onOpenServerSettings,
     this.onOpenUsers,
+    this.onOpenLook,
     this.onManageZones,
     this.onSignedOutToUserPicker,
     this.onSignOut,
@@ -110,7 +111,7 @@ class EvShellController extends ChangeNotifier {
 
   ValueChanged<String>? onOpenDetail;
   VoidCallback? onOpenSearch, onOpenSettings, onOpenAbout, onOpenServerSettings;
-  VoidCallback? onOpenUsers, onManageZones;
+  VoidCallback? onOpenUsers, onOpenLook, onManageZones;
   VoidCallback? onSignedOutToUserPicker, onSignOut, onSwitchServer, onAddAccount;
   VoidCallback? onToggleCommandPalette, onGoHome, onRetryHome;
   FutureOr<void> Function()? onRetryConnection;

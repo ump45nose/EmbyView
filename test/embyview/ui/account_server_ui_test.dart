@@ -334,6 +334,7 @@ void main() {
         final shell = EvShellController(
           onSignedOutToUserPicker: () => signedOutCallback++,
         );
+        var lookOpened = 0;
         addTearDown(() async {
           shell.dispose();
           immersion.dispose();
@@ -351,6 +352,9 @@ void main() {
             child: Center(
               child: EvAvatarMenu(
                 accounts: accounts,
+                themeMode: themeMode,
+                onOpenLook: () => lookOpened++,
+                onManageZones: () {},
                 onDismiss: () => dismissed++,
               ),
             ),
@@ -362,12 +366,72 @@ void main() {
         expect(find.byKey(const Key('ev_avatar_menu_server_header')), findsOneWidget);
         expect(find.text('家里的 Emby'), findsOneWidget);
         expect(find.text('nas.local:8096 · 已连接'), findsOneWidget);
+        expect(find.byKey(const Key('ev_avatar_menu_look')), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('ev_avatar_menu_look')),
+            matching: find.text('外观'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('ev_avatar_menu_look')),
+            matching: find.text(themeMode == ThemeMode.cinema ? '影院' : '纸面'),
+          ),
+          findsOneWidget,
+        );
+        final lookIcon = tester.widget<EvIcon>(
+          find.descendant(
+            of: find.byKey(const Key('ev_avatar_menu_look')),
+            matching: find.byType(EvIcon),
+          ),
+        );
+        expect(lookIcon.icon, EvIcons.palette);
+        final usersY = tester.getTopLeft(find.byKey(const Key('ev_avatar_menu_users'))).dy;
+        final lookY = tester.getTopLeft(find.byKey(const Key('ev_avatar_menu_look'))).dy;
+        final zonesY = tester.getTopLeft(find.byKey(const Key('ev_avatar_menu_zones'))).dy;
+        expect(usersY, lessThan(lookY));
+        expect(lookY, lessThan(zonesY));
+
+        await tester.tap(find.byKey(const Key('ev_avatar_menu_look')));
+        await tester.pumpAndSettle();
+        expect(lookOpened, 1);
+        expect(dismissed, 1);
+
+        // Verify automatic theme mode displays '昼夜自动'
+        await tester.pumpWidget(
+          _wrapWithScope(
+            services: services,
+            stage: stage,
+            immersion: immersion,
+            shell: shell,
+            child: Center(
+              child: EvAvatarMenu(
+                accounts: accounts,
+                themeMode: ThemeMode.automatic,
+                onOpenLook: () => lookOpened++,
+                onManageZones: () {},
+                onDismiss: () => dismissed++,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('ev_avatar_menu_look')),
+            matching: find.text('昼夜自动'),
+          ),
+          findsOneWidget,
+        );
+
         expect(find.byKey(const Key('ev_avatar_menu_logout')), findsOneWidget);
         expect(find.text('退出登录'), findsOneWidget);
 
         await tester.tap(find.byKey(const Key('ev_avatar_menu_logout')));
         await tester.pumpAndSettle();
-        expect(dismissed, 1);
+        expect(dismissed, 2);
         expect(accounts.signOutCalls, 1);
         expect(signedOutCallback, 1);
       });

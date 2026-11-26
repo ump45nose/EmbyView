@@ -88,6 +88,7 @@ class EvLoginPageState extends State<EvLoginPage>
   final _usernameFocus = FocusNode(debugLabel: 'ev_login_username');
   final _passwordCtrl = TextEditingController();
   final _passwordFocus = FocusNode(debugLabel: 'ev_login_password');
+  bool _collapseInitialPasswordSelection = false;
 
   StreamSubscription<List<EvDiscoveredServer>>? _discoverySub;
   AnimationController? _scanPingCtrl;
@@ -95,6 +96,7 @@ class EvLoginPageState extends State<EvLoginPage>
   @override
   void initState() {
     super.initState();
+    _passwordFocus.addListener(_handlePasswordFocusChange);
     _initFromWidget();
   }
 
@@ -131,12 +133,14 @@ class EvLoginPageState extends State<EvLoginPage>
             _users.where((u) => u.hasPassword).firstOrNull ?? _users.first;
       }
       final initialPassword = widget.initialPassword ?? '';
+      _collapseInitialPasswordSelection = initialPassword.isNotEmpty;
       _passwordCtrl.value = TextEditingValue(
         text: initialPassword,
         selection: TextSelection.collapsed(offset: initialPassword.length),
       );
       _focusPasswordLater();
     } else {
+      _collapseInitialPasswordSelection = false;
       _passwordCtrl.clear();
     }
 
@@ -159,7 +163,8 @@ class EvLoginPageState extends State<EvLoginPage>
         oldWidget.initialSelectedUser != widget.initialSelectedUser ||
         oldWidget.initialCertChallenge != widget.initialCertChallenge ||
         oldWidget.initialFailure != widget.initialFailure ||
-        oldWidget.initialAddress != widget.initialAddress) {
+        oldWidget.initialAddress != widget.initialAddress ||
+        oldWidget.initialPassword != widget.initialPassword) {
       unawaited(_discoverySub?.cancel());
       _discoverySub = null;
       _initFromWidget();
@@ -192,9 +197,28 @@ class EvLoginPageState extends State<EvLoginPage>
     _addressFocus.dispose();
     _usernameCtrl.dispose();
     _usernameFocus.dispose();
+    _passwordFocus.removeListener(_handlePasswordFocusChange);
     _passwordCtrl.dispose();
     _passwordFocus.dispose();
     super.dispose();
+  }
+
+  void _collapsePasswordSelectionToEnd() {
+    if (!mounted || !_passwordFocus.hasFocus) return;
+    final len = _passwordCtrl.text.length;
+    if (_passwordCtrl.selection.baseOffset != len ||
+        _passwordCtrl.selection.extentOffset != len) {
+      _passwordCtrl.selection = TextSelection.collapsed(offset: len);
+    }
+  }
+
+  void _handlePasswordFocusChange() {
+    if (!_passwordFocus.hasFocus || !_collapseInitialPasswordSelection) return;
+    _collapseInitialPasswordSelection = false;
+    scheduleMicrotask(_collapsePasswordSelectionToEnd);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _collapsePasswordSelectionToEnd();
+    });
   }
 
   void _setStep(EvLoginStep next) {

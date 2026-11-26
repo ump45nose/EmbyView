@@ -98,16 +98,25 @@ class EvAvatarMenu extends StatelessWidget {
   const EvAvatarMenu({
     super.key,
     required this.accounts,
+    this.themeMode,
     this.onSelectProfile,
     this.onSwitchUsers,
+    this.onOpenLook,
     this.onManageZones,
     this.onOpenSettings,
     this.onSignOut,
     this.onDismiss,
   });
   final EmbyViewAccounts accounts;
+  final ThemeMode? themeMode;
   final ValueChanged<AccountProfile>? onSelectProfile;
-  final VoidCallback? onSwitchUsers, onManageZones, onOpenSettings, onSignOut, onDismiss;
+  final VoidCallback? onSwitchUsers, onOpenLook, onManageZones, onOpenSettings, onSignOut, onDismiss;
+
+  String _themeModeLabel(ThemeMode mode) => switch (mode) {
+    ThemeMode.cinema => '影院',
+    ThemeMode.paper => '纸面',
+    ThemeMode.automatic => '昼夜自动',
+  };
 
   Widget _divider(EvTheme theme, EvScale scale) => Padding(
     padding: EdgeInsets.symmetric(horizontal: scale.rem(0.5), vertical: scale.rem(0.375)),
@@ -117,7 +126,13 @@ class EvAvatarMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = EvTheme.of(context), scale = EvScale.of(context);
-    final signOutCallback = onSignOut ?? EvScope.maybeOf(context)?.shell.onSignedOutToUserPicker;
+    final scope = EvScope.maybeOf(context);
+    final signOutCallback = onSignOut ?? scope?.shell.onSignedOutToUserPicker;
+    final openLookCallback = onOpenLook ?? scope?.shell.onOpenLook;
+    final effectiveThemeMode =
+        themeMode ??
+        scope?.services.preferences.current.theme ??
+        (theme.isPaper ? ThemeMode.paper : ThemeMode.cinema);
     return StreamBuilder<AccountSnapshot>(
       stream: accounts.changes,
       initialData: accounts.snapshot,
@@ -218,6 +233,16 @@ class EvAvatarMenu extends StatelessWidget {
                   onTap: () {
                     onDismiss?.call();
                     onSwitchUsers?.call();
+                  },
+                ),
+                _EvMenuItem(
+                  key: const Key('ev_avatar_menu_look'),
+                  leading: EvIcon(EvIcons.palette, size: scale.rem(1.125), color: theme.ink),
+                  label: '外观',
+                  shortcut: _themeModeLabel(effectiveThemeMode),
+                  onTap: () {
+                    onDismiss?.call();
+                    openLookCallback?.call();
                   },
                 ),
                 if (onManageZones != null)

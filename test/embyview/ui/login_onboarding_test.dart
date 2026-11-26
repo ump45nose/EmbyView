@@ -474,6 +474,69 @@ void main() {
         expect(steps.last, EvLoginStep.server);
       },
     );
+
+    testWidgets(
+      'login:pass collapses prefilled password selection to end on initial focus without blocking later select-all',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        const prefilled = 'emby-demo';
+        await tester.pumpWidget(
+          _wrap(
+            ThemeMode.cinema,
+            EvLoginPage(
+              initialStep: EvLoginStep.pass,
+              initialServer: EvLoginDemoData.server,
+              initialUsers: EvLoginDemoData.users,
+              initialSelectedUser: EvLoginDemoData.users.first,
+              initialPassword: prefilled,
+            ),
+          ),
+        );
+        // Pump post-frame focus request + focus listener microtask + collapse post-frame callback.
+        await tester.pump();
+        await tester.pump();
+
+        final editable = tester.widget<EditableText>(
+          find.byKey(const Key('ev_login_password_input')),
+        );
+        expect(editable.focusNode.hasFocus, isTrue);
+        expect(
+          editable.controller.selection,
+          const TextSelection.collapsed(offset: prefilled.length),
+        );
+
+        // Subsequent manual select-all is not interfered with.
+        editable.controller.selection = const TextSelection(
+          baseOffset: 0,
+          extentOffset: prefilled.length,
+        );
+        await tester.pump();
+        expect(
+          editable.controller.selection,
+          const TextSelection(baseOffset: 0, extentOffset: prefilled.length),
+        );
+
+        // Re-focusing later (after blur) does not override manual selection behavior.
+        editable.focusNode.unfocus();
+        await tester.pump();
+        editable.focusNode.requestFocus();
+        await tester.pump();
+        editable.controller.selection = const TextSelection(
+          baseOffset: 0,
+          extentOffset: prefilled.length,
+        );
+        await tester.pump();
+        expect(
+          editable.controller.selection,
+          const TextSelection(baseOffset: 0, extentOffset: prefilled.length),
+        );
+      },
+    );
   });
 
   group('Stage 7.2 EvOnboardingCard & MachinePreferences persistence', () {

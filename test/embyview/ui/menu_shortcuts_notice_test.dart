@@ -851,10 +851,12 @@ void main() {
         expect(env.accounts.retryConnectionCalls, 2);
         env.data.failHome = false;
 
-        // Tap 服务器设置 -> opens Settings:account
+        // Tap 服务器设置 -> dismisses capsule and opens Settings:account
         await tester.tap(find.byKey(const Key('ev_notice_server_settings')));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 500));
+        expect(find.byKey(const Key('ev_notice_offline')), findsNothing);
+        expect(env.controller.notice, isNull);
         expect(find.text('用户与服务器'), findsWidgets);
 
         // 2. Switched event via connectionNotices stream
@@ -1039,6 +1041,102 @@ void main() {
       expect(find.byKey(const Key('ev_login_server_card')), findsOneWidget);
 
       expect(EvMenuChannel.instance.dispatchAction(EvMenuAction.back), isFalse);
+    });
+
+    testWidgets('standalone EvShell dismisses offline notice capsule when tapping server settings', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final prefs = _FakePreferences();
+      final accounts = _FakeAccounts();
+      var serverSettingsOpened = 0;
+      final controller = EvShellController(
+        zones: _kZones,
+        onOpenServerSettings: () => serverSettingsOpened++,
+      );
+      addTearDown(() async {
+        controller.dispose();
+        await prefs.close();
+        await accounts.close();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: EvShell(
+            services: EmbyViewServices(
+              preferences: prefs,
+              accounts: accounts,
+              sessionId: 'sess-standalone',
+              data: _FakeData(),
+              playback: _FakePlayback(),
+              immersion: _FakeImmersion(),
+            ),
+            controller: controller,
+            configureWindow: false,
+            enableStageMotion: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      controller.showOfflineNotice(serverName: '家里的 Emby', autoTick: false);
+      await tester.pump();
+      expect(find.byKey(const Key('ev_notice_offline')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('ev_notice_server_settings')));
+      await tester.pump();
+
+      expect(serverSettingsOpened, 1);
+      expect(controller.notice, isNull);
+      expect(find.byKey(const Key('ev_notice_offline')), findsNothing);
+    });
+
+    testWidgets('avatar menu look row shows theme mode label and opens Settings:look in Stage 4 host', (tester) async {
+      final env = await _pumpHost(tester, theme: ThemeMode.automatic);
+
+      await tester.tap(find.byKey(const Key('ev_topbar_avatar')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('ev_avatar_menu_look')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('ev_avatar_menu_look')),
+          matching: find.text('外观'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('ev_avatar_menu_look')),
+          matching: find.text('昼夜自动'),
+        ),
+        findsOneWidget,
+      );
+
+      final usersY = tester.getTopLeft(find.byKey(const Key('ev_avatar_menu_users'))).dy;
+      final lookY = tester.getTopLeft(find.byKey(const Key('ev_avatar_menu_look'))).dy;
+      final zonesY = tester.getTopLeft(find.byKey(const Key('ev_avatar_menu_zones'))).dy;
+      expect(usersY, lessThan(lookY));
+      expect(lookY, lessThan(zonesY));
+
+      await tester.tap(find.byKey(const Key('ev_avatar_menu_look')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('ev_avatar_menu')), findsNothing);
+      expect(find.byType(EvLookSettingsPane), findsOneWidget);
+
+      // Update theme to paper and verify Stage 4 frame avatar menu reflects it
+      await env.prefs.update(env.prefs.current.copyWith(theme: ThemeMode.paper));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('ev_topbar_avatar')));
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('ev_avatar_menu_look')),
+          matching: find.text('纸面'),
+        ),
+        findsOneWidget,
+      );
     });
   });
 }

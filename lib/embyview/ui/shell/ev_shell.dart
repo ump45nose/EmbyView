@@ -458,7 +458,10 @@ class _EvShellState extends State<EvShell> {
                                 node: _menuScope,
                                 child: EvAvatarMenu(
                                   accounts: widget.services.accounts,
-                                  onSwitchUsers: _shell.onOpenUsers, onManageZones: _shell.onManageZones,
+                                  themeMode: _prefs.theme,
+                                  onSwitchUsers: _shell.onOpenUsers,
+                                  onOpenLook: _shell.onOpenLook,
+                                  onManageZones: _shell.onManageZones,
                                   onOpenSettings: _shell.onOpenSettings,
                                   onSignOut: _shell.onSignedOutToUserPicker,
                                   onDismiss: _closeMenu,
@@ -477,8 +480,10 @@ class _EvShellState extends State<EvShell> {
                                     unawaited(widget.services.accounts.retryConnection());
                                   }
                                 },
-                                onOpenServerSettings: () =>
-                                    (_shell.onOpenServerSettings ?? _shell.onOpenSettings)?.call(),
+                                onOpenServerSettings: () {
+                                  _shell.dismissNotice();
+                                  (_shell.onOpenServerSettings ?? _shell.onOpenSettings)?.call();
+                                },
                                 onDismiss: _shell.dismissNotice,
                               ),
                             ),

@@ -370,6 +370,7 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     shell.onOpenAbout = () => _openSettings(section: EvSettingsSection.about);
     shell.onOpenServerSettings = () => _openSettings(section: EvSettingsSection.account);
     shell.onOpenUsers = _openUsers;
+    shell.onOpenLook = () => _openSettings(section: EvSettingsSection.look);
     shell.onManageZones = () => _openSettings(section: EvSettingsSection.zones);
     shell.onSignedOutToUserPicker = _handleSignedOutToUserPicker;
     shell.onSignOut = _handleMenuSignOut;
@@ -862,7 +863,10 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
                     child: EvNoticeCapsule(
                       notice: activeNotice,
                       onRetry: _shell.triggerConnectionRetry,
-                      onOpenServerSettings: () => _openSettings(section: EvSettingsSection.account),
+                      onOpenServerSettings: () {
+                        _shell.dismissNotice();
+                        _openSettings(section: EvSettingsSection.account);
+                      },
                       onDismiss: _shell.dismissNotice,
                     ),
                   ),
@@ -928,7 +932,10 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
                   Positioned(right: scale.rem(1.5), top: scale.rem(4.0), child: FocusScope(
                     node: _s4MenuScope,
                     child: EvAvatarMenu(
-                      accounts: widget.services.accounts, onSwitchUsers: _openUsers,
+                      accounts: widget.services.accounts,
+                      themeMode: _prefs.theme,
+                      onSwitchUsers: _openUsers,
+                      onOpenLook: () => _openSettings(section: EvSettingsSection.look),
                       onManageZones: () => _openSettings(section: EvSettingsSection.zones),
                       onOpenSettings: _openSettings,
                       onSignOut: _shell.onSignedOutToUserPicker,

@@ -552,10 +552,12 @@ void main() {
           ),
         );
         var usersOpened = 0;
+        var lookOpened = 0;
         var settingsOpened = 0;
         final shellController = EvShellController(
           zones: _kDefaultZones,
           onOpenUsers: () => usersOpened++,
+          onOpenLook: () => lookOpened++,
           onOpenSettings: () => settingsOpened++,
         );
         final scrollController = ScrollController();
@@ -663,6 +665,21 @@ void main() {
         await tester.tap(find.byKey(const Key('ev_avatar_menu_users')));
         await tester.pumpAndSettle();
         expect(usersOpened, 1);
+
+        // Re-open menu and trigger '外观'.
+        await tester.tap(find.byKey(const Key('ev_topbar_avatar')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_avatar_menu_look')), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('ev_avatar_menu_look')),
+            matching: find.text('影院'),
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.byKey(const Key('ev_avatar_menu_look')));
+        await tester.pumpAndSettle();
+        expect(lookOpened, 1);
 
         // Re-open menu and trigger '设置'.
         await tester.tap(find.byKey(const Key('ev_topbar_avatar')));
