@@ -11,6 +11,7 @@ import '../../util/fullscreen_helper.dart';
 import '../contracts/common.dart';
 import '../contracts/media.dart';
 import '../contracts/playback.dart';
+import '../data/media_mapper.dart';
 import 'native_playback.dart';
 import 'playback_diagnostics.dart';
 import 'playback_subtitle_input.dart';
@@ -54,6 +55,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
       onResolved: _resolved,
     );
   }
+  late final _mapper = MediaMapper(server: _server, user: _user, token: client.accessToken ?? '');
   final PlaybackManager manager;
   final MediaServerClient client;
   final EmbyViewNativePlayback native;
@@ -165,8 +167,10 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
     dynamic item,
     StreamResolutionResult result,
     Duration infoTime,
-    ResolvedPlaybackAddress? address,
-  ) {
+    ResolvedPlaybackAddress? address, {
+    int? subtitleSwitchFrom,
+    bool disablesSubtitles = false,
+  }) {
     final session = _active;
     if (!_valid || session == null || session._closing || playbackItemId(item) != session._target.itemId) {
       return;
@@ -181,7 +185,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
       sessionCacheByteBudget: sessionCacheByteBudget,
       anime4k: session._animeRequested,
     );
-    session._resolved(item, result, generation, infoTime, address);
+    session._resolved(item, result, generation, infoTime, address, subtitleSwitchFrom, disablesSubtitles);
   }
 
   /// Called before replacing an authenticated client. This waits for the old
@@ -231,13 +235,15 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   String? _liveSubtitleId, _previousSubtitleId;
   bool _wantsLiveSubtitle = false, _liveRendererReady = false;
   int _subtitleChoice = 0;
-  int? _subtitleSwitchFrom;
-  bool _switchDisables = false, _reopenedWithoutSubtitles = false;
+  int _audioChoice = 0, _transportRevision = 0;
+  int? _previousTrackGeneration;
+  bool _reopenedWithoutSubtitles = false;
   int _nativeEnableAttempts = 0;
   ({String? selected, String? previous, bool live, int nativeEnableAttempts})? _beforeSubtitleChoice;
   int _subtitleMediaEpoch = 0;
   bool _reloadExternal = false;
   Future<void> _subtitleOperations = Future.value();
+  Duration? _reopenPosition;
   Duration? _firstFrame;
   Duration? _creditsStart;
   Duration? _navigationTime;
@@ -272,7 +278,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       final raw = await _owner.client.itemsApi.getItem(_target.itemId);
       if (!_current) return;
       _raw = raw;
-      _item = _card(raw);
+      _item = _owner._mapper.card(raw);
       final series = _target.seriesId ?? raw['SeriesId'] as String?;
       var queue = <dynamic>[raw];
       var index = 0;
@@ -393,7 +399,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         episodeNumber: (raw['IndexNumber'] as num?)?.toInt(),
       );
       _raw = raw;
-      _item = _card(raw);
+      _item = _owner._mapper.card(raw);
       _quality = null;
       _chapters = const [];
       _retryUsed = false;
@@ -404,6 +410,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       _creditsDismissed = false;
       _creditsStart = null;
       _firstFrame = null;
+      _reopenPosition = null;
       _navigationTime = Duration.zero;
       _engineOpen = null;
       _native = const NativePlaybackSnapshot();
@@ -423,7 +430,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         ..start();
     }
     final next = playbackItemData(_manager.queueService.peekNext);
-    _next = next.isEmpty ? null : _card(next);
+    _next = next.isEmpty ? null : _owner._mapper.card(next);
     _emit();
   }
 
@@ -433,6 +440,8 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     int generation,
     Duration infoTime,
     ResolvedPlaybackAddress? address,
+    int? subtitleSwitchFrom,
+    bool disablesSubtitles,
   ) {
     _raw = playbackItemData(item);
     _creditsStart = null;
@@ -441,11 +450,12 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     _cacheHit = address?.cacheHit;
     _openingAt = _intent.elapsed;
     _beforeSubtitleChoice = null;
-    final reopensForSubtitle = _subtitleSwitchFrom != null &&
-        _subtitleSource?.generation == _subtitleSwitchFrom &&
+    _previousTrackGeneration = null;
+    final reopensForSubtitle = subtitleSwitchFrom != null &&
+        _subtitleSource?.generation == subtitleSwitchFrom &&
         _subtitleSource?.mediaSourceId == result.mediaSourceId &&
         _subtitleSource?.target.itemId == _target.itemId;
-    _reopenedWithoutSubtitles = reopensForSubtitle && _switchDisables;
+    _reopenedWithoutSubtitles = reopensForSubtitle && disablesSubtitles;
     _clearLiveSubtitle();
     _native = NativePlaybackSnapshot(sourceGeneration: generation);
     _acceptNativeEvents = true;
@@ -471,7 +481,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       headers: Map.unmodifiable(result.requestHeaders),
       userAgent: _owner.userAgent,
       itemFilePath: playbackItemPath(item),
-      subtitleSwitchFrom: reopensForSubtitle ? _subtitleSwitchFrom : null,
+      subtitleSwitchFrom: reopensForSubtitle ? subtitleSwitchFrom : null,
       mediaSourceFilePath: source?['Path'] as String?,
     );
     _snapshot = PlaybackSnapshot(
@@ -555,6 +565,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     if (!_current) return false;
     final key = _owner._resolver.keyFor(context.resolution);
     if (key == null || !isExpiringPlaybackAddress(context.error)) return null;
+    if (context.position > Duration.zero) _reopenPosition = context.position;
     _owner._cache.invalidate(key);
     if (_retryUsed) {
       _record('failed', failure: 'addressRetryExhausted');
@@ -600,7 +611,9 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         itemPath: _raw['Path'] as String?,
       );
     }
-    final position = state.position;
+    // Aether can emit an empty clock while its old item is being stopped,
+    // including after a failed replacement. Keep the last resumable point.
+    final position = state.position == Duration.zero ? _reopenPosition ?? state.position : state.position;
     final duration = state.duration > Duration.zero ? state.duration : _item?.duration;
     final credits =
         _creditsStart ??
@@ -715,7 +728,8 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   @override
   Future<void> seek(Duration position) async {
     if (!_current) return;
-    _subtitleSwitchFrom = null;
+    ++_transportRevision;
+    _reopenPosition = null;
     final end = _snapshot.duration;
     final clamped = position < Duration.zero
         ? Duration.zero
@@ -746,9 +760,61 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   }
 
   @override
-  Future<void> selectAudio(String trackId) {
-    _subtitleSwitchFrom = null;
-    return _control(() => _manager.changeAudioTrack(_trackIndex(trackId)));
+  Future<void> selectAudio(String trackId) async {
+    final index = _trackIndex(trackId);
+    final choice = ++_audioChoice, generation = _snapshot.generation;
+    if (!_current || index == _manager.audioStreamIndex && _manager.currentResolution != null) return;
+    try {
+      await _control(() => _manager.changeAudioTrack(
+        index, prepareReopen: _prepareTrackReopen(generation, () => choice == _audioChoice, 'audio'),
+      ));
+    } on EmbyViewFailure catch (failure) {
+      if (failure.code != 'trackSwitchCancelled') rethrow;
+    }
+  }
+
+  PrepareTrackReopen _prepareTrackReopen(int generation, bool Function() stillSelected, String kind) {
+    final transport = _transportRevision;
+    bool current() => _current && !_failed && !_ended && stillSelected() &&
+        _transportRevision == transport && _snapshot.generation == generation;
+    return (request) async {
+      void checkCurrent() {
+        if (!current()) throw const EmbyViewFailure('轨道选择已更新。', code: 'trackSwitchCancelled');
+      }
+      checkCurrent();
+      late StreamResolutionResult Function() activate;
+      try {
+        await _owner._resolver.resolve(
+          _manager.queueService.currentItem,
+          deviceProfile: request.deviceProfile,
+          maxStreamingBitrate: request.maxStreamingBitrate,
+          audioStreamIndex: request.audioStreamIndex,
+          subtitleStreamIndex: request.subtitleStreamIndex,
+          startTimeTicks: request.position.inMicroseconds * 10,
+          mediaSourceId: request.mediaSourceId,
+          enableDirectPlay: request.enableDirectPlay,
+          enableDirectStream: request.enableDirectStream,
+          enableTranscoding: request.enableTranscoding,
+          freshAddress: true,
+          onPrepared: (item, result, info, address) {
+            activate = () {
+              _owner._resolved(item, result, info, address,
+                subtitleSwitchFrom: kind == 'audio' ? null : generation, disablesSubtitles: kind == 'off');
+              if (result.mediaSourceId == request.mediaSourceId) _previousTrackGeneration = generation;
+              _record('trackReopen.$kind');
+              return result;
+            };
+          },
+        );
+      } catch (_) {
+        checkCurrent();
+        _record('trackReopenRejected.$kind', failure: 'sourceUnavailable');
+        throw const EmbyViewFailure('暂时无法取得播放源，已保留原轨道。', retryable: true, code: 'trackSourceUnavailable');
+      }
+      checkCurrent();
+      _reopenPosition = _manager.currentPlaybackPosition;
+      return activate;
+    };
   }
 
   @override
@@ -805,7 +871,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
 
   @override
   Future<void> selectSubtitle(String? trackId) async {
-    final generation = _snapshot.generation;
+    final generation = _snapshot.generation, mediaEpoch = _subtitleMediaEpoch;
     if (trackId != null && trackId != _liveSubtitleId && !trackId.startsWith('$generation:external')) {
       _trackIndex(trackId); // Reject a retired row before changing the current selection.
     }
@@ -824,10 +890,23 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     return _subtitleOperation(() async {
       bool current() => choice == _subtitleChoice && (!live || trackId == _liveSubtitleId);
       try {
+        if (choice != _subtitleChoice) return;
+        var targetGeneration = generation;
+        var rendererId = live ? null : trackId;
+        // A pick made after teardown began still belongs to this file. Only
+        // carry it through this exact track replacement, never through a
+        // navigation, seek recovery or a different media version.
+        if (_snapshot.generation != generation && _previousTrackGeneration == generation &&
+            _subtitleMediaEpoch == mediaEpoch) {
+          targetGeneration = _snapshot.generation;
+          if (rendererId != null) rendererId = '$targetGeneration:${rendererId.split(':').last}';
+          if (live && _liveSubtitleId == null) _liveSubtitleId = trackId;
+          _wantsLiveSubtitle = live;
+        }
         if (!current()) return;
-        await _selectNativeSubtitle(live ? null : trackId, generation, current);
+        await _selectNativeSubtitle(rendererId, targetGeneration, current);
         if (current()) _liveRendererReady = live;
-      } catch (_) {
+      } catch (error) {
         if (current() && _current && generation == _snapshot.generation) {
           final restoreLive = before.live && before.selected == _liveSubtitleId;
           final restore = before.live ? before.previous : before.selected;
@@ -837,11 +916,14 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
           // renderer rejected the command. Reapply the last committed choice.
           // If only a disable was attempted, the native renderer was already
           // confirmed off for this live track and could never have turned on.
-          if (!restoreLive || before.nativeEnableAttempts != _nativeEnableAttempts) {
+          final sourceUntouched = error is EmbyViewFailure &&
+              (error.code == 'trackSourceUnavailable' || error.code == 'trackSwitchCancelled');
+          if (!sourceUntouched && (!restoreLive || before.nativeEnableAttempts != _nativeEnableAttempts)) {
             await _selectNativeSubtitle(restoreLive ? null : restore, generation, current, force: true);
           }
           if (current()) _liveRendererReady = restoreLive;
         }
+        if (error is EmbyViewFailure && error.code == 'trackSwitchCancelled') return;
         rethrow;
       } finally {
         if (choice == _subtitleChoice) {
@@ -858,13 +940,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         _selectedExternal == null && _pendingExternal == null;
     _reopenedWithoutSubtitles = false;
     if (trackId == null && alreadyOff) return;
-    _subtitleSwitchFrom = generation;
-    _switchDisables = trackId == null;
-    try {
-      await _applyNativeSubtitle(trackId, generation, current, force: force);
-    } finally {
-      _subtitleSwitchFrom = null;
-    }
+    await _applyNativeSubtitle(trackId, generation, current, force: force);
   }
 
   Future<void> _applyNativeSubtitle(String? trackId, int generation, bool Function() current, {required bool force}) async {
@@ -889,9 +965,12 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       // An already active local sidecar can be replaced directly: turning
       // it off first would lose the current subtitle when loading fails.
       if (_selectedExternal == null) {
-        await _manager.disableSubtitles();
-        _checkSubtitleGeneration(generation);
+        await _manager.disableSubtitles(prepareReopen: _prepareTrackReopen(generation, current, 'off'));
         if (!current()) return;
+        if (_subtitleSource?.subtitleSwitchFrom == generation && _subtitleMediaEpoch == mediaEpoch) {
+          generation = _snapshot.generation;
+        }
+        _checkSubtitleGeneration(generation);
       }
       try {
         await _loadExternal(subtitle, generation, select: true);
@@ -911,10 +990,10 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       return;
     }
     if (streamIndex == null) {
-      await _manager.disableSubtitles();
+      await _manager.disableSubtitles(prepareReopen: _prepareTrackReopen(generation, current, 'off'));
     } else {
       ++_nativeEnableAttempts;
-      await _manager.changeSubtitleTrack(streamIndex);
+      await _manager.changeSubtitleTrack(streamIndex, prepareReopen: _prepareTrackReopen(generation, current, 'subtitle'));
     }
     // The manager may rebuild the same media source to apply the choice.
     // Only commit it after success; never clear a successor item's state.
@@ -1126,23 +1205,14 @@ class _SessionSubtitle {
   final PlaybackTrackSource source;
 }
 
-MediaCard _card(Map<String, dynamic> raw) => MediaCard(
-  id: playbackItemId(raw),
-  kind: raw['Type'] == 'Episode' ? MediaKind.episode : MediaKind.movie,
-  title: raw['Name'] as String? ?? '',
-  year: (raw['ProductionYear'] as num?)?.toInt(),
-  duration: raw['RunTimeTicks'] is num ? Duration(microseconds: (raw['RunTimeTicks'] as num).toInt() ~/ 10) : null,
-  seriesId: raw['SeriesId'] as String?,
-  seasonId: raw['SeasonId'] as String?,
-  episodeNumber: (raw['IndexNumber'] as num?)?.toInt(),
-);
-
 MediaQuality _sourceQuality(StreamResolutionResult result, {int? audioIndex, String? server, String? itemPath}) {
   final video = result.mediaStreams.where((s) => s['Type'] == 'Video').firstOrNull;
   final width = (video?['Width'] as num?)?.toInt();
-  final audio = result.mediaStreams
-      .where((s) => s['Type'] == 'Audio' && s['Index'] == (audioIndex ?? result.selectedAudioStreamIndex))
-      .firstOrNull;
+  final audios = result.mediaStreams.where((s) => s['Type'] == 'Audio');
+  final index = audioIndex ?? result.selectedAudioStreamIndex;
+  final audio = index == null
+      ? audios.where((s) => s['IsDefault'] == true).firstOrNull ?? audios.singleOrNull
+      : audios.where((s) => s['Index'] == index).firstOrNull;
   final host = Uri.tryParse(result.streamUrl)?.host ?? '';
   return MediaQuality(
     resolution: width == null
@@ -1155,8 +1225,8 @@ MediaQuality _sourceQuality(StreamResolutionResult result, {int? audioIndex, Str
         ? '720p'
         : null,
     videoRange: result.videoRangeType,
-    audioLabel: audio?['DisplayTitle'] as String?,
-    origin: host == '115.com' || host.endsWith('.115.com') || host.endsWith('.115cdn.net')
+    audioLabel: embyAudioTechnicalLabel(audio),
+    origin: const ['115.com', '115cdn.net', '115cdn.com'].any((domain) => host == domain || host.endsWith('.$domain'))
         ? MediaOrigin.direct115
         : server != null &&
               itemPath != null &&

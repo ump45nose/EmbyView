@@ -9,12 +9,14 @@ import '../contracts/playback.dart';
 class NativePlaybackSnapshot {
   const NativePlaybackSnapshot({
     this.sourceGeneration = 0,
+    this.engineSourceId,
     this.firstFrame = false,
     this.anime4k = const Anime4kSnapshot(),
     this.pictureInPictureSupported = false,
     this.pictureInPicture = false,
   });
   final int sourceGeneration;
+  final String? engineSourceId;
   final bool firstFrame;
   final Anime4kSnapshot anime4k;
   final bool pictureInPictureSupported;
@@ -33,6 +35,7 @@ class NativePlaybackSnapshot {
 
     return NativePlaybackSnapshot(
       sourceGeneration: (wire['sourceGeneration'] as num?)?.toInt() ?? 0,
+      engineSourceId: wire['engineSourceId'] as String?,
       firstFrame: wire['firstFrame'] == true,
       pictureInPictureSupported: wire['pictureInPictureSupported'] == true,
       pictureInPicture: wire['pictureInPicture'] == true,

@@ -422,6 +422,16 @@ final class ExternalASSRenderingTests: XCTestCase {
         return count
     }
 
+    func testDirect115UsesOnlyThePlaybackReader() {
+        for url in ["https://cdn.115.com/video", "https://file.115cdn.net/video"] {
+            XCTAssertEqual(AetherPlayerWrapper.sourceRequestLimit(for: URL(string: url)!), 1)
+        }
+        for url in ["file:///library/film.mkv", "https://nas.test/emby/Videos/1/stream",
+                    "https://unrelated115.com/video"] {
+            XCTAssertNil(AetherPlayerWrapper.sourceRequestLimit(for: URL(string: url)!))
+        }
+    }
+
     func testEmbeddedASSStillUsesItsTrackHeader() async throws {
         _ = NSApplication.shared
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 540),
@@ -433,11 +443,19 @@ final class ExternalASSRenderingTests: XCTestCase {
         defer { wrapper.shutdown(); window.close() }
         let fixture = try XCTUnwrap(Bundle(for: Self.self)
             .url(forResource: "embedded-ass", withExtension: "mkv"))
+        wrapper.configureSource(AetherPlayerWrapper.SourceConfiguration(sourceGeneration: 21))
         await wrapper.play(url: fixture)
         try await waitUntil { wrapper.subtitleTracks.count == 1 && wrapper.isPlaying }
+        let engine = try XCTUnwrap(AetherPlayerWrapper.sharedEngine())
+        XCTAssertEqual(engine.maximumSubtitleAdvanceSeconds, 0)
+        let originalSource = engine.scrubPreviewSourceGeneration
         wrapper.setSubtitleTrack(1)
         try await waitUntil { self.styledImage(wrapper) != nil }
-        let engine = try XCTUnwrap(AetherPlayerWrapper.sharedEngine())
+        wrapper.disableSubtitles()
+        try await waitUntil { engine.activeSubtitleTrackIndex == nil }
+        wrapper.setSubtitleTrack(1)
+        try await waitUntil { self.styledImage(wrapper) != nil }
+        XCTAssertEqual(engine.scrubPreviewSourceGeneration, originalSource)
         XCTAssertNotNil(engine.subtitleTracks.first?.assHeader)
         XCTAssertNil(engine.sidecarASSHeader)
         XCTAssertGreaterThan(try colorPixels(try XCTUnwrap(styledImage(wrapper)), red: true), 100)

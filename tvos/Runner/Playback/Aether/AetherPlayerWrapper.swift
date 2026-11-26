@@ -70,12 +70,19 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     var onAudioInputBoundary: ((String, Bool) -> Void)?
     private(set) var sourceGeneration = 0
     private var firstFrameReported = false
+    private var previousSubtitleAdvance: Double?
     private var nativeLoadStarted = false
     private var anime4kFailure: String?
     private var anime4kReloading = false
     #if os(macOS)
         lazy var pictureInPictureController = MacosAetherPictureInPictureController(wrapper: self)
     #endif
+
+    static func sourceRequestLimit(for url: URL) -> Int? {
+        guard let host = url.host?.lowercased() else { return nil }
+        return host == "115.com" || host.hasSuffix(".115.com")
+            || host == "115cdn.net" || host.hasSuffix(".115cdn.net") ? 1 : nil
+    }
 
     func nativePlaybackPayload(event: String = "nativePlayback") -> [String: Any] {
         let engine = Self.sharedEngine()
@@ -106,6 +113,9 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             "comparisonState": "unavailable", "pictureInPictureSupported": false,
             "pictureInPicture": false,
         ]
+        // Aether replaces this identifier on every pipeline teardown, including
+        // an engine-internal reload which does not make a new Dart generation.
+        payload["engineSourceId"] = engine?.scrubPreviewSourceGeneration.uuidString
         if let reason { payload["anime4kReason"] = reason }
         if let status {
             payload["originalWidth"] = Int(status.sourceSize.width)
@@ -1179,6 +1189,7 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     func configureSource(_ configuration: SourceConfiguration) {
         sourceConfiguration = configuration
         #if os(macOS)
+        if configuration.sourceGeneration == 0 { restoreSubtitleAdvance() }
         sourceGeneration = configuration.sourceGeneration
         firstFrameReported = false
         nativeLoadStarted = false
@@ -1318,6 +1329,7 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             let preserveASS = false
         #endif
         #if os(macOS)
+        let requestLimit = sourceGeneration > 0 ? Self.sourceRequestLimit(for: url) : nil
         let options = LoadOptions(
             httpHeaders: sourceConfiguration.headers,
             dolbyVisionHandling: sourceConfiguration.dolbyVisionBaseLayerOnly
@@ -1333,6 +1345,8 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             liveJoinProfile: .fastZap,
             nativeRemoteHLS: isLiveSession && isRemotePlaylist,
             preserveASSMarkup: preserveASS,
+            generatesBackgroundScrubPreviews: requestLimit == nil,
+            maxConcurrentSourceRequests: requestLimit,
             probesize: isLiveSession ? Self.liveProbeBytes : nil,
             maxAnalyzeDuration: isLiveSession ? Self.liveProbeMicroseconds : nil,
             externalSubtitles: sourceConfiguration.externalSubtitles,
@@ -1532,6 +1546,9 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
         #endif
         resetStallTracking()
         state = .stopped
+        #if os(macOS)
+        restoreSubtitleAdvance()
+        #endif
         subtitleOverlay.clear()
         resetAssState()
     }
@@ -1559,6 +1576,9 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             }
         #else
             engine.stop(resetDisplayCriteria: true)
+        #endif
+        #if os(macOS)
+        restoreSubtitleAdvance()
         #endif
         cancellables.removeAll()
         externalPlaybackSubscription = nil
@@ -1936,6 +1956,9 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
 
     func disableSubtitles() {
         primaryReloadSelection.remember(.off)
+        #if os(macOS)
+        if sourceGeneration > 0 { hostLog("subtitle off generation=\(sourceGeneration)") }
+        #endif
         subtitleOverlay.secondaryUsesTopFallback = false
         endNativePrimaryBridge(restoreNative: false)
         nativePrimaryBridgeFailure = nil
@@ -2352,9 +2375,26 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
         secondarySubtitleOverlay.isHidden = false
     }
 
+    #if os(macOS)
+    private func restoreSubtitleAdvance() {
+        if let previousSubtitleAdvance { Self._sharedEngine?.maximumSubtitleAdvanceSeconds = previousSubtitleAdvance }
+        previousSubtitleAdvance = nil
+    }
+    #endif
+
     func setSecondarySubtitleDelay(_ seconds: Double) {
         secondaryDelayAdjustment = min(max(seconds, -5), 5)
         secondarySubtitleOverlay.delaySeconds = subtitleOverlay.delaySeconds + secondaryDelayAdjustment
+        #if os(macOS)
+        // The SDK assumes that a host may advance subtitles by 60 seconds.
+        // Our overlay knows the actual offsets. At zero advance, embedded
+        // text is already in the producer packet store and needs no reader.
+        if sourceGeneration > 0, let engine = Self._sharedEngine {
+            if previousSubtitleAdvance == nil { previousSubtitleAdvance = engine.maximumSubtitleAdvanceSeconds }
+            engine.maximumSubtitleAdvanceSeconds =
+                max(0, -subtitleOverlay.delaySeconds, -secondarySubtitleOverlay.delaySeconds)
+        }
+        #endif
         secondarySubtitleOverlay.update(currentTime: Self._sharedEngine?.sourceTime ?? 0)
     }
 

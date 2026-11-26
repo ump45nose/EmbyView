@@ -45,6 +45,8 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
     bool enableDirectPlay = true,
     bool enableDirectStream = true,
     bool enableTranscoding = true,
+    bool freshAddress = false,
+    ResolvedSourceCallback? onPrepared,
   }) async {
     final watch = Stopwatch()..start();
     final result = await delegate.resolve(
@@ -78,7 +80,8 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
         mediaSource: result.mediaSourceId,
         userAgent: userAgent,
       );
-      if (prefetchEnabled) {
+      if (freshAddress) cache.invalidate(key);
+      if (prefetchEnabled || freshAddress) {
         address = await cache.resolve(key, source, headers: result.requestHeaders);
       }
     }
@@ -116,7 +119,7 @@ class EmbyViewStreamResolver extends MediaStreamResolver {
       if (_keys.length > 32) _keys.remove(_keys.keys.first);
       _keys[resolved] = key;
     }
-    onResolved?.call(mediaItem, resolved, infoTime, address);
+    (onPrepared ?? onResolved)?.call(mediaItem, resolved, infoTime, address);
     return resolved;
   }
 }

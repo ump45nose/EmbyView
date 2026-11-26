@@ -7,6 +7,7 @@ import 'package:playback_core/playback_core.dart';
 import 'package:server_core/server_core.dart';
 import 'package:moonfin/playback/aether_backend.dart';
 import 'package:moonfin/embyview/contracts/media.dart';
+import 'package:moonfin/embyview/contracts/common.dart';
 import 'package:moonfin/embyview/contracts/playback.dart';
 import 'package:moonfin/embyview/contracts/preferences.dart';
 import 'package:moonfin/embyview/contracts/subtitles.dart';
@@ -29,6 +30,7 @@ class _Backend extends PlayerBackend implements AetherBackend {
   int subtitleDisables = 0;
   Completer<void>? subtitleDisableGate, subtitleSelectGate;
   int asyncFailureOpens = 0;
+  Completer<void>? stopping, releaseStop;
   Duration at = Duration.zero;
   @override
   bool get nativelyHandlesStartPosition => true;
@@ -92,6 +94,8 @@ class _Backend extends PlayerBackend implements AetherBackend {
 
   @override
   Future<void> stop() async {
+    if (stopping?.isCompleted == false) stopping!.complete();
+    await releaseStop?.future;
     playing = false;
   }
 
@@ -186,6 +190,7 @@ class _PlaybackApi extends Fake implements PlaybackApi {
   int? compensationStopNumber;
   String? Function()? currentUser;
   final stopUsers = <String?>[];
+  Map<String, dynamic> audio = {'Type': 'Audio', 'Index': 1, 'Language': 'jpn'};
   List<Map<String, dynamic>> subtitles = [];
   @override
   Future<Map<String, dynamic>> getPlaybackInfo(
@@ -205,7 +210,7 @@ class _PlaybackApi extends Fake implements PlaybackApi {
         'SupportsDirectPlay': true,
         'MediaStreams': [
           {'Type': 'Video', 'Index': 0, 'Width': 1920},
-          {'Type': 'Audio', 'Index': 1, 'Language': 'jpn'},
+          audio,
           ...subtitles,
         ],
       },
@@ -464,6 +469,152 @@ void main() {
       }
     });
   }
+  for (final track in ['subtitle', 'audio']) {
+    test('a required $track reopen renews the redirect before stopping and preserves playback intent at the playhead', () async {
+      final backend = _Backend();
+      final manager = PlaybackManager()..setBackend(backend);
+      final native = _Native(backend);
+      final client = _Client();
+      client.playbackApi.subtitles.addAll([
+        {'Type': 'Subtitle', 'Index': 2, 'Codec': 'subrip', 'Language': 'zh'},
+        {'Type': 'Audio', 'Index': 3, 'Codec': 'aac', 'Language': 'eng'},
+        {'Type': 'Subtitle', 'Index': 4, 'Codec': 'srt', 'Language': 'eng', 'IsExternal': true,
+         'DeliveryMethod': 'External', 'DeliveryUrl': '/Videos/movie/source/Subtitles/4/Stream.srt'},
+      ]);
+      int redirects = 0;
+      final refresh = Completer<RedirectReply>();
+      final adapter = MoonfinPlaybackAdapter(
+        manager: manager, client: client, native: native, audioInput: _Audio(),
+        redirectCache: PlaybackRedirectCache(request: (_, _) async {
+          if (++redirects == 1) return RedirectReply(302, Uri.parse('https://cdn.115.com/first'));
+          return refresh.future;
+        }),
+      );
+      addTearDown(() async {
+        await adapter.dispose();
+        await native.events.close();
+        manager.dispose();
+      });
+      final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 3)));
+      await pumpEventQueue(times: 30);
+      final gen = session.snapshot.generation;
+      final embedded = session.snapshot.subtitleTracks.first.id;
+      final input = session as PlaybackSubtitleInput;
+      final external = await input.registerExternalSubtitle('file:///captions.srt', generation: gen);
+      await session.selectSubtitle(embedded);
+      await session.selectSubtitle(session.snapshot.subtitleTracks.firstWhere((t) => t.source == PlaybackTrackSource.embyExternal).id);
+      await session.selectSubtitle(external);
+      await input.setLiveSubtitle('live', generation: gen, select: true);
+      await session.selectSubtitle(null);
+      expect(backend.urls, hasLength(1));
+      expect(redirects, 1);
+      expect(session.snapshot.generation, gen);
+      backend.at = const Duration(minutes: 4);
+      backend.runtimeTracks = false;
+      Future<void> switchTrack() => track == 'audio'
+          ? session.selectAudio(session.snapshot.audioTracks.last.id)
+          : session.selectSubtitle(embedded);
+      final change = switchTrack();
+      await pumpEventQueue();
+      expect(redirects, 2);
+      expect(backend.playing, isTrue);
+      if (track == 'audio') await session.pause();
+      refresh.complete(RedirectReply(302, Uri.parse('https://cdn.115.com/second')));
+      await change;
+      expect(backend.urls.map((url) => Uri.parse(url).path), ['/first', '/second']);
+      expect(backend.starts.last, const Duration(minutes: 4));
+      expect(backend.playing, track == 'subtitle');
+      expect(input.subtitleSource!.subtitleSwitchFrom, track == 'subtitle' ? gen : null);
+      expect(adapter.diagnostics.records.where((e) => e.event == 'resolved').last.cacheHit, false);
+    });
+  }
+  for (final action in ['fail', 'cancel', 'audioFail']) {
+    test('track renewal $action keeps the active source, playhead and user selection', () async {
+      final backend = _Backend();
+      final manager = PlaybackManager()..setBackend(backend);
+      final native = _Native(backend);
+      final client = _Client();
+      client.playbackApi.subtitles.addAll([
+        {'Type': 'Subtitle', 'Index': 2, 'Codec': 'srt', 'Language': 'zh'},
+        {'Type': 'Audio', 'Index': 3, 'Codec': 'aac', 'Language': 'eng'},
+      ]);
+      final gate = Completer<RedirectReply>();
+      var requests = 0;
+      final adapter = MoonfinPlaybackAdapter(
+        manager: manager, client: client, native: native, audioInput: _Audio(),
+        redirectCache: PlaybackRedirectCache(request: (_, _) async => ++requests == 1
+            ? RedirectReply(302, Uri.parse('https://cdn.115.com/original')) : gate.future),
+      );
+      addTearDown(() async {
+        await adapter.dispose();
+        await native.events.close();
+        manager.dispose();
+      });
+      const start = Duration(minutes: 5);
+      final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: start));
+      await pumpEventQueue(times: 30);
+      final input = session as PlaybackSubtitleInput, gen = session.snapshot.generation;
+      await input.setLiveSubtitle('live', generation: gen, select: true);
+      final audio = session.snapshot.selectedAudioId;
+      backend.runtimeTracks = false;
+      final change = action == 'audioFail'
+          ? session.selectAudio(session.snapshot.audioTracks.last.id)
+          : session.selectSubtitle(session.snapshot.subtitleTracks.first.id);
+      final completion = action == 'cancel' ? change : expectLater(change, throwsA(isA<EmbyViewFailure>()));
+      await pumpEventQueue();
+      expect(requests, 2);
+      Future<void>? newer;
+      if (action == 'cancel') {
+        backend.runtimeTracks = true;
+        newer = session.selectSubtitle(null);
+        gate.complete(RedirectReply(302, Uri.parse('https://cdn.115.com/retired')));
+      } else {
+        gate.complete(const RedirectReply(403));
+      }
+      await completion;
+      await newer;
+      expect(requests, 2);
+      expect(backend.urls, hasLength(1));
+      expect(backend.playing, isTrue);
+      expect(session.snapshot.generation, gen);
+      expect(session.snapshot.position, start);
+      expect(session.snapshot.selectedAudioId, audio);
+      expect(session.snapshot.subtitleOverlayId, action == 'cancel' ? null : 'live');
+      expect(input.subtitleSource!.subtitleSwitchFrom, isNull);
+    });
+  }
+  test('a newer sidecar pick during teardown follows the same media into its new generation', () async {
+    final backend = _Backend(), client = _Client();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    client.playbackApi.subtitles.add({'Type': 'Subtitle', 'Index': 2, 'Codec': 'srt'});
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager, client: client, native: native, audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.115.com/file'))),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+    final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 5)));
+    await pumpEventQueue(times: 30);
+    final input = session as PlaybackSubtitleInput, gen = session.snapshot.generation;
+    final sidecar = await input.registerExternalSubtitle('file:///chosen.srt', generation: gen);
+    backend.runtimeTracks = false;
+    backend.stopping = Completer();
+    backend.releaseStop = Completer();
+    final first = session.selectSubtitle(session.snapshot.subtitleTracks.first.id);
+    await backend.stopping!.future;
+    final newer = session.selectSubtitle(sidecar);
+    backend.runtimeTracks = true;
+    backend.releaseStop!.complete();
+    await Future.wait([first, newer]);
+    await pumpEventQueue();
+    expect(backend.urls, hasLength(2));
+    expect(session.snapshot.selectedSubtitleId, '${session.snapshot.generation}:external0');
+    expect(native.externalLoads.lastWhere((load) => load.$3).$2, 'file:///chosen.srt');
+  });
   test('failed embedded or off selection keeps the original active sidecar', () async {
     final backend = _Backend();
     final manager = PlaybackManager()..setBackend(backend);
@@ -779,6 +930,39 @@ void main() {
     await adapter.dispose();
     await native.events.close();
     manager.dispose();
+  });
+
+  test('player snapshot maps series artwork and selected audio independently of the server display title', () async {
+    final backend = _Backend();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final client = _Client();
+    client.itemsApi.metadata['20806'] = {
+      'Type': 'Episode', 'Name': '第 2 集', 'IndexNumber': 2, 'ParentIndexNumber': 1,
+      'SeriesId': '20800', 'SeriesName': '北斗神拳 拳王军杂兵们的挽歌', 'SeasonId': '20804',
+      'ImageTags': {'Logo': 'episode'}, 'ParentLogoItemId': '20800', 'ParentLogoImageTag': 'series',
+    };
+    client.playbackApi.audio.addAll({
+      'Codec': 'eac3', 'ChannelLayout': 'stereo', 'Channels': 2, 'DisplayTitle': 'Japanese EAC3 stereo (默认)',
+    });
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager, client: client, native: native, audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://fixture.115cdn.net/video'))),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+    final session = adapter.open(const PlayTarget(itemId: '20806'));
+    await pumpEventQueue(times: 30);
+    final snap = session.snapshot;
+    expect(snap.item?.seriesName, '北斗神拳 拳王军杂兵们的挽歌');
+    expect(snap.item?.seasonNumber, 1);
+    expect(snap.item?.art.logo?.id, '20800:Logo:0');
+    expect(snap.quality?.origin, MediaOrigin.direct115);
+    expect(snap.quality?.resolution, '1080p');
+    expect(snap.quality?.audioLabel, 'EAC3 2.0');
   });
 
   test('real 115 session refreshes once at position, retires old tracks and refuses the next failure', () async {

@@ -118,6 +118,11 @@ void withholdExternalPgsSubtitles(Map<String, dynamic> profile) {
   );
 }
 
+/// A viewer track change which needs a new stream may negotiate it while the
+/// old player is still running. The returned function publishes the prepared
+/// resolution only when the manager commits the replacement.
+typedef PrepareTrackReopen = Future<StreamResolutionResult Function()?> Function(ReplanRequest request);
+
 class PlaybackManager implements AudioOwnable {
   static const _mediaReadyPollInterval = Duration(milliseconds: 100);
   static const _defaultMediaReadyTimeout = Duration(seconds: 60);
@@ -3235,6 +3240,20 @@ class PlaybackManager implements AudioOwnable {
     return _isLiveTvItem(queueService.currentItem ?? _lastPlaybackItem);
   }
 
+  Map<String, dynamic> _profileForResolve(bool forceTranscode, {bool withholdExternalPgs = false}) {
+    final profile = _backend!.getDeviceProfile(
+      useProgressiveTranscode: forceTranscode,
+    );
+    stripVetoedAudioCodecs(profile, _vetoedAudioCodecs);
+    if (withholdExternalPgs) {
+      withholdExternalPgsSubtitles(profile);
+    }
+    if (_maxBitrateOverrideMbps != null) {
+      profile['MaxStreamingBitrate'] = _maxBitrateOverrideMbps! * 1000000;
+    }
+    return profile;
+  }
+
   Future<void> _playCurrentItem({
     Duration startPosition = Duration.zero,
     bool enableDirectPlay = true,
@@ -3248,6 +3267,7 @@ class PlaybackManager implements AudioOwnable {
     // one instead of starting another (see [StreamReplanner]), and why.
     StreamResolutionResult? replanFrom,
     ReplanReason replanReason = ReplanReason.trackChange,
+    StreamResolutionResult Function()? preparedTrackSource,
     // This reopens the item that was playing (a re-resolve, or a startup
     // fallback), rather than starting one. Said outright: a queue change
     // made while a re-resolve is still running would otherwise read that
@@ -3367,16 +3387,7 @@ class PlaybackManager implements AudioOwnable {
         : null;
 
     final forceTranscode = !enableDirectPlay && !enableDirectStream;
-    final profile = _backend!.getDeviceProfile(
-      useProgressiveTranscode: forceTranscode,
-    );
-    stripVetoedAudioCodecs(profile, _vetoedAudioCodecs);
-    if (withholdExternalPgs) {
-      withholdExternalPgsSubtitles(profile);
-    }
-    if (_maxBitrateOverrideMbps != null) {
-      profile['MaxStreamingBitrate'] = _maxBitrateOverrideMbps! * 1000000;
-    }
+    final profile = _profileForResolve(forceTranscode, withholdExternalPgs: withholdExternalPgs);
     var maxBitrate = profile['MaxStreamingBitrate'] as int?;
     final autoBitrate = maxBitrate == null && autoBitrateProvider != null;
     int? measuredBitrate;
@@ -3512,7 +3523,7 @@ class PlaybackManager implements AudioOwnable {
 
     StreamResolutionResult resolution;
     try {
-      resolution = await resolve(maxBitrate);
+      resolution = preparedTrackSource?.call() ?? await resolve(maxBitrate);
     } on PlaybackRefusedException catch (refusal) {
       // A session the server ended on purpose is being stopped (see
       // resolve), and the player closes with its own message. Not a failure
@@ -4230,7 +4241,7 @@ class PlaybackManager implements AudioOwnable {
             restorePosition: useNativeStart ? startPosition : null,
           );
         } else {
-          _waitAndApplyExternalSubtitle(sessionToken, resolution);
+          unawaited(_applyExternalSubtitleWhenReady(sessionToken));
         }
       } else if (_subtitleStreamIndex == -1) {
         _waitAndDisableSubtitles(sessionToken);
@@ -4858,57 +4869,42 @@ class PlaybackManager implements AudioOwnable {
 
   Future<void> changeAudioTrack(
     int streamIndex, {
+    PrepareTrackReopen? prepareReopen,
     bool userInitiated = true,
   }) => _withProgressPaused(() async {
-    _audioStreamIndex = streamIndex;
-    _audioSelectionExplicit = true;
-
-    final currentItem = queueService.currentItem;
-    if (currentItem != null) {
-      final itemId = MediaStreamResolver.extractItemId(currentItem);
-      onAudioTrackChanged?.call(itemId, streamIndex >= 0 ? streamIndex : null);
-      if (userInitiated) onAudioTrackSelected?.call(itemId, streamIndex);
-    }
-
-    final streams = _currentMediaStreams;
-    String? selectedCodec;
-    if (streams.isNotEmpty) {
-      final selectedStream = streams.firstWhere(
-        (s) => s['Type'] == 'Audio' && s['Index'] == streamIndex,
-        orElse: () => const <String, dynamic>{},
-      );
-      selectedCodec = selectedStream['Codec'] as String?;
-      if (selectedStream.isNotEmpty) {
-        _lastExplicitAudioLanguage = _extractLanguage(selectedStream);
+    final stream = _currentMediaStreams
+        .where((s) => s['Type'] == 'Audio' && s['Index'] == streamIndex).firstOrNull;
+    void select() {
+      _audioStreamIndex = streamIndex;
+      _audioSelectionExplicit = true;
+      final item = queueService.currentItem;
+      if (item != null) {
+        final id = MediaStreamResolver.extractItemId(item);
+        onAudioTrackChanged?.call(id, streamIndex >= 0 ? streamIndex : null);
+        if (userInitiated) onAudioTrackSelected?.call(id, streamIndex);
+      }
+      if (stream != null) {
+        _lastExplicitAudioLanguage = _extractLanguage(stream);
         _lastExplicitAudioIndex = streamIndex;
-        _lastExplicitAudioTitle = _extractTrackTitle(selectedStream);
+        _lastExplicitAudioTitle = _extractTrackTitle(stream);
       }
     }
 
+    final ordinal = _mpvTrackIdForStream(streamIndex, 'Audio');
     if (_isOfflinePlayback) {
-      final mpvId = _mpvTrackIdForStream(streamIndex, 'Audio');
-      if (mpvId != null) {
-        await _backend?.setAudioTrack(mpvId);
+      select();
+      if (ordinal != null) {
+        await _backend?.setAudioTrack(ordinal);
       } else {
         _waitAndApplyTrackSelections(_playbackSessionToken);
       }
     } else if (_currentResolution?.playMethod == StreamPlayMethod.directPlay &&
-        (_backend?.supportsDirectPlayAudioSwitch ?? false) &&
-        !_videoWithholdsAudioCodec(
-          _backend?.getDeviceProfile(),
-          selectedCodec,
-        )) {
-      // Every embedded track is already in a direct-played stream, so a
-      // re-resolve would tear the player down and rebuild it for a track it
-      // already has. The next progress report carries the new index anyway.
-      final ordinal = _mpvTrackIdForStream(streamIndex, 'Audio');
-      if (ordinal != null) {
-        await _backend?.setAudioTrack(ordinal);
-      } else {
-        await _reResolveAtCurrentPosition();
-      }
+        (_backend?.supportsDirectPlayAudioSwitch ?? false) && ordinal != null &&
+        !_videoWithholdsAudioCodec(_backend?.getDeviceProfile(), stream?['Codec'] as String?)) {
+      select();
+      await _backend?.setAudioTrack(ordinal);
     } else {
-      await _reResolveAtCurrentPosition();
+      await _reopenForTrack(prepareReopen, select, audioIndex: streamIndex);
     }
   });
 
@@ -5176,6 +5172,7 @@ class PlaybackManager implements AudioOwnable {
   /// resolved, which the stream list this session carries has never seen.
   Future<void> changeSubtitleTrack(
     int streamIndex, {
+    PrepareTrackReopen? prepareReopen,
     bool userInitiated = true,
     bool refreshStreams = false,
   }) => _withProgressPaused(
@@ -5183,6 +5180,7 @@ class PlaybackManager implements AudioOwnable {
       streamIndex,
       userInitiated: userInitiated,
       refreshStreams: refreshStreams,
+      prepareReopen: prepareReopen,
     ),
   );
 
@@ -5264,148 +5262,149 @@ class PlaybackManager implements AudioOwnable {
 
   Future<void> _changeSubtitleTrackInner(
     int streamIndex, {
+    PrepareTrackReopen? prepareReopen,
     bool userInitiated = true,
     bool refreshStreams = false,
   }) async {
     if (_secondarySubtitleStreamIndex == streamIndex) {
       await changeSecondarySubtitleTrack(null);
     }
-    final previousSubtitleStreamIndex = _subtitleStreamIndex;
-    final isBitmap = _isSubtitleBitmap(streamIndex);
-    _subtitleStreamIndex = streamIndex;
-
-    final currentItem = queueService.currentItem;
-    if (currentItem != null) {
-      final itemId = MediaStreamResolver.extractItemId(currentItem);
-      onSubtitleTrackChanged?.call(itemId, streamIndex >= 0 ? streamIndex : null);
-      if (userInitiated) onSubtitleTrackSelected?.call(itemId, streamIndex);
+    final stream = _currentMediaStreams
+        .where((s) => s['Type'] == 'Subtitle' && s['Index'] == streamIndex).firstOrNull;
+    void select() {
+      _subtitleStreamIndex = streamIndex;
+      final item = queueService.currentItem;
+      if (item != null) {
+        final id = MediaStreamResolver.extractItemId(item);
+        onSubtitleTrackChanged?.call(id, streamIndex >= 0 ? streamIndex : null);
+        if (userInitiated) onSubtitleTrackSelected?.call(id, streamIndex);
+      }
+      _subtitleSelectionExplicit = streamIndex >= 0;
+      _lastExplicitSubtitleEnabled = streamIndex >= 0;
+      if (streamIndex < 0) {
+        _lastExplicitSubtitleLanguage = null;
+      } else if (stream != null) {
+        _lastExplicitSubtitleLanguage = _extractLanguage(stream);
+        _lastExplicitSubtitleStream = stream;
+      }
     }
 
-    _subtitleSelectionExplicit = streamIndex >= 0;
-    _lastExplicitSubtitleEnabled = streamIndex >= 0;
-    if (streamIndex >= 0) {
-      final streams = _currentMediaStreams;
-      if (streams.isNotEmpty) {
-        final selectedStream = streams.firstWhere(
-          (s) => s['Type'] == 'Subtitle' && s['Index'] == streamIndex,
-          orElse: () => const <String, dynamic>{},
-        );
-        if (selectedStream.isNotEmpty) {
-          _lastExplicitSubtitleLanguage = _extractLanguage(selectedStream);
-          _lastExplicitSubtitleStream = selectedStream;
+    final previousBurned = _subtitleIsBurnedIntoVideo(_subtitleStreamIndex);
+    final bitmap = _isSubtitleBitmap(streamIndex);
+    final unsupportedBitmap = bitmap && !(_backend?.canRenderBitmapSubtitles ?? false);
+    final method = _currentResolution?.playMethod;
+    final runtimeSelection = _backend?.supportsRuntimeTrackSelection;
+    final ordinal = _mpvTrackIdForStream(streamIndex, 'Subtitle');
+    bool? forceTranscode;
+    var disableOldRenderer = false;
+    if (!_isOfflinePlayback) {
+      if (refreshStreams) {
+        forceTranscode = false;
+      } else if (runtimeSelection == false) {
+        forceTranscode = unsupportedBitmap;
+      } else if (method == StreamPlayMethod.directPlay) {
+        if (unsupportedBitmap) {
+          forceTranscode = true;
+          disableOldRenderer = true;
         }
-      }
-    } else {
-      _lastExplicitSubtitleLanguage = null;
-    }
-
-    await _applySubtitleRendererModeForStream(streamIndex);
-
-    // Every branch below resolves the track through the stream list this
-    // session was built from, so an index the server added since then finds
-    // nothing and the selection quietly does nothing. Re-resolving rebuilds
-    // the list first and carries the index into it.
-    if (refreshStreams && !_isOfflinePlayback) {
-      await _reResolveAtCurrentPosition();
-      return;
-    }
-
-    if (!_isOfflinePlayback &&
-        !(_backend?.supportsRuntimeTrackSelection ?? true)) {
-      final canRenderBitmap = _backend?.canRenderBitmapSubtitles ?? false;
-      await _reResolveAtCurrentPosition(
-        forceTranscode: isBitmap && !canRenderBitmap,
-      );
-      return;
-    }
-
-    if (_currentResolution?.playMethod == StreamPlayMethod.directPlay ||
-        _isOfflinePlayback) {
-      final isExternal = _isSubtitleDeliveredExternally(streamIndex);
-      if (isBitmap && !(_backend?.canRenderBitmapSubtitles ?? false)) {
-        await _backend?.disableSubtitleTrack();
-        if (!_isOfflinePlayback) {
-          await _reResolveAtCurrentPosition(forceTranscode: true);
+      } else if (method == StreamPlayMethod.transcode || method == StreamPlayMethod.directStream) {
+        if (previousBurned && !bitmap) {
+          forceTranscode = false;
+          disableOldRenderer = true;
+        } else if (bitmap || runtimeSelection != true || ordinal == null) {
+          forceTranscode = true;
         }
-        return;
-      }
-      if (isExternal) {
-        _waitAndApplyTrackSelections(_playbackSessionToken);
-        return;
-      }
-      final mpvId = _mpvTrackIdForStream(streamIndex, 'Subtitle');
-      if (mpvId != null) {
-        await _backend?.setSubtitleTrack(
-          mpvId,
-          isBitmapSubtitle: isBitmap,
-          subtitleCodec: _subtitleCodecForStream(streamIndex),
-          isExternalSubtitle: isExternal,
-          externalSubtitleUrl: _externalSubtitleUrlForStream(streamIndex),
-        );
       } else {
-        _waitAndApplyTrackSelections(_playbackSessionToken);
+        forceTranscode = false;
       }
-    } else if (_currentResolution?.playMethod == StreamPlayMethod.transcode ||
-        _currentResolution?.playMethod == StreamPlayMethod.directStream) {
-      final previousWasBurned = _subtitleIsBurnedIntoVideo(
-        previousSubtitleStreamIndex,
+    }
+    if (forceTranscode != null) {
+      await _reopenForTrack(prepareReopen, select,
+        subtitleIndex: streamIndex, forceTranscode: forceTranscode,
+        beforeUnpreparedReopen: () async {
+          await _applySubtitleRendererModeForStream(streamIndex);
+          if (disableOldRenderer) await _backend?.disableSubtitleTrack();
+        },
       );
-      if (previousWasBurned && !isBitmap) {
-        await _backend?.disableSubtitleTrack();
-        await _reResolveAtCurrentPosition();
+      return;
+    }
+    select();
+    await _applySubtitleRendererModeForStream(streamIndex);
+    if (unsupportedBitmap) {
+      await _backend?.disableSubtitleTrack();
+      return;
+    }
+    final isExternal = _isSubtitleDeliveredExternally(streamIndex);
+    if (isExternal && (method == StreamPlayMethod.directPlay || _isOfflinePlayback)) {
+      if (prepareReopen == null) {
+        _waitAndApplyTrackSelections(_playbackSessionToken);
         return;
       }
-      if (isBitmap) {
-        await _reResolveAtCurrentPosition(forceTranscode: true);
-        return;
-      }
-
-      final shouldPreferRuntimeTrackSelection =
-          _backend?.supportsRuntimeTrackSelection ?? false;
-      if (shouldPreferRuntimeTrackSelection) {
-        final mpvId = _mpvTrackIdForStream(streamIndex, 'Subtitle');
-        if (mpvId != null) {
-          await _backend?.setSubtitleTrack(
-            mpvId,
-            isBitmapSubtitle: isBitmap,
-            subtitleCodec: _subtitleCodecForStream(streamIndex),
-            isExternalSubtitle: _isSubtitleDeliveredExternally(streamIndex),
-            externalSubtitleUrl: _externalSubtitleUrlForStream(streamIndex),
-          );
-          return;
-        }
-      }
-
-      // Not selectable in the current stream (e.g. embedded sub the server
-      // didn't re-deliver externally): restart with the sub burned in.
-      await _reResolveAtCurrentPosition(forceTranscode: true);
+      // Selecting a sidecar never reapplies the audio track. On Aether that
+      // separate command can rebuild the whole pipeline.
+      await _applyExternalSubtitleWhenReady(_playbackSessionToken);
+    } else if (ordinal != null) {
+      await _backend?.setSubtitleTrack(
+        ordinal, isBitmapSubtitle: bitmap, subtitleCodec: _subtitleCodecForStream(streamIndex),
+        isExternalSubtitle: isExternal, externalSubtitleUrl: _externalSubtitleUrlForStream(streamIndex),
+      );
     } else {
-      await _reResolveAtCurrentPosition();
+      _waitAndApplyTrackSelections(_playbackSessionToken);
     }
   }
 
-  Future<void> disableSubtitles() => _withProgressPaused(() async {
-    final previousWasBurned = _subtitleIsBurnedIntoVideo(_subtitleStreamIndex);
-    _subtitleStreamIndex = -1;
-    _lastExplicitSubtitleEnabled = false;
-    _lastExplicitSubtitleLanguage = null;
-
-    final currentItem = queueService.currentItem;
-    if (currentItem != null) {
-      onSubtitleTrackSelected?.call(
-        MediaStreamResolver.extractItemId(currentItem),
-        -1,
-      );
+  Future<void> disableSubtitles({PrepareTrackReopen? prepareReopen}) => _withProgressPaused(() async {
+    void select() {
+      _subtitleStreamIndex = -1;
+      _lastExplicitSubtitleEnabled = false;
+      _lastExplicitSubtitleLanguage = null;
+      final item = queueService.currentItem;
+      if (item != null) onSubtitleTrackSelected?.call(MediaStreamResolver.extractItemId(item), -1);
     }
 
-    await _resetSubtitleRendererMode();
-    if (previousWasBurned || (!_isOfflinePlayback &&
-        !(_backend?.supportsRuntimeTrackSelection ?? true))) {
-      await _reResolveAtCurrentPosition();
+    if (_subtitleIsBurnedIntoVideo(_subtitleStreamIndex) ||
+        (!_isOfflinePlayback && !(_backend?.supportsRuntimeTrackSelection ?? true))) {
+      await _reopenForTrack(prepareReopen, select,
+        subtitleIndex: -1, beforeUnpreparedReopen: _resetSubtitleRendererMode);
       return;
     }
+    select();
+    await _resetSubtitleRendererMode();
     await _backend?.disableSubtitleTrack();
   });
+
+  Future<void> _reopenForTrack(PrepareTrackReopen? prepare, void Function() select, {
+    int? audioIndex, int? subtitleIndex, bool forceTranscode = false,
+    Future<void> Function()? beforeUnpreparedReopen,
+  }) async {
+    if (prepare == null) {
+      select();
+      if (beforeUnpreparedReopen != null) await beforeUnpreparedReopen();
+      await _reResolveAtCurrentPosition(forceTranscode: forceTranscode);
+      return;
+    }
+    await _reResolveAtCurrentPosition(
+      forceTranscode: forceTranscode,
+      reason: audioIndex != null ? 'audio-track' : 'subtitle-track',
+      prepareTrackReopen: () async {
+        final profile = _profileForResolve(forceTranscode);
+        final source = await prepare(ReplanRequest(
+          reason: ReplanReason.trackChange, position: currentPlaybackPosition,
+          deviceProfile: profile, maxStreamingBitrate: profile['MaxStreamingBitrate'] as int?,
+          audioStreamIndex: audioIndex ?? _audioStreamIndex,
+          subtitleStreamIndex: subtitleIndex ?? _subtitleStreamIndex,
+          mediaSourceId: _mediaSourceId,
+          enableDirectPlay: !forceTranscode && _directPlayAllowedForQueue && !_forceTranscodeForQueue,
+          enableDirectStream: !forceTranscode && !_forceTranscodeForQueue,
+        ));
+        if (source == null) return null;
+        return () {
+          select();
+          return source();
+        };
+      },
+    );
+  }
 
   Future<void> changeBitrate(int? mbps) async {
     _maxBitrateOverrideMbps = mbps;
@@ -5418,6 +5417,7 @@ class PlaybackManager implements AudioOwnable {
   /// Serializes re-resolves so rapid track switches can't tear down the same
   /// session twice or race two restarts.
   Future<void> _reResolveAtCurrentPosition({
+    Future<StreamResolutionResult Function()?> Function()? prepareTrackReopen,
     bool forceTranscode = false,
     // Refuses direct play but leaves the server free to remux rather than
     // re-encode. [forceTranscode] refuses the remux too, which is a much
@@ -5462,6 +5462,7 @@ class PlaybackManager implements AudioOwnable {
           (isErrorRecovery ? true : (_backend?.isPlaying ?? state.isPlaying));
 
       await _reResolveNow(
+        prepareTrackReopen: prepareTrackReopen,
         forceTranscode: forceTranscode,
         disableDirectPlay: disableDirectPlay,
         isErrorRecovery: isErrorRecovery,
@@ -5482,6 +5483,7 @@ class PlaybackManager implements AudioOwnable {
   }
 
   Future<void> _reResolveNow({
+    Future<StreamResolutionResult Function()?> Function()? prepareTrackReopen,
     required bool forceTranscode,
     bool disableDirectPlay = false,
     required bool isErrorRecovery,
@@ -5494,6 +5496,14 @@ class PlaybackManager implements AudioOwnable {
     bool Function()? autoPlayIntent,
   }) async {
     if (shouldProceed != null && !shouldProceed()) return;
+    StreamResolutionResult Function()? prepared;
+    final itemEpoch = _itemEpoch;
+    final previousToken = _playbackSessionToken;
+    if (prepareTrackReopen != null) {
+      prepared = await prepareTrackReopen();
+      if (prepared == null || previousToken != _playbackSessionToken || itemEpoch != _itemEpoch) return;
+      autoPlayIntent = () => !_viewerPaused;
+    }
     // A re-resolve stops the backend, reports the stop and kills the server
     // job, so it is one of the few things that can clear the player's
     // playlist mid-playback. Naming the caller is what tells that apart from
@@ -5575,7 +5585,8 @@ class PlaybackManager implements AudioOwnable {
     }
 
     _reResolveStoppingOldPlayer = false;
-    if (shouldProceed != null && !shouldProceed()) {
+    if ((shouldProceed != null && !shouldProceed()) ||
+        (prepared != null && (itemEpoch != _itemEpoch || previousToken != _playbackSessionToken))) {
       if (_teardownEpoch == teardownEpoch) _teardownEpoch = null;
       return;
     }
@@ -5588,6 +5599,7 @@ class PlaybackManager implements AudioOwnable {
     try {
       await _playCurrentItem(
         startPosition: currentPos,
+        preparedTrackSource: prepared,
         enableDirectPlay: !forceTranscode && !disableDirectPlay,
         enableDirectStream: !forceTranscode,
         autoPlay: autoPlayIntent?.call() ?? autoPlayAfterResolve,
@@ -5705,27 +5717,23 @@ class PlaybackManager implements AudioOwnable {
     });
   }
 
-  void _waitAndApplyExternalSubtitle(
-    int sessionToken,
-    StreamResolutionResult resolution,
-  ) {
-    _waitForTracksAndExternals().then((_) async {
-      if (sessionToken != _playbackSessionToken) return;
-      final streamIndex = _subtitleStreamIndex;
-      if (streamIndex == null || streamIndex < 0) return;
-      if (!_isSubtitleDeliveredExternally(streamIndex)) return;
-      final mpvId = _mpvTrackIdForStream(streamIndex, 'Subtitle');
-      if (mpvId == null) return;
-      await _applySubtitleRendererModeForStream(streamIndex);
-      if (sessionToken != _playbackSessionToken) return;
-      await _backend?.setSubtitleTrack(
-        mpvId,
-        isBitmapSubtitle: _isSubtitleBitmap(streamIndex),
-        subtitleCodec: _subtitleCodecForStream(streamIndex),
-        isExternalSubtitle: true,
-        externalSubtitleUrl: _externalSubtitleUrlForStream(streamIndex),
-      );
-    });
+  Future<void> _applyExternalSubtitleWhenReady(int sessionToken) async {
+    await _waitForTracksAndExternals();
+    if (sessionToken != _playbackSessionToken) return;
+    final streamIndex = _subtitleStreamIndex;
+    if (streamIndex == null || streamIndex < 0) return;
+    if (!_isSubtitleDeliveredExternally(streamIndex)) return;
+    final mpvId = _mpvTrackIdForStream(streamIndex, 'Subtitle');
+    if (mpvId == null) return;
+    await _applySubtitleRendererModeForStream(streamIndex);
+    if (sessionToken != _playbackSessionToken) return;
+    await _backend?.setSubtitleTrack(
+      mpvId,
+      isBitmapSubtitle: _isSubtitleBitmap(streamIndex),
+      subtitleCodec: _subtitleCodecForStream(streamIndex),
+      isExternalSubtitle: true,
+      externalSubtitleUrl: _externalSubtitleUrlForStream(streamIndex),
+    );
   }
 
   void _waitAndAddExternalSubtitles(
