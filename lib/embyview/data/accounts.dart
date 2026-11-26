@@ -19,6 +19,7 @@ import '../../data/services/media_server_client_factory.dart';
 import '../contracts/accounts.dart';
 import '../contracts/common.dart';
 import '../contracts/preferences.dart';
+import 'diagnostics_exporter.dart';
 
 /// Result of probing a single Emby server address.
 class AddressProbeResult {
@@ -250,6 +251,12 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     final reachable = _connectivity?.canReachServer ?? true;
     if (!reachable) {
       _connectionOverride = null;
+      EvDiagnosticsLog.instance.record(
+        'connection',
+        'connectivity_lost',
+        level: 'WARN',
+        details: {'autoSwitch': _autoSwitchEnabled},
+      );
       final account = _readCurrent(
         failure: _snapshot.failure,
         sessionId: _snapshot.sessionId,
@@ -261,6 +268,7 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
       return;
     }
     _connectionOverride = ConnectionState.connected;
+    EvDiagnosticsLog.instance.record('connection', 'connectivity_restored');
     final account = _readCurrent(
       failure: _snapshot.failure,
       sessionId: _snapshot.sessionId,
@@ -478,7 +486,24 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
       _connectionOverride = ConnectionState.connected;
       _latencyMs = result.latencyMs;
       _triedAddressCount = tried;
-      if (!switched) return null;
+      if (!switched) {
+        EvDiagnosticsLog.instance.record(
+          'connection',
+          'restore_probe_ok',
+          details: {'label': _addressLabel(candidate), 'latencyMs': result.latencyMs},
+        );
+        return null;
+      }
+      EvDiagnosticsLog.instance.record(
+        'connection',
+        'restore_failover_switched',
+        details: {
+          'from': _addressLabel(currentEntry),
+          'to': _addressLabel(candidate),
+          'tried': tried,
+          'latencyMs': result.latencyMs,
+        },
+      );
       return ConnectionNoticeEvent.switched(
         serverName: server.name,
         fromLabel: _addressLabel(currentEntry),
@@ -490,6 +515,12 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     _connectionOverride = ConnectionState.disconnected;
     _latencyMs = null;
     _triedAddressCount = tried;
+    EvDiagnosticsLog.instance.record(
+      'connection',
+      'restore_probe_disconnected',
+      level: 'WARN',
+      details: {'tried': tried},
+    );
     return null;
   }
 
@@ -500,23 +531,49 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     await _syncAllStoredCandidateAddresses();
     if (sessions.activeUserId != null) {
       final switched = await _failoverOnRestoreIfNeeded();
-      _publish(_readCurrent());
+      final snap = _readCurrent();
+      _publish(snap);
+      EvDiagnosticsLog.instance.record(
+        'connection',
+        'restore',
+        details: {
+          'phase': snap.phase.name,
+          'addresses': snap.addresses.length,
+          'switched': switched != null,
+        },
+      );
       if (switched != null) {
         _emitNotice(switched, replayIfUnobserved: true);
       }
       return;
     }
     if (chooseUserOnStartup() || _users.isEmpty) {
-      _publish(_readCurrent());
+      final snap = _readCurrent();
+      _publish(snap);
+      EvDiagnosticsLog.instance.record(
+        'connection',
+        'restore',
+        details: {'phase': snap.phase.name, 'profiles': snap.profiles.length},
+      );
       return;
     }
     ConnectionNoticeEvent? switched;
     await _transition(AccountPhase.restoring, () async {
       switched = await _failoverOnRestoreIfNeeded();
       if (!await sessions.restoreSession()) {
+        EvDiagnosticsLog.instance.record(
+          'connection',
+          'restore_failed',
+          level: 'WARN',
+        );
         throw const EmbyViewFailure('请选择用户重新登录。', code: 'restore_failed');
       }
     });
+    EvDiagnosticsLog.instance.record(
+      'connection',
+      'restore_ok',
+      details: {'switched': switched != null},
+    );
     if (switched != null) {
       _emitNotice(switched!, replayIfUnobserved: true);
     }
@@ -549,6 +606,14 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
         ]);
       }
       await _activate(await _authenticate(saved, username, password), password);
+      EvDiagnosticsLog.instance.record(
+        'connection',
+        'sign_in_ok',
+        details: {
+          'scheme': server.scheme,
+          'label': inferServerAddressLabel(saved.address),
+        },
+      );
     }),
   );
 
@@ -567,6 +632,7 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
         );
       }
       await _activate(user, password);
+      EvDiagnosticsLog.instance.record('connection', 'switch_user_ok');
     }),
   );
 
@@ -589,6 +655,12 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
         ? store.getUser(state.serverId, state.userId)
         : null;
     if (user == null) {
+      EvDiagnosticsLog.instance.record(
+        'connection',
+        'sign_in_failed',
+        level: 'WARN',
+        details: {'code': 'sign_in_failed'},
+      );
       throw const EmbyViewFailure(
         '登录失败，请检查用户名、密码和服务器权限。',
         code: 'sign_in_failed',
@@ -614,13 +686,19 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
   Future<void> signOut() => _serialize(() async {
     final serverId = sessions.activeServerId ?? _lastServerId ?? _firstEmbyServer()?.id;
     _lastServerId = serverId;
+    final postPhase = serverId != null && store.getServer(serverId) != null
+        ? AccountPhase.choosing
+        : AccountPhase.signedOut;
     await _transition(
       AccountPhase.switching,
       () => sessions.destroyCurrentSession(),
-      postPhase: serverId != null && store.getServer(serverId) != null
-          ? AccountPhase.choosing
-          : AccountPhase.signedOut,
+      postPhase: postPhase,
       preferredServerId: serverId,
+    );
+    EvDiagnosticsLog.instance.record(
+      'connection',
+      'sign_out',
+      details: {'postPhase': postPhase.name},
     );
   });
 
@@ -783,6 +861,16 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
       );
 
       if (switched) {
+        EvDiagnosticsLog.instance.record(
+          'connection',
+          'failover_switched',
+          details: {
+            'from': _addressLabel(currentEntry),
+            'to': _addressLabel(candidate),
+            'tried': tried,
+            'latencyMs': result.latencyMs,
+          },
+        );
         _emitNotice(
           ConnectionNoticeEvent.switched(
             serverName: server.name,
@@ -793,12 +881,30 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
           ),
         );
       } else if (wasOffline) {
+        EvDiagnosticsLog.instance.record(
+          'connection',
+          'recovered',
+          details: {
+            'label': _addressLabel(candidate),
+            'tried': tried,
+            'latencyMs': result.latencyMs,
+          },
+        );
         _emitNotice(
           ConnectionNoticeEvent.recovered(
             serverName: server.name,
             toLabel: _addressLabel(candidate),
             activeAddress: uri.toString(),
           ),
+        );
+      } else {
+        EvDiagnosticsLog.instance.record(
+          'connection',
+          'probe_ok',
+          details: {
+            'label': _addressLabel(candidate),
+            'latencyMs': result.latencyMs,
+          },
         );
       }
       return uri;
@@ -807,6 +913,12 @@ class MoonfinEmbyViewAccounts implements EmbyViewAccounts {
     _connectionOverride = ConnectionState.disconnected;
     _latencyMs = null;
     _triedAddressCount = tried;
+    EvDiagnosticsLog.instance.record(
+      'connection',
+      'disconnected',
+      level: 'WARN',
+      details: {'tried': tried},
+    );
     _publish(
       _readCurrent(
         phase: _snapshot.phase,

@@ -1361,5 +1361,52 @@ void main() {
         );
       },
     );
+
+    testWidgets(
+      'reloading home while hero is rotated keeps hero billboard and stage backdrop synchronized',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final h = _createHarness();
+        addTearDown(h.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(size: Size(1440, 900)),
+              child: Scaffold(
+                body: EvShell(
+                  services: h.services,
+                  controller: h.shell,
+                  stage: h.stage,
+                  immersion: h.immersion,
+                  configureWindow: false,
+                  enableStageMotion: false,
+                  homeBuilder: (_) => const EvHomePage(enableAnimations: false),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Switch hero to 2nd recommendation (index 1: hero_daily).
+        await tester.tap(find.byKey(const Key('ev_hero_dot_1')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey<String>('ev_hero_bb_hero_daily_r')), findsOneWidget);
+        expect(h.stage.activeBackdropKey, contains('home_test_bg_hero_daily'));
+
+        // Trigger a home reload (as happens on notice retry / address switch / refresh).
+        h.shell.onRetryHome?.call();
+        await tester.pumpAndSettle();
+
+        // Hero billboard and stage backdrop must stay synchronized on hero_daily (never revert backdrop to hero_resume).
+        expect(find.byKey(const ValueKey<String>('ev_hero_bb_hero_daily_r')), findsOneWidget);
+        expect(h.stage.activeBackdropKey, contains('home_test_bg_hero_daily'));
+      },
+    );
   });
 }

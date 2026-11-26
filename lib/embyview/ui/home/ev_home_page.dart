@@ -153,11 +153,15 @@ class _EvHomePageState extends State<EvHomePage> {
       return;
     }
     if (initial) {
+      final cachedBackdrop = _activeHero?.card.art.stage;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         scope.stage
           ..setMode(EvStageMode.hero)
           ..setScrollProgress(0.0);
+        if (cachedBackdrop != null) {
+          scope.stage.setBaseBackdrop(cachedBackdrop);
+        }
         scope.shell.setScrollOffset(0.0);
       });
     }
@@ -399,7 +403,11 @@ class _EvHomePageState extends State<EvHomePage> {
         return;
       }
 
-      final initialHero = result.recommendations.firstOrNull;
+      final activeId = _activeHero?.card.id;
+      final nextHero = (activeId != null
+              ? result.recommendations.where((r) => r.card.id == activeId).firstOrNull
+              : null) ??
+          result.recommendations.firstOrNull;
       _previewCard.value = null;
       scope.shell.cacheHome(scope.services.sessionId, data, result);
       _setHasVisibleLibraries(scope.shell, true);
@@ -420,13 +428,13 @@ class _EvHomePageState extends State<EvHomePage> {
       }
       setState(() {
         _home = result;
-        _activeHero = initialHero;
+        _activeHero = nextHero;
         _loading = false;
         _emptyLibraries = false;
         _error = null;
       });
       scope.stage.setMode(EvStageMode.hero);
-      if (initialHero != null) scope.stage.setBaseBackdrop(initialHero.card.art.stage);
+      if (nextHero != null) scope.stage.setBaseBackdrop(nextHero.card.art.stage);
     } catch (e) {
       if (!mounted || token != _loadToken) return;
       if (allowFailover &&

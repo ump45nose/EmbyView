@@ -10,6 +10,7 @@ void main() {
     test('falls back to default version when environment defines are empty', () {
       const info = EvBuildInfo(version: '', commit: '');
       expect(info.version, EvBuildInfo.defaultVersion);
+      expect(info.version, '1.0.0');
       expect(info.version, isNot('1.0'));
       expect(info.commit, isEmpty);
       expect(info.formattedVersion, '版本 ${EvBuildInfo.defaultVersion}');
@@ -19,16 +20,16 @@ void main() {
     });
 
     test('formats injected version and shortens full commit SHA to 7 chars', () {
-      const shortInfo = EvBuildInfo(version: '3.1.1', commit: '615880f');
+      const shortInfo = EvBuildInfo(version: '1.0.0', commit: '615880f');
       expect(shortInfo.commit, '615880f');
-      expect(shortInfo.formattedVersion, '版本 3.1.1（615880f）');
+      expect(shortInfo.formattedVersion, '版本 1.0.0（615880f）');
 
       const fullInfo = EvBuildInfo(
-        version: '3.2.0',
+        version: '1.2.0',
         commit: '615880f4b1234567890abcdef1234567890abcde',
       );
       expect(fullInfo.commit, '615880f');
-      expect(fullInfo.formattedVersion, '版本 3.2.0（615880f）');
+      expect(fullInfo.formattedVersion, '版本 1.2.0（615880f）');
     });
   });
 
@@ -76,7 +77,7 @@ pwd=inlinePass123 access_token=at_secret_999
 
     test('strips IPv4, IPv6, .local, .ts.net hostnames, and preserves version numbers', () {
       const raw = '''
-2026-11-26T12:00:00Z INFO EmbyView 3.1.1 (AetherEngine · Anime4K)
+2026-11-26T12:00:00Z INFO EmbyView 1.0.0 (AetherEngine · Anime4K)
 Connecting to nas.local:8096 and my-nas.tail1234.ts.net:8920
 Fallback endpoint 192.168.1.20:8096 or 100.64.0.12 or [fe80::1]:8096 or 2001:db8::42
 Failed host lookup: 'media.myfamily.org'
@@ -100,7 +101,7 @@ HTTP 403 · whisper large-v3-turbo · 574 MB
         expect(clean, isNot(contains(leaked)), reason: 'Host/IP leaked: $leaked\n$clean');
       }
 
-      expect(clean, contains('EmbyView 3.1.1'));
+      expect(clean, contains('EmbyView 1.0.0'));
       expect(clean, contains('AetherEngine'));
       expect(clean, contains('HTTP 403'));
       expect(clean, contains('whisper large-v3-turbo'));
@@ -179,7 +180,7 @@ at EmbyMediaData.detail (package:moonfin/embyview/data/emby_media_data.dart:951)
       await recentFile.setLastModified(now.subtract(const Duration(days: 2)));
 
       final exporter = EvDiagnosticsExporter(
-        buildInfo: const EvBuildInfo(version: '3.1.1', commit: '615880f'),
+        buildInfo: const EvBuildInfo(version: '1.0.0', commit: '615880f'),
         logDirectoriesLoader: () async => [logsDir],
         now: () => now,
         recentInMemoryEntriesLoader: () => [
@@ -207,7 +208,7 @@ at EmbyMediaData.detail (package:moonfin/embyview/data/emby_media_data.dart:951)
       expect(result.byteCount, greaterThan(0));
 
       final written = await File(dest).readAsString();
-      expect(written, contains('Version: 版本 3.1.1（615880f）'));
+      expect(written, contains('Version: 版本 1.0.0（615880f）'));
       expect(written, contains('RECENT_LOG'));
       expect(written, contains('RECENT_MEMORY_ENTRY'));
       expect(written, isNot(contains('OLD_ENTRY_SHOULD_BE_EXCLUDED')));
@@ -217,6 +218,94 @@ at EmbyMediaData.detail (package:moonfin/embyview/data/emby_media_data.dart:951)
       expect(written, isNot(contains('myBearerToken12345')));
       expect(written, isNot(contains('nas.local')));
       expect(written, isNot(contains('topsecret')));
+    });
+
+    test('EvDiagnosticsLog rolls daily files, prunes logs older than 7 days, and exports sanitized connection/playback/subtitle events', () async {
+      final now = DateTime.utc(2026, 11, 26, 12, 0, 0);
+      final rollingDir = Directory(p.join(tempDir.path, EvDiagnosticsLog.directoryName))..createSync();
+
+      // Seed an expired rolling log (> 7 days old) and a recent log (3 days old).
+      final expiredFile = File(p.join(rollingDir.path, 'diag-2026-11-15.log'));
+      await expiredFile.writeAsString('2026-11-15T08:00:00Z INFO  [connection] EXPIRED_EVENT\n');
+      await expiredFile.setLastModified(now.subtract(const Duration(days: 11)));
+
+      final threeDaysAgoFile = File(p.join(rollingDir.path, 'diag-2026-11-23.log'));
+      await threeDaysAgoFile.writeAsString('2026-11-23T09:00:00Z INFO  [app] RECENT_THREE_DAYS_AGO\n');
+      await threeDaysAgoFile.setLastModified(now.subtract(const Duration(days: 3)));
+
+      final log = EvDiagnosticsLog(
+        directoryLoader: () async => rollingDir,
+        now: () => now,
+      );
+
+      log.record(
+        'connection',
+        'failover_switched',
+        details: {
+          'from': '内网',
+          'to': 'Tailscale',
+          'url': 'https://alice:secretPass@nas.tail-example.ts.net:8920/emby?api_key=embyTok999',
+        },
+      );
+      log.record(
+        'playback',
+        'rate_limited_403',
+        level: 'ERROR',
+        details: {'itemId': '22749', 'httpStatus': 403, 'source': '115 网盘', 'rateLimited': true},
+      );
+      log.record(
+        'subtitle',
+        'online_search',
+        details: {'itemId': '22749', 'groups': 3, 'candidates': 5, 'apiKey': 'sk-ant-secret12345678'},
+      );
+      log.record(
+        'subtitle',
+        'ai_completed',
+        details: {'itemId': '22749', 'cues': 420},
+      );
+
+      await log.flush();
+
+      // Expired rolling file should be pruned automatically.
+      expect(await expiredFile.exists(), isFalse);
+      final todayFile = File(p.join(rollingDir.path, 'diag-2026-11-26.log'));
+      expect(await todayFile.exists(), isTrue);
+
+      // Even on-disk daily log must already be sanitized.
+      final onDisk = await todayFile.readAsString();
+      expect(onDisk, contains('[connection] failover_switched'));
+      expect(onDisk, contains('[playback] rate_limited_403'));
+      expect(onDisk, contains('[subtitle] online_search'));
+      expect(onDisk, contains('[subtitle] ai_completed'));
+      for (final secret in const ['secretPass', 'nas.tail-example.ts.net', 'embyTok999', 'sk-ant-secret12345678']) {
+        expect(onDisk, isNot(contains(secret)));
+      }
+
+      final exporter = EvDiagnosticsExporter(
+        buildInfo: const EvBuildInfo(version: '1.0.0', commit: '615880f'),
+        diagnosticsLog: log,
+        recentInMemoryEntriesLoader: () => const [],
+        now: () => now,
+      );
+
+      final estimated = await exporter.estimateRecentLogsBytes();
+      expect(estimated, greaterThan(0));
+
+      final dest = p.join(tempDir.path, 'out', 'rolling-bundle.log');
+      final result = await exporter.exportSanitizedBundle(destinationPath: dest);
+      expect(result.fileCount, 2);
+      expect(result.byteCount, greaterThan(0));
+
+      final bundle = await File(dest).readAsString();
+      expect(bundle, contains('RECENT_THREE_DAYS_AGO'));
+      expect(bundle, contains('[connection] failover_switched'));
+      expect(bundle, contains('[playback] rate_limited_403'));
+      expect(bundle, contains('[subtitle] online_search'));
+      expect(bundle, contains('[subtitle] ai_completed'));
+      expect(bundle, isNot(contains('EXPIRED_EVENT')));
+      for (final secret in const ['secretPass', 'nas.tail-example.ts.net', 'embyTok999', 'sk-ant-secret12345678']) {
+        expect(bundle, isNot(contains(secret)));
+      }
     });
   });
 }

@@ -11,6 +11,7 @@ import '../../util/fullscreen_helper.dart';
 import '../contracts/common.dart';
 import '../contracts/media.dart';
 import '../contracts/playback.dart';
+import '../data/diagnostics_exporter.dart';
 import '../data/media_mapper.dart';
 import 'native_playback.dart';
 import 'playback_diagnostics.dart';
@@ -143,12 +144,23 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
                 cacheHit: address?.cacheHit,
               ),
             );
+            EvDiagnosticsLog.instance.record(
+              'playback',
+              'preresolve_ok',
+              details: {
+                'itemId': itemId,
+                'elapsedMs': watch.elapsedMilliseconds,
+                'infoMs': info.inMilliseconds,
+                if (address != null) 'redirectMs': address.elapsed.inMilliseconds,
+                if (address != null) 'cacheHit': address.cacheHit,
+              },
+            );
           },
         );
         if (_valid) {
           await resolver.resolve(item, deviceProfile: native.backend.getDeviceProfile());
         }
-      } catch (_) {
+      } catch (error) {
         diagnostics.record(
           PlaybackTiming(
             itemId: itemId,
@@ -157,6 +169,16 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
             elapsed: watch.elapsed,
             failure: 'prepareUnavailable',
           ),
+        );
+        EvDiagnosticsLog.instance.record(
+          'playback',
+          'preresolve_failed',
+          level: 'WARN',
+          details: {
+            'itemId': itemId,
+            'elapsedMs': watch.elapsedMilliseconds,
+            'httpStatus': extractPlaybackHttpStatus(error),
+          },
         );
       } finally {
         _prepared.remove(itemId);
@@ -168,6 +190,14 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
   PlaybackSession open(PlayTarget target) {
     if (!_valid) throw const EmbyViewFailure('播放账号已变更，请重新打开。', retryable: true);
     _syncBaseUrlIfChanged();
+    EvDiagnosticsLog.instance.record(
+      'playback',
+      'open',
+      details: {
+        'itemId': target.itemId,
+        'hasStartAt': target.startAt != null && target.startAt! > Duration.zero,
+      },
+    );
     final previous = _active;
     final session = MoonfinPlaybackSession._(this, target);
     _active = session;
@@ -649,21 +679,39 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     return true;
   }
 
-  void _record(String event, {String? failure}) => _owner.diagnostics.record(
-    PlaybackTiming(
-      itemId: _target.itemId,
-      generation: _snapshot.generation,
-      event: event,
-      elapsed: _intent.elapsed,
-      navigation: _navigationTime,
-      playbackInfo: _infoTime,
-      redirect: _redirectTime,
-      engineOpen: _engineOpen,
-      firstFrame: _firstFrame,
-      cacheHit: _cacheHit,
-      failure: failure,
-    ),
-  );
+  void _record(String event, {String? failure}) {
+    _owner.diagnostics.record(
+      PlaybackTiming(
+        itemId: _target.itemId,
+        generation: _snapshot.generation,
+        event: event,
+        elapsed: _intent.elapsed,
+        navigation: _navigationTime,
+        playbackInfo: _infoTime,
+        redirect: _redirectTime,
+        engineOpen: _engineOpen,
+        firstFrame: _firstFrame,
+        cacheHit: _cacheHit,
+        failure: failure,
+      ),
+    );
+    EvDiagnosticsLog.instance.record(
+      'playback',
+      event,
+      level: failure != null ? 'WARN' : 'INFO',
+      details: {
+        'itemId': _target.itemId,
+        'gen': _snapshot.generation,
+        'elapsedMs': _intent.elapsedMilliseconds,
+        if (_infoTime != null) 'infoMs': _infoTime!.inMilliseconds,
+        if (_redirectTime != null) 'redirectMs': _redirectTime!.inMilliseconds,
+        if (_engineOpen != null) 'engineOpenMs': _engineOpen!.inMilliseconds,
+        if (_firstFrame != null) 'firstFrameMs': _firstFrame!.inMilliseconds,
+        'cacheHit': ?_cacheHit,
+        'failure': ?failure,
+      },
+    );
+  }
 
   bool _isDirect115Source() {
     if (_quality?.origin == MediaOrigin.direct115 || _item?.quality?.origin == MediaOrigin.direct115) {
@@ -702,6 +750,19 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     if (_closing) return;
     _failed = true;
     final failure = _buildFailure(reason, category, error: error);
+    EvDiagnosticsLog.instance.record(
+      'playback',
+      failure.isRateLimited ? 'rate_limited_403' : 'failed',
+      level: 'ERROR',
+      details: {
+        'itemId': _target.itemId,
+        'gen': _snapshot.generation,
+        'code': failure.code ?? category,
+        if (failure.httpStatus != null) 'httpStatus': failure.httpStatus,
+        if (failure.sourceLabel != null) 'source': failure.sourceLabel,
+        'rateLimited': failure.isRateLimited,
+      },
+    );
     _record('failed', failure: failure.code ?? category);
     _emit(failure: failure);
   }

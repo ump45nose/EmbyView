@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:uuid/uuid.dart';
 
+import '../data/diagnostics_exporter.dart';
 import '../embyview.dart';
 import '../playback/playback_subtitle_input.dart';
 import 'ai/subtitle_ai.dart';
@@ -322,6 +323,15 @@ class BoundSubtitlePanel implements SubtitlePanel {
               ?.id ??
           chinese.firstOrNull?.$2;
       if (preferred != null) await session.selectSubtitle(preferred);
+      EvDiagnosticsLog.instance.record(
+        'subtitle',
+        'load_nas',
+        details: {
+          'itemId': scope.source.target.itemId,
+          'nasTracks': scan.nasTracks.length,
+          'autoSelected': preferred != null,
+        },
+      );
     } catch (_) {
       // Missing NAS or a source change leaves the playback engine's track selected.
     } finally {
@@ -372,7 +382,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final scope = _active;
     final item = (await _item(scope)).item;
     _check(scope);
-    return scope.search.search(
+    final groups = await scope.search.search(
       SubtitleQuery(
         title: (item['SeriesName'] ?? item['Name'] ?? '').toString(),
         originalTitle: item['Type'] == 'Episode' ? null : item['OriginalTitle'] as String?,
@@ -384,6 +394,20 @@ class BoundSubtitlePanel implements SubtitlePanel {
       ),
       enabledSources: preferences().subtitleSources,
     );
+    var totalHits = 0;
+    for (final g in groups) {
+      totalHits += g.candidates.length;
+    }
+    EvDiagnosticsLog.instance.record(
+      'subtitle',
+      'online_search',
+      details: {
+        'itemId': scope.source.target.itemId,
+        'groups': groups.length,
+        'candidates': totalHits,
+      },
+    );
+    return groups;
   }
 
   bool Function() _selectionRequest(_PanelScope scope) {
@@ -409,6 +433,15 @@ class BoundSubtitlePanel implements SubtitlePanel {
       throw const EmbyViewFailure('下载的字幕无法读取。');
     }
     await _use(scope, document, language, SubtitleOrigin.online, select: select, candidateId: candidate.id);
+    EvDiagnosticsLog.instance.record(
+      'subtitle',
+      'online_applied',
+      details: {
+        'itemId': scope.source.target.itemId,
+        'source': candidate.source.name,
+        'lang': ?language,
+      },
+    );
   }
 
   Future<String> _register(
@@ -634,6 +667,16 @@ class BoundSubtitlePanel implements SubtitlePanel {
       cues: seed?.output?.cues ?? const [],
     );
     _emit();
+    EvDiagnosticsLog.instance.record(
+      'subtitle',
+      'ai_start',
+      details: {
+        'itemId': scope.source.target.itemId,
+        'gen': play.generation,
+        'resume': resume,
+        'startSec': start.inSeconds,
+      },
+    );
     final reader = StreamIterator(_audio(scope.source, start, play.duration, index, cancellation, covered: covered));
     var independent = false;
     try {
@@ -691,10 +734,29 @@ class BoundSubtitlePanel implements SubtitlePanel {
       );
       if (output != null && current()) {
         await _persistAi(scope, output, current, liveId: session.snapshot.phase == PlaybackPhase.ended ? null : liveId);
+        EvDiagnosticsLog.instance.record(
+          'subtitle',
+          'ai_completed',
+          details: {
+            'itemId': scope.source.target.itemId,
+            'gen': play.generation,
+            'cues': output.cues.length,
+          },
+        );
       }
     } catch (error) {
       if (current()) {
         final failure = error is EmbyViewFailure ? error : const EmbyViewFailure('无法启用此轮 AI 字幕。', retryable: true);
+        EvDiagnosticsLog.instance.record(
+          'subtitle',
+          'ai_failed',
+          level: 'WARN',
+          details: {
+            'itemId': scope.source.target.itemId,
+            'gen': play.generation,
+            'code': failure.code ?? 'ai_failed',
+          },
+        );
         _preparing = AiRun(generation: play.generation, state: AiRunState.failed, startedAt: start, failure: failure);
         _emit();
       }
@@ -758,6 +820,14 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final liveId = _liveTrackId;
     if (liveId != null) await _retireLive(liveId);
     _emit();
+    EvDiagnosticsLog.instance.record(
+      'subtitle',
+      'ai_cancelled',
+      details: {
+        if (scope != null) 'itemId': scope.source.target.itemId,
+        'persisted': output != null,
+      },
+    );
     bool current() => identical(scope, _scope) && timeline == _timeline && runNumber == _runNumber;
     if (scope != null && output != null) {
       await _persistAi(scope, output, current);

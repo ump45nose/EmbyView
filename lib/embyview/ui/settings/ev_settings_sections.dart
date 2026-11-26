@@ -176,12 +176,12 @@ class _EvAccountSettingsPaneState extends State<EvAccountSettingsPane> {
     }
   }
 
-  Future<void> _moveAddress(int index, int delta) async {
+  Future<void> _reorderAddresses(int oldIndex, int newIndex) async {
     final addrs = _addresses;
-    final target = index + delta;
-    if (_busy || index < 0 || index >= addrs.length || target < 0 || target >= addrs.length) return;
+    if (_busy || oldIndex < 0 || oldIndex >= addrs.length) return;
+    if (newIndex < 0 || newIndex >= addrs.length || newIndex == oldIndex) return;
     final ids = [for (final a in addrs) a.id];
-    ids.insert(target, ids.removeAt(index));
+    ids.insert(newIndex, ids.removeAt(oldIndex));
     await widget.onReorderAddresses?.call(ids);
   }
 
@@ -348,63 +348,96 @@ class _EvAccountSettingsPaneState extends State<EvAccountSettingsPane> {
           subtitle: serverDesc,
           trailing: EvStatusIndicator(key: const Key('ev_settings_connection_status'), label: connLabel, tone: connTone),
         ),
-        for (var i = 0; i < addresses.length; i++) ...[
-          () {
-            final addr = addresses[i];
-            final isActive = activeAddr?.id == addr.id;
-            final tagText = [
-              if (addr.label.trim().isNotEmpty) addr.label.trim(),
-              if (addr.subtitle.trim().isNotEmpty) addr.subtitle.trim(),
-            ].join(' · ');
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                EvSettingsRow(
-                  key: Key('ev_addr_row_${addr.id}'),
-                  leading: SizedBox(
-                    width: s.rem(1.25),
-                    child: isActive ? Center(child: EvIcon(EvIcons.check, size: s.rem(1.0), color: checkColor)) : null,
-                  ),
-                  title: formatServerAddressForDisplay(addr.url),
-                  subtitle: tagText.isNotEmpty ? tagText : null,
-                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                    if (isActive) ...[
-                      EvStatusIndicator(key: Key('ev_addr_active_${addr.id}'), label: '正在用', tone: EvStatusTone.ok),
-                      SizedBox(width: s.rem(0.625)),
-                    ] else if (widget.onActivateAddress != null) ...[
-                      EvButton.ghost(
-                        key: Key('ev_addr_use_${addr.id}'), small: true, label: '使用',
-                        onPressed: _busy ? null : () => unawaited(widget.onActivateAddress!(addr.id)),
-                      ),
-                      SizedBox(width: s.rem(0.375)),
-                    ],
-                    if (addresses.length > 1) ...[
-                      EvButton.ghost(
-                        key: Key('ev_addr_move_up_${addr.id}'), small: true, round: true, tooltip: '上移',
-                        onPressed: (!_busy && i > 0) ? () => unawaited(_moveAddress(i, -1)) : null,
-                        child: EvChevronIcon(up: true, size: s.rem(1.0), color: t.ink),
-                      ),
-                      SizedBox(width: s.rem(0.25)),
-                      EvButton.ghost(
-                        key: Key('ev_addr_move_down_${addr.id}'), small: true, round: true, tooltip: '下移',
-                        onPressed: (!_busy && i < addresses.length - 1) ? () => unawaited(_moveAddress(i, 1)) : null,
-                        child: EvChevronIcon(up: false, size: s.rem(1.0), color: t.ink),
-                      ),
-                      SizedBox(width: s.rem(0.375)),
-                    ],
-                    EvButton.ghost(
-                      key: Key('ev_addr_edit_${addr.id}'), small: true, round: true, tooltip: '修改',
-                      icon: EvIcons.edit,
-                      onPressed: _busy ? null : () => _editingAddressId == addr.id ? _closeAddressForm() : _startEditAddress(addr),
+        if (addresses.isNotEmpty)
+          ReorderableList(
+            key: const Key('ev_settings_addr_list'),
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            padding: EdgeInsets.zero,
+            itemCount: addresses.length,
+            onReorderItem: (oldIndex, newIndex) => unawaited(_reorderAddresses(oldIndex, newIndex)),
+            proxyDecorator: (child, _, _) {
+              final r = BorderRadius.circular(s.rem(0.75));
+              return DecoratedBox(
+                decoration: BoxDecoration(
+                  color: t.isPaper ? const Color(0xFFFFFFFF) : t.glassSolid,
+                  borderRadius: r,
+                  border: Border.all(color: t.line, width: 1),
+                  boxShadow: [
+                    BoxShadow(
+                      offset: const Offset(0, 6),
+                      blurRadius: 18,
+                      color: t.isPaper
+                          ? const Color.fromRGBO(20, 20, 19, 0.12)
+                          : const Color.fromRGBO(0, 0, 0, 0.36),
                     ),
-                  ]),
+                  ],
                 ),
-                if (_editingAddressId == addr.id)
-                  _buildAddressForm(t, s, isAdd: false, editId: addr.id, canDelete: addresses.length > 1),
-              ],
-            );
-          }(),
-        ],
+                child: ClipRRect(borderRadius: r, child: child),
+              );
+            },
+            itemBuilder: (context, i) {
+              final addr = addresses[i];
+              final isActive = activeAddr?.id == addr.id;
+              final canDrag = !_busy && addresses.length > 1;
+              final tagText = [
+                if (addr.label.trim().isNotEmpty) addr.label.trim(),
+                if (addr.subtitle.trim().isNotEmpty) addr.subtitle.trim(),
+              ].join(' · ');
+              return Column(
+                key: ValueKey<String>('ev_addr_item_${addr.id}'),
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (i > 0) SizedBox(height: 1, child: ColoredBox(color: t.line)),
+                  EvSettingsRow(
+                    key: Key('ev_addr_row_${addr.id}'),
+                    leading: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ReorderableDragStartListener(
+                          index: i,
+                          enabled: canDrag,
+                          child: _EvDragHandle(
+                            key: Key('ev_addr_drag_${addr.id}'),
+                            enabled: canDrag,
+                          ),
+                        ),
+                        SizedBox(width: s.rem(0.375)),
+                        SizedBox(
+                          width: s.rem(1.25),
+                          child: isActive
+                              ? Center(child: EvIcon(EvIcons.check, size: s.rem(1.0), color: checkColor))
+                              : null,
+                        ),
+                      ],
+                    ),
+                    title: formatServerAddressForDisplay(addr.url),
+                    subtitle: tagText.isNotEmpty ? tagText : null,
+                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                      if (isActive) ...[
+                        EvStatusIndicator(key: Key('ev_addr_active_${addr.id}'), label: '正在用', tone: EvStatusTone.ok),
+                        SizedBox(width: s.rem(0.625)),
+                      ] else if (widget.onActivateAddress != null) ...[
+                        EvButton.ghost(
+                          key: Key('ev_addr_use_${addr.id}'), small: true, label: '使用',
+                          onPressed: _busy ? null : () => unawaited(widget.onActivateAddress!(addr.id)),
+                        ),
+                        SizedBox(width: s.rem(0.375)),
+                      ],
+                      EvButton.ghost(
+                        key: Key('ev_addr_edit_${addr.id}'), small: true, round: true, tooltip: '修改',
+                        icon: EvIcons.edit,
+                        onPressed: _busy ? null : () => _editingAddressId == addr.id ? _closeAddressForm() : _startEditAddress(addr),
+                      ),
+                    ]),
+                  ),
+                  if (_editingAddressId == addr.id)
+                    _buildAddressForm(t, s, isAdd: false, editId: addr.id, canDelete: addresses.length > 1),
+                ],
+              );
+            },
+          ),
         if (_addingAddress)
           _buildAddressForm(t, s, isAdd: true, canDelete: false)
         else
@@ -1570,4 +1603,67 @@ class _EvAboutSettingsPaneState extends State<EvAboutSettingsPane> {
       ]),
     ]);
   }
+}
+
+class _EvDragHandle extends StatefulWidget {
+  const _EvDragHandle({super.key, required this.enabled});
+  final bool enabled;
+
+  @override
+  State<_EvDragHandle> createState() => _EvDragHandleState();
+}
+
+class _EvDragHandleState extends State<_EvDragHandle> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context);
+    final color = widget.enabled ? (_hovered ? t.ink2 : t.ink4) : t.ink4.withValues(alpha: t.ink4.a * 0.45);
+    return Semantics(
+      label: '拖动调整顺序',
+      enabled: widget.enabled,
+      child: MouseRegion(
+        cursor: widget.enabled ? SystemMouseCursors.grab : SystemMouseCursors.basic,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: ColoredBox(
+          color: evTransparent,
+          child: SizedBox(
+            width: s.rem(1.375),
+            height: s.rem(2.25),
+            child: Center(
+              child: CustomPaint(
+                size: Size(s.rem(0.625), s.rem(1.0)),
+                painter: _EvDragGripPainter(color: color),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EvDragGripPainter extends CustomPainter {
+  const _EvDragGripPainter({required this.color});
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    final r = (size.width * 0.14).clamp(1.0, 2.0);
+    final xs = [size.width * 0.28, size.width * 0.72];
+    final ys = [size.height * 0.2, size.height * 0.5, size.height * 0.8];
+    for (final y in ys) {
+      for (final x in xs) {
+        canvas.drawCircle(Offset(x, y), r, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_EvDragGripPainter old) => old.color != color;
 }

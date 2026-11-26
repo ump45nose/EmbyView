@@ -162,7 +162,12 @@ class _EvZonePageState extends State<EvZonePage> {
       final result = await dataService.zone(expectedZoneId);
       if (!mounted || token != _loadToken || widget.zoneId != expectedZoneId) return;
 
-      final recs = _resolveRecommendations(result), initialHero = recs.firstOrNull;
+      final recs = _resolveRecommendations(result);
+      final activeId = _activeHero?.card.id;
+      final nextHero = (activeId != null
+              ? recs.where((r) => r.card.id == activeId).firstOrNull
+              : null) ??
+          recs.firstOrNull;
       final ambient = EvTheme.of(context).zoneColor(result.zone.colorSlot);
       final plate = EvChromeTitlePlate(
         iconKey: result.zone.iconKey, title: result.zone.name, colorSlot: result.zone.colorSlot,
@@ -172,8 +177,8 @@ class _EvZonePageState extends State<EvZonePage> {
       _appliedAmbientColor = ambient;
       _previewCard.value = null;
 
-      setState(() { _zoneData = result; _activeHero = initialHero; _loading = false; _error = null; _randomError = null; });
-      scope.stage..setMode(EvStageMode.hero)..setAmbientColor(ambient)..setBaseBackdrop(initialHero?.card.art.stage);
+      setState(() { _zoneData = result; _activeHero = nextHero; _loading = false; _error = null; _randomError = null; });
+      scope.stage..setMode(EvStageMode.hero)..setAmbientColor(ambient)..setBaseBackdrop(nextHero?.card.art.stage);
       scope.shell.updateChrome(titlePlate: plate, rightActions: _buildRightActions(result));
     } catch (e) {
       if (!mounted || token != _loadToken || widget.zoneId != expectedZoneId) return;

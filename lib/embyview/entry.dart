@@ -23,6 +23,7 @@ import '../data/services/media_server_client_factory.dart';
 import '../data/services/theme_music_service.dart';
 import '../playback/aether_backend.dart';
 import 'data/accounts.dart';
+import 'data/build_info.dart';
 import 'data/diagnostics_exporter.dart';
 import 'data/emby_media_data.dart';
 import 'embyview.dart';
@@ -359,6 +360,16 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
     HardwareKeyboard.instance.addHandler(_onGlobalHardwareKey);
     _menuToken = EvMenuChannel.instance.registerHandler(
       (action, _) => _shell.handleMenuAction(action),
+    );
+    EvDiagnosticsLog.instance.record(
+      'app',
+      'shell_init',
+      details: {
+        'version': EvBuildInfo.current.version,
+        'destination': _shell.current.viewKey,
+        'signedIn': widget.services.signedIn,
+        'theme': _prefs.theme.name,
+      },
     );
     if (_s4Stack.isNotEmpty) _focusStageFourLater();
   }
@@ -1055,6 +1066,14 @@ Future<EmbyViewEntry> ensureMoonfinEmbyViewEntry() async {
 }
 
 Future<EmbyViewEntry> _createMoonfinEntry() async {
+  EvDiagnosticsLog.instance.record(
+    'app',
+    'entry_init',
+    details: {
+      'version': EvBuildInfo.current.version,
+      if (EvBuildInfo.current.commit.isNotEmpty) 'commit': EvBuildInfo.current.commit,
+    },
+  );
   final dependencies = GetIt.instance;
   final sessions = dependencies<SessionRepository>();
   late final EmbyViewEntry entry;
@@ -1332,6 +1351,14 @@ class EmbyViewEntry extends ChangeNotifier {
             immersion: created.immersion,
             subtitles: subtitles,
           );
+          EvDiagnosticsLog.instance.record(
+            'app',
+            'session_bound',
+            details: {
+              'phase': account.phase.name,
+              'subtitles': subtitles != null,
+            },
+          );
         } catch (_) {
           await created.dispose();
           rethrow;
@@ -1345,6 +1372,12 @@ class EmbyViewEntry extends ChangeNotifier {
                 'Unable to open this account.',
                 retryable: true,
               );
+        EvDiagnosticsLog.instance.record(
+          'app',
+          'session_bind_failed',
+          level: 'WARN',
+          details: {'code': _failure?.code ?? 'unknown'},
+        );
       }
       if (!_closed && revision == _revision) notifyListeners();
     });
@@ -1494,6 +1527,7 @@ class _EmbyViewSplashHostState extends State<EmbyViewSplashHost> {
   @override
   void initState() {
     super.initState();
+    EvDiagnosticsLog.instance.record('app', 'splash_init');
     if (_effectivePrefs == null) {
       unawaited(_openPrefs());
     }
@@ -1591,6 +1625,11 @@ class _EmbyViewLoginHostState extends State<EmbyViewLoginHost> {
       unawaited(_openPrefs());
     }
     _menuToken = EvMenuChannel.instance.registerHandler(_handleMenuAction);
+    EvDiagnosticsLog.instance.record(
+      'app',
+      'login_init',
+      details: {'step': widget.initialStep.name},
+    );
   }
 
   bool _handleMenuAction(String action, EvMenuActionSource _) {

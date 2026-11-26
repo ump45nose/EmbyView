@@ -577,10 +577,33 @@ void main() {
         expect(find.text('正在用'), findsOneWidget);
         expect(find.text('https://nas.tail-example.ts.net'), findsOneWidget);
 
-        // Reorder: move ts up
-        await tester.tap(find.byKey(const Key('ev_addr_move_up_ts')));
+        // No up/down arrow buttons; leading drag handles reorder via ReorderableList
+        expect(find.byKey(const Key('ev_addr_move_up_lan')), findsNothing);
+        expect(find.byKey(const Key('ev_addr_move_down_lan')), findsNothing);
+        expect(find.byKey(const Key('ev_addr_move_up_ts')), findsNothing);
+        expect(find.byKey(const Key('ev_addr_move_down_ts')), findsNothing);
+        expect(find.byKey(const Key('ev_addr_drag_lan')), findsOneWidget);
+        expect(find.byKey(const Key('ev_addr_drag_ts')), findsOneWidget);
+
+        // Drag ts handle smoothly upward to lan row to trigger reorderServerAddresses(['ts', 'lan'])
+        final tsDragCenter = tester.getCenter(find.byKey(const Key('ev_addr_drag_ts')));
+        final lanDragCenter = tester.getCenter(find.byKey(const Key('ev_addr_drag_lan')));
+        final dragGesture = await tester.startGesture(tsDragCenter);
+        await tester.pump(const Duration(milliseconds: 50));
+        const steps = 6;
+        for (var step = 1; step <= steps; step++) {
+          final dy = tsDragCenter.dy + (lanDragCenter.dy - tsDragCenter.dy) * (step / steps);
+          await dragGesture.moveTo(Offset(lanDragCenter.dx, dy));
+          await tester.pump(const Duration(milliseconds: 30));
+        }
+        await dragGesture.up();
         await tester.pumpAndSettle();
+        expect(accounts.reorderAddressCalls, isNotEmpty);
         expect(accounts.reorderAddressCalls.last, ['ts', 'lan']);
+        expect(
+          tester.getTopLeft(find.byKey(const Key('ev_addr_row_ts'))).dy,
+          lessThan(tester.getTopLeft(find.byKey(const Key('ev_addr_row_lan'))).dy),
+        );
 
         // Add address with validation error then valid URL
         await tester.tap(find.byKey(const Key('ev_settings_add_addr')));

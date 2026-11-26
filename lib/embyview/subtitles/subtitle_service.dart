@@ -12,6 +12,7 @@ import 'package:server_emby/server_emby.dart';
 import '../../auth/repositories/server_repository.dart';
 import '../../auth/store/authentication_store.dart';
 import '../../util/server_url.dart';
+import '../data/diagnostics_exporter.dart';
 import '../embyview.dart';
 import '../playback/playback_subtitle_input.dart';
 import '../prefs/machine_preferences.dart';
@@ -52,6 +53,7 @@ class SubtitleRuntime {
     _playback = [playback.state.playingStream.listen(observe), playback.state.bufferingStream.listen(observe)];
     observe(false);
     unawaited(queue.then<void>((_) {}, onError: (Object _) {}));
+    EvDiagnosticsLog.instance.record('subtitle', 'runtime_init');
   }
 
   final MachinePreferences preferences;
@@ -244,8 +246,15 @@ class AccountSubtitles implements EmbyViewSubtitles {
   }
 
   @override
-  Future<SubtitleAvailability> availability(String itemId) =>
-      _guard(() async => library.availability(await library.item(itemId), store));
+  Future<SubtitleAvailability> availability(String itemId) => _guard(() async {
+    final result = await library.availability(await library.item(itemId), store);
+    EvDiagnosticsLog.instance.record(
+      'subtitle',
+      'availability',
+      details: {'itemId': itemId, 'chinese': result.chinese.name},
+    );
+    return result;
+  });
 
   @override
   SubtitlePanel bind(PlaybackSession session) {
@@ -256,23 +265,36 @@ class AccountSubtitles implements EmbyViewSubtitles {
     final input = session as PlaybackSubtitleInput;
     return _panels.putIfAbsent(
       session,
-      () => BoundSubtitlePanel(
-        session: session,
-        input: input,
-        store: store,
-        loadItem: library.item,
-        loadDocument: library.document,
-        sources: runtime.sources,
-        processor: runtime.processor,
-        preferences: () => runtime.preferences.current,
-        checkAi: () async {
-          final (budget, reason) = await (await runtime.ledger).episodeBudget();
-          if (budget != BudgetState.available) {
-            throw EmbyViewFailure(reason ?? '暂时无法启动 AI 字幕。', retryable: true, code: budget.name);
-          }
-        },
-        onClosed: () => _panels.remove(session),
-      ),
+      () {
+        EvDiagnosticsLog.instance.record(
+          'subtitle',
+          'panel_bound',
+          details: {'itemId': session.snapshot.target.itemId},
+        );
+        return BoundSubtitlePanel(
+          session: session,
+          input: input,
+          store: store,
+          loadItem: library.item,
+          loadDocument: library.document,
+          sources: runtime.sources,
+          processor: runtime.processor,
+          preferences: () => runtime.preferences.current,
+          checkAi: () async {
+            final (budget, reason) = await (await runtime.ledger).episodeBudget();
+            if (budget != BudgetState.available) {
+              EvDiagnosticsLog.instance.record(
+                'subtitle',
+                'ai_budget_blocked',
+                level: 'WARN',
+                details: {'state': budget.name},
+              );
+              throw EmbyViewFailure(reason ?? '暂时无法启动 AI 字幕。', retryable: true, code: budget.name);
+            }
+          },
+          onClosed: () => _panels.remove(session),
+        );
+      },
     );
   }
 
@@ -283,7 +305,17 @@ class AccountSubtitles implements EmbyViewSubtitles {
   Future<String> queueSeason(SeasonQuote quote) => _guard(() async {
     final request = await _season(quote.seriesId, quote.seasonId);
     if (_closed.isCompleted) throw _expired;
-    return (await runtime.queue).queueSeason(request, quote);
+    final jobId = await (await runtime.queue).queueSeason(request, quote);
+    EvDiagnosticsLog.instance.record(
+      'subtitle',
+      'ai_season_queued',
+      details: {
+        'seriesId': quote.seriesId,
+        'seasonId': quote.seasonId,
+        'episodes': request.episodes.length,
+      },
+    );
+    return jobId;
   });
 
   Future<SubtitleSeasonRequest> _season(String seriesId, String seasonId) async {
@@ -312,8 +344,14 @@ class AccountSubtitles implements EmbyViewSubtitles {
   }
 
   @override
-  Future<void> cancelJob(String jobId, {String? episodeId}) =>
-      _guard(() async => (await runtime.queue).cancelJob(jobId, episodeId: episodeId));
+  Future<void> cancelJob(String jobId, {String? episodeId}) => _guard(() async {
+    await (await runtime.queue).cancelJob(jobId, episodeId: episodeId);
+    EvDiagnosticsLog.instance.record(
+      'subtitle',
+      'ai_job_cancelled',
+      details: {'jobId': jobId, 'episodeId': ?episodeId},
+    );
+  });
 
   Future<void> close() async {
     if (_closed.isCompleted) return;

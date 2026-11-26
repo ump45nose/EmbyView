@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,6 +10,191 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../data/services/log_service.dart';
 import 'build_info.dart';
+
+/// Lightweight daily-rolling local diagnostic logger for EmbyView.
+///
+/// Writes sanitized structured summaries (never credentials, passwords, tokens,
+/// or raw server addresses) to
+/// `Application Support/<bundleId>/embyview_logs/diag-YYYY-MM-DD.log` and
+/// automatically prunes log files older than [retention] (7 days by default).
+class EvDiagnosticsLog {
+  EvDiagnosticsLog({
+    this.directoryLoader,
+    DateTime Function()? now,
+    this.retention = EvDiagnosticsExporter.defaultWindow,
+    this.maxDailyFileBytes = defaultMaxDailyFileBytes,
+  }) : _customNow = now != null,
+       _now = now ?? DateTime.now;
+
+  /// Process-wide diagnostic logger shared by EmbyView runtime modules.
+  static final EvDiagnosticsLog instance = EvDiagnosticsLog();
+
+  static const String directoryName = 'embyview_logs';
+  static const int defaultMaxDailyFileBytes = 4 * 1024 * 1024;
+  static final RegExp _dailyFileRe = RegExp(r'^diag-(\d{4})-(\d{2})-(\d{2})\.log$');
+
+  final Future<Directory?> Function()? directoryLoader;
+  final bool _customNow;
+  final DateTime Function() _now;
+  final Duration retention;
+  final int maxDailyFileBytes;
+
+  Future<void> _queue = Future<void>.value();
+  String? _lastPrunedDay;
+
+  /// Formats a daily log filename (`diag-YYYY-MM-DD.log`) for [timestamp] in UTC.
+  static String dailyFileName(DateTime timestamp) {
+    final utc = timestamp.toUtc();
+    final y = utc.year.toString().padLeft(4, '0');
+    final m = utc.month.toString().padLeft(2, '0');
+    final d = utc.day.toString().padLeft(2, '0');
+    return 'diag-$y-$m-$d.log';
+  }
+
+  /// Parses the UTC end-of-day boundary of a `diag-YYYY-MM-DD.log` filename, or
+  /// returns null if [fileName] does not match the rolling naming pattern.
+  static DateTime? parseDailyFileEndUtc(String fileName) {
+    final match = _dailyFileRe.firstMatch(fileName);
+    if (match == null) return null;
+    final y = int.tryParse(match.group(1)!);
+    final m = int.tryParse(match.group(2)!);
+    final d = int.tryParse(match.group(3)!);
+    if (y == null || m == null || d == null) return null;
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return DateTime.utc(y, m, d, 23, 59, 59, 999);
+  }
+
+  /// Resolves the primary `embyview_logs` directory under Application Support.
+  Future<Directory?> resolveDirectory() async {
+    if (directoryLoader != null) {
+      try {
+        return await directoryLoader!();
+      } catch (_) {
+        return null;
+      }
+    }
+    try {
+      final support = await getApplicationSupportDirectory();
+      return Directory(p.join(support.path, directoryName));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Appends a structured diagnostic event asynchronously without blocking UI.
+  /// All fields are sanitized before persisting to disk.
+  void record(
+    String category,
+    String event, {
+    String level = 'INFO',
+    Map<String, Object?>? details,
+    Object? error,
+  }) {
+    final ts = _now().toUtc();
+    final buf = StringBuffer()
+      ..write(ts.toIso8601String())
+      ..write(' ')
+      ..write(level.toUpperCase().padRight(5))
+      ..write(' [')
+      ..write(category)
+      ..write('] ')
+      ..write(event);
+    if (details != null && details.isNotEmpty) {
+      for (final entry in details.entries) {
+        final v = entry.value;
+        if (v == null) continue;
+        final text = v.toString().replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+        if (text.isEmpty) continue;
+        buf
+          ..write(' ')
+          ..write(entry.key)
+          ..write('=')
+          ..write(text);
+      }
+    }
+    if (error != null) {
+      final errText = error.toString().replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+      if (errText.isNotEmpty) {
+        buf
+          ..write(' error=')
+          ..write(errText);
+      }
+    }
+    final sanitized = EvDiagnosticsExporter.sanitizeDiagnosticText(buf.toString());
+    _enqueue(() => _writeLine(ts, sanitized));
+  }
+
+  /// Triggers an immediate retention sweep for logs older than [retention].
+  Future<void> pruneExpiredLogs({DateTime? now}) {
+    final reference = (now ?? _now()).toUtc();
+    return _enqueue(() async {
+      final dir = await resolveDirectory();
+      if (dir == null) return;
+      await _pruneDirectory(dir, reference);
+    });
+  }
+
+  /// Waits for all queued writes and pruning operations to reach disk.
+  Future<void> flush() => _queue;
+
+  Future<void> _enqueue(Future<void> Function() task) {
+    final next = _queue.then((_) => task()).catchError((Object _) {});
+    _queue = next;
+    return next;
+  }
+
+  Future<void> _writeLine(DateTime ts, String line) async {
+    final dir = await resolveDirectory();
+    if (dir == null) return;
+    try {
+      await dir.create(recursive: true);
+      final dayFile = dailyFileName(ts);
+      if (_lastPrunedDay != dayFile) {
+        _lastPrunedDay = dayFile;
+        await _pruneDirectory(dir, ts);
+      }
+      final file = File(p.join(dir.path, dayFile));
+      if (await file.exists()) {
+        final len = await file.length();
+        if (len >= maxDailyFileBytes) return;
+      }
+      await file.writeAsString('$line\n', mode: FileMode.append, flush: true);
+      if (_customNow) {
+        try {
+          await file.setLastModified(ts);
+        } catch (_) {}
+      }
+    } catch (_) {
+      // Never propagate disk I/O errors into user flows or tests.
+    }
+  }
+
+  Future<void> _pruneDirectory(Directory dir, DateTime reference) async {
+    try {
+      if (!await dir.exists()) return;
+      final cutoff = reference.subtract(retention);
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = p.basename(entity.path);
+        final dayEnd = parseDailyFileEndUtc(name);
+        if (dayEnd == null) continue;
+        final expiredByName = dayEnd.isBefore(cutoff);
+        var expiredByMtime = false;
+        if (!expiredByName) {
+          try {
+            final stat = await entity.stat();
+            expiredByMtime = stat.modified.toUtc().isBefore(cutoff);
+          } catch (_) {}
+        }
+        if (expiredByName || expiredByMtime) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+}
 
 /// Prompts for a save location and exports sanitized diagnostic logs via
 /// [EvDiagnosticsExporter]. Shared by the macOS menu item and Settings → About.
@@ -59,6 +245,7 @@ class EvDiagnosticsExporter {
     this.buildInfo = EvBuildInfo.current,
     this.logDirectoriesLoader,
     this.recentInMemoryEntriesLoader,
+    this.diagnosticsLog,
     this.now = DateTime.now,
   });
 
@@ -68,6 +255,7 @@ class EvDiagnosticsExporter {
   final EvBuildInfo buildInfo;
   final Future<List<Directory>> Function()? logDirectoriesLoader;
   final List<({DateTime time, String line})> Function()? recentInMemoryEntriesLoader;
+  final EvDiagnosticsLog? diagnosticsLog;
   final DateTime Function() now;
 
   // --- Pure sanitization patterns ---
@@ -241,12 +429,25 @@ class EvDiagnosticsExporter {
     return mb >= 100 ? '${mb.round()} MB' : '${mb.toStringAsFixed(1)} MB';
   }
 
+  Future<void> _flushActiveLog(List<Directory>? override) async {
+    if (diagnosticsLog != null) {
+      await diagnosticsLog!.flush();
+    } else if (override == null && logDirectoriesLoader == null) {
+      await EvDiagnosticsLog.instance.flush();
+    }
+  }
+
   Future<List<Directory>> _resolveLogDirectories(List<Directory>? override) async {
     if (override != null) return override;
     if (logDirectoriesLoader != null) return logDirectoriesLoader!();
+    if (diagnosticsLog != null) {
+      final dir = await diagnosticsLog!.resolveDirectory();
+      return dir == null ? const [] : [dir];
+    }
     try {
       final support = await getApplicationSupportDirectory();
       return [
+        Directory(p.join(support.path, EvDiagnosticsLog.directoryName)),
         Directory(p.join(support.path, 'EmbyView', 'logs')),
         Directory(p.join(support.path, 'logs')),
       ];
@@ -283,6 +484,8 @@ class EvDiagnosticsExporter {
           if (ext.isNotEmpty && !_logExtensions.contains(ext)) continue;
           final canonical = p.normalize(entity.path);
           if (!seen.add(canonical)) continue;
+          final dayEnd = EvDiagnosticsLog.parseDailyFileEndUtc(p.basename(entity.path));
+          if (dayEnd != null && dayEnd.isBefore(cutoff)) continue;
           final stat = await entity.stat();
           if (stat.modified.isBefore(cutoff)) continue;
           files.add((file: entity, length: stat.size, modified: stat.modified));
@@ -301,6 +504,7 @@ class EvDiagnosticsExporter {
     Duration window = defaultWindow,
     List<Directory>? logDirectories,
   }) async {
+    await _flushActiveLog(logDirectories);
     final reference = now ?? this.now();
     final cutoff = reference.subtract(window);
     final dirs = await _resolveLogDirectories(logDirectories);
@@ -326,6 +530,7 @@ class EvDiagnosticsExporter {
     List<Directory>? logDirectories,
     EvBuildInfo? buildInfo,
   }) async {
+    await _flushActiveLog(logDirectories);
     final reference = now ?? this.now();
     final cutoff = reference.subtract(window);
     final info = buildInfo ?? this.buildInfo;

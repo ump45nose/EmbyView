@@ -67,20 +67,41 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
       widget.pauseAutoRotate?.addListener(_onPauseChanged);
     }
     final oldRecs = oldWidget.recommendations, newRecs = widget.recommendations;
-    if (newRecs.isEmpty || _activeIndex >= newRecs.length) _activeIndex = 0;
-    final listChanged = oldRecs.length != newRecs.length ||
-        (newRecs.isNotEmpty && oldRecs.isNotEmpty && oldRecs.first.card.id != newRecs.first.card.id);
-    if (listChanged && newRecs.isNotEmpty) {
+    final oldActiveRec = (_activeIndex >= 0 && _activeIndex < oldRecs.length)
+        ? oldRecs[_activeIndex]
+        : null;
+    var activeChanged = false;
+    var restartRotation = false;
+    if (newRecs.isEmpty) {
       _activeIndex = 0;
-      _failedLogoKey = null;
+    } else {
+      final preservedIdx = oldActiveRec == null
+          ? -1
+          : newRecs.indexWhere((r) => r.card.id == oldActiveRec.card.id);
+      if (preservedIdx >= 0) {
+        _activeIndex = preservedIdx;
+        if (stageArtworkKey(oldActiveRec!.card.art.stage) !=
+            stageArtworkKey(newRecs[preservedIdx].card.art.stage)) {
+          activeChanged = true;
+        }
+      } else {
+        _activeIndex = 0;
+        _failedLogoKey = null;
+        activeChanged = true;
+        restartRotation = true;
+      }
+    }
+    if (activeChanged && newRecs.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && widget.recommendations.isNotEmpty) {
-          widget.onActiveChanged?.call(widget.recommendations[_activeIndex]);
+          widget.onActiveChanged?.call(
+            widget.recommendations[_activeIndex.clamp(0, widget.recommendations.length - 1)],
+          );
         }
       });
     }
     if (oldWidget.previewCard?.id != widget.previewCard?.id) _failedLogoKey = null;
-    _syncRotation(restart: listChanged || (oldWidget.previewCard != null && widget.previewCard == null));
+    _syncRotation(restart: restartRotation || (oldWidget.previewCard != null && widget.previewCard == null));
   }
 
   bool get _shouldRotate =>

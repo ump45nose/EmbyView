@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -228,7 +230,7 @@ void main() {
             mode,
             SingleChildScrollView(
               child: EvAboutSettingsPane(
-                buildInfo: const EvBuildInfo(version: '3.1.1', commit: '615880f'),
+                buildInfo: const EvBuildInfo(version: '1.0.0', commit: '615880f'),
                 diagnosticsExporter: exporter,
                 onExportDiagnostics: () async {
                   exported = true;
@@ -249,7 +251,7 @@ void main() {
         expect(find.byKey(const Key('ev_about_app_icon')), findsOneWidget);
         expect(find.byType(Image), findsNothing);
         expect(find.text('EmbyView'), findsOneWidget);
-        expect(find.text('版本 3.1.1（615880f）'), findsOneWidget);
+        expect(find.text('版本 1.0.0（615880f）'), findsOneWidget);
         expect(find.text('基于 Moonfin 3.1.1'), findsOneWidget);
         expect(find.text('GPL-3.0'), findsOneWidget);
         expect(find.text('AetherEngine · Anime4K'), findsOneWidget);
@@ -323,6 +325,59 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('下载失败'), findsOneWidget);
+    });
+
+    testWidgets('displays real non-zero log size after EvDiagnosticsLog records events', (tester) async {
+      messenger.setMockMethodCallHandler(asrChannel, (call) async {
+        if (call.method == 'modelStatus') {
+          return {
+            'state': AsrModelState.ready.name,
+            'receivedBytes': 574000000,
+            'totalBytes': 574000000,
+          };
+        }
+        return null;
+      });
+
+      late Directory tempDir;
+      late EvDiagnosticsLog log;
+      await tester.runAsync(() async {
+        tempDir = await Directory.systemTemp.createTemp('ev_about_log_test_');
+        log = EvDiagnosticsLog(directoryLoader: () async => tempDir);
+        log.record('app', 'shell_init', details: {'version': '1.0.0'});
+        log.record('connection', 'failover_switched', details: {'from': '内网', 'to': 'Tailscale'});
+        log.record('playback', 'open', details: {'itemId': '22749'});
+        log.record('subtitle', 'load_nas', details: {'itemId': '22749', 'nasTracks': 2});
+        await log.flush();
+      });
+      addTearDown(() async {
+        if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+      });
+
+      final exporter = EvDiagnosticsExporter(
+        diagnosticsLog: log,
+        recentInMemoryEntriesLoader: () => const [],
+      );
+
+      await tester.pumpWidget(
+        _wrap(
+          ThemeMode.cinema,
+          SingleChildScrollView(
+            child: EvAboutSettingsPane(diagnosticsExporter: exporter),
+          ),
+        ),
+      );
+      for (var i = 0; i < 20; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+        await tester.pump();
+        final current = tester.widget<Text>(find.byKey(const Key('ev_about_log_size'))).data;
+        if (current != null && current != '计算中…') break;
+      }
+
+      final sizeWidget = tester.widget<Text>(find.byKey(const Key('ev_about_log_size')));
+      expect(sizeWidget.data, isNotNull);
+      expect(sizeWidget.data, isNot('0 B'));
+      expect(sizeWidget.data, isNot('计算中…'));
     });
   });
 }

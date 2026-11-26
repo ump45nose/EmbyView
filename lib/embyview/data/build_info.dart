@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 /// Build-time version and commit metadata injected via `--dart-define`:
-/// - `EMBYVIEW_VERSION` (e.g. `3.1.1`)
+/// - `EMBYVIEW_VERSION` (e.g. `1.0.0`)
 /// - `EMBYVIEW_COMMIT` (e.g. `615880f`)
 @immutable
 class EvBuildInfo {
@@ -17,7 +17,7 @@ class EvBuildInfo {
   /// Current build metadata resolved from compile-time environment defines.
   static const EvBuildInfo current = EvBuildInfo();
 
-  static const String defaultVersion = '3.1.1';
+  static const String defaultVersion = '1.0.0';
   static const String defaultUpstreamBase = 'Moonfin 3.1.1';
   static const String defaultLicense = 'GPL-3.0';
   static const String defaultSourceRepoUrl = 'https://github.com/ump45nose/EmbyView';
@@ -53,7 +53,7 @@ class EvBuildInfo {
     return trimmed;
   }
 
-  /// Display string for the About page (e.g. `版本 3.1.1（615880f）`).
+  /// Display string for the About page (e.g. `版本 1.0.0（615880f）`).
   String get formattedVersion {
     final c = commit;
     return c.isNotEmpty ? '版本 $version（$c）' : '版本 $version';
