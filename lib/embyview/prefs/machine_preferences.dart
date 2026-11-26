@@ -202,12 +202,23 @@ class MachinePreferences implements EmbyViewPreferences {
     _changes.add(_current);
   }
 
-  String _secretKey(SecretKind kind) => 'embyview.secret.${kind.name}';
+  String _secretKey(SecretKind kind, [Uri? translationBase]) {
+    final name = 'embyview.secret.${kind.name}';
+    if (kind != SecretKind.openAi) return name;
+    final origin = (translationBase ?? parseTranslationBaseUrl(_current.translationBaseUrl))?.origin;
+    if (origin == null) throw const EmbyViewFailure('请在设置中填写有效的翻译服务地址。', code: 'subtitle_translation_url');
+    // Existing installations used the unqualified key for the official OpenAI service.
+    return origin == Uri.parse(defaultTranslationBaseUrl).origin ? name : '$name.$origin';
+  }
+
+  Future<String?> readTranslationKey(Uri base) => _readKey(_secretKey(SecretKind.openAi, base));
 
   /// Internal subtitle/provider port; never exported through the UI contract.
-  Future<String?> readSecret(SecretKind kind) async {
+  Future<String?> readSecret(SecretKind kind) => _readKey(_secretKey(kind));
+
+  Future<String?> _readKey(String key) async {
     try {
-      return await _secrets.read(key: _secretKey(kind));
+      return await _secrets.read(key: key);
     } catch (_) {
       throw const EmbyViewFailure('无法读取钥匙串，请检查系统授权。', retryable: true);
     }
@@ -221,11 +232,12 @@ class MachinePreferences implements EmbyViewPreferences {
 
   @override
   Future<void> setSecret(SecretKind kind, String? value) async {
+    final key = _secretKey(kind);
     try {
       if (value == null || value.trim().isEmpty) {
-        await _secrets.delete(key: _secretKey(kind));
+        await _secrets.delete(key: key);
       } else {
-        await _secrets.write(key: _secretKey(kind), value: value.trim());
+        await _secrets.write(key: key, value: value.trim());
       }
     } catch (_) {
       throw const EmbyViewFailure('无法保存钥匙串，请检查系统授权。', retryable: true);

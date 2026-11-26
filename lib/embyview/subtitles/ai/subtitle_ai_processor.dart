@@ -15,31 +15,23 @@ import 'subtitle_ai_types.dart';
 const _cueBatch = 48;
 const _maxOutputTokens = 8192;
 
-typedef _Price = ({double input, double output});
+typedef SubtitleTranslationPrice = ({double input, double output});
 
 // USD per million tokens is also microdollars per token.
-const _prices = <String, _Price>{'gpt-5.4-mini': (input: 0.75, output: 4.5), 'gpt-6-luna': (input: 0.1, output: 0.5)};
+const _prices = <String, SubtitleTranslationPrice>{
+  'gpt-5.4-mini': (input: 0.75, output: 4.5),
+  'gpt-6-luna': (input: 0.1, output: 0.5),
+};
 
-Uri? _translationBase(LocalPreferences prefs) {
-  final base = Uri.tryParse(prefs.translationBaseUrl.trim().replaceFirst(RegExp(r'/+$'), ''));
-  if (base == null ||
-      !['https', 'http'].contains(base.scheme) ||
-      base.host.isEmpty ||
-      base.userInfo.isNotEmpty ||
-      base.hasQuery ||
-      base.hasFragment) {
-    return null;
-  }
-  return base;
-}
+SubtitleTranslationPrice? subtitleTranslationPrice(LocalPreferences prefs) =>
+    parseTranslationBaseUrl(prefs.translationBaseUrl) == Uri.parse(defaultTranslationBaseUrl)
+    ? _prices[prefs.translationModel.trim()]
+    : null;
 
-_Price? _price(LocalPreferences prefs) =>
-    _translationBase(prefs) == Uri.parse(defaultTranslationBaseUrl) ? _prices[prefs.translationModel.trim()] : null;
-
-bool isSubtitleTranslationMetered(LocalPreferences prefs) => _price(prefs) != null;
+bool isSubtitleTranslationMetered(LocalPreferences prefs) => subtitleTranslationPrice(prefs) != null;
 
 int estimateSubtitleTranslationMicros(LocalPreferences prefs, Duration duration) {
-  final price = _price(prefs);
+  final price = subtitleTranslationPrice(prefs);
   if (price == null) return 0;
   // Approximate dialogue input (including prompt and line IDs) and output per minute.
   final minutes = duration.inMicroseconds / const Duration(minutes: 1).inMicroseconds;
@@ -60,14 +52,14 @@ LocalPreferences _defaultPreferences() => const LocalPreferences();
 
 final class SubtitleAiProcessor {
   SubtitleAiProcessor({
-    required this.readSecret,
+    required this.readTranslationKey,
     required this.meter,
     this.asr = const LocalSubtitleAsr(),
     this.preferences = _defaultPreferences,
     http.Client Function()? clientFactory,
   }) : _clientFactory = clientFactory ?? http.Client.new;
 
-  final Future<String?> Function(SecretKind) readSecret;
+  final Future<String?> Function(Uri base) readTranslationKey;
   final LocalPreferences Function() preferences;
   final LocalSubtitleAsr asr;
   final SubtitleAiMeter meter;
@@ -80,21 +72,27 @@ final class SubtitleAiProcessor {
   }
 
   Future<_Translation> _translation(LocalPreferences prefs) async {
-    final base = _translationBase(prefs);
+    final base = parseTranslationBaseUrl(prefs.translationBaseUrl);
     final model = prefs.translationModel.trim();
     if (base == null) throw const EmbyViewFailure('请在设置中填写有效的翻译服务地址。', code: 'subtitle_translation_url');
     if (model.isEmpty) throw const EmbyViewFailure('请在设置中填写翻译模型名称。', code: 'subtitle_translation_model');
-    final key = (await readSecret(SecretKind.openAi))?.trim();
+    final key = (await readTranslationKey(base))?.trim();
     if (key == null || key.isEmpty) {
       throw const EmbyViewFailure('请在设置的 AI 字幕中填写翻译密钥。', code: 'subtitle_ai_credentials');
     }
-    return (url: base.replace(path: '${base.path}/chat/completions'), model: model, key: key, price: _price(prefs));
+    return (
+      url: base.replace(path: '${base.path}/chat/completions'),
+      model: model,
+      key: key,
+      price: subtitleTranslationPrice(prefs),
+    );
   }
 
   Future<SubtitleAiSegment> process(
     SubtitleAudioSegment segment, {
     required SubtitleAiCancellation cancellation,
     String? language,
+    LocalPreferences? translationPreferences,
     String mediaContext = '',
     void Function(EpisodeJobState)? onStage,
   }) async {
@@ -102,7 +100,7 @@ final class SubtitleAiProcessor {
     if (segment.duration <= Duration.zero || segment.pcm.length % 4 != 0 || segment.start.isNegative) {
       throw const EmbyViewFailure('音频片段没有可用的时间或样本。', code: 'subtitle_audio_invalid');
     }
-    final config = await _translation(preferences());
+    final config = await _translation(translationPreferences ?? preferences());
     cancellation.check();
     onStage?.call(EpisodeJobState.transcribing);
     final heard = await asr.transcribe(segment, cancellation);
@@ -247,7 +245,7 @@ final class SubtitleAiProcessor {
 
 const _malformed = EmbyViewFailure('AI 服务返回了不可用的字幕结果。', retryable: true, code: 'subtitle_ai_response');
 
-typedef _Translation = ({Uri url, String model, String key, _Price? price});
+typedef _Translation = ({Uri url, String model, String key, SubtitleTranslationPrice? price});
 
 const _instructions =
     '将输入数组中每条台词翻译为自然的简体中文。使用该作品中人物、地名与招式的惯用译名，结合上下文纠正听写中的同音错误。'

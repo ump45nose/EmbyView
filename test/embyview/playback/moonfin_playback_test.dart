@@ -325,7 +325,7 @@ void main() {
         loadDocument: (_, _) async => SubtitleDocument.parse(utf8.encode(first), format: 'srt', language: 'zh'),
         sources: sources,
         processor: SubtitleAiProcessor(
-          readSecret: (_) async => null,
+          readTranslationKey: (_) async => null,
           meter: <T>(_, invoke) async => (await invoke()).value,
         ),
         preferences: () => LocalPreferences(autoSelectChineseSubtitle: autoSelect),

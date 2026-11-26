@@ -143,6 +143,44 @@ void main() {
     await expected;
   });
 
+  test('a settings change during key lookup cannot redirect that credential', () async {
+    const official = LocalPreferences();
+    const gateway = LocalPreferences(translationBaseUrl: 'https://gateway.example/v1');
+    var current = official;
+    final started = Completer<void>(), resume = Completer<void>();
+    final calls = <(String, String?)>[];
+    final ai = SubtitleAiProcessor(
+      preferences: () => current,
+      readTranslationKey: (base) async {
+        if (!started.isCompleted) {
+          started.complete();
+          await resume.future;
+        }
+        return base.host;
+      },
+      meter: <T>(_, invoke) async => (await invoke()).value,
+      clientFactory: () => MockClient((request) async {
+        calls.add((request.url.host, request.headers['Authorization']));
+        return _openAiTranslation([
+          {'id': 0, 'text': '你好'},
+        ]);
+      }),
+    );
+    final first = ai.process(_audio(0), cancellation: SubtitleAiCancellation());
+    await started.future;
+    current = gateway;
+    resume.complete();
+    await first;
+    await ai.process(_audio(1), cancellation: SubtitleAiCancellation());
+    current = official;
+    await ai.process(_audio(2), cancellation: SubtitleAiCancellation());
+    expect(calls, [
+      ('api.openai.com', 'Bearer api.openai.com'),
+      ('gateway.example', 'Bearer gateway.example'),
+      ('api.openai.com', 'Bearer api.openai.com'),
+    ]);
+  });
+
   test('translation uses the current provider, and IDs restore original line order', () async {
     final charges = <(String?, int)>[];
     final ai = _processor((request) async {
@@ -357,7 +395,7 @@ SubtitleAiProcessor _processor(
   }
 
   return SubtitleAiProcessor(
-    readSecret: (_) async => key,
+    readTranslationKey: (_) async => key,
     preferences: () => preferences,
     meter: meter,
     clientFactory: () => MockClient(decide),

@@ -77,6 +77,18 @@ void main() {
     expect((await a.usage()).unmeteredCalls, 1);
     mounted = true;
     final refreshed = await a.usage();
+    final shared = Directory('${nas.path}/.embyview/usage/${refreshed.month}');
+    final localRecord = jsonDecode(await File('${shared.path}/mac-pro.json').readAsString()) as Map;
+    expect(localRecord.containsKey('unmetered'), isFalse);
+    await File('${shared.path}/old-version.json').writeAsString(
+      jsonEncode({
+        'calls': {
+          'unmetered:custom': [0, null],
+        },
+        'completed': [],
+        'unmetered': ['unmetered:custom'],
+      }),
+    );
     final other = await ledger('mac-air').usage();
     expect([refreshed.usedMicros, refreshed.unmeteredCalls, other.usedMicros, other.unmeteredCalls], [5, 1, 5, 1]);
   });
@@ -178,6 +190,72 @@ void main() {
     await queue.close();
   });
 
+  test('a zero quote pauses on a price increase mid-episode and after restart until confirmed', () async {
+    var prefs = const LocalPreferences(translationBaseUrl: 'https://gateway.example/v1');
+    final first = Completer<void>(), resume = Completer<void>();
+    var windows = 0;
+    final usage = ledger();
+    Future<SubtitleSeasonQueue> open() => SubtitleSeasonQueue.open(
+      localDirectory: scratch,
+      ledger: usage,
+      preferences: () => prefs,
+      resolve: (_, ep) async => SubtitleEpisodeContext(
+        source: PlaybackSubtitleSource(
+          generation: 1,
+          target: PlayTarget(itemId: ep.episodeId),
+          mediaSourceId: 's',
+          address: Uri.https('movie.example', '/m'),
+          headers: const {},
+          userAgent: 'test',
+        ),
+        store: SubtitleStore(folderStatus: () async => throw UnimplementedError(), localDirectory: () async => scratch),
+        duration: const Duration(minutes: 1),
+        availability: const SubtitleAvailability(chinese: ChineseSubtitleState.canGenerate),
+        authorizationId: 'root',
+      ),
+      generate: (_, run) async {
+        if (!first.isCompleted) {
+          expect(run.translationPreferences().translationBaseUrl, prefs.translationBaseUrl);
+          windows++;
+          first.complete();
+          await resume.future;
+        }
+        run.translationPreferences();
+        windows++;
+        return 'saved';
+      },
+    );
+    final request = SubtitleSeasonRequest(
+      accountId: 'account',
+      seriesId: 'series',
+      seasonId: 'season',
+      seasonName: 'Season',
+      episodes: const [SubtitleEpisodeRequest(episodeId: '1', name: 'Episode')],
+    );
+    var queue = await open();
+    final free = await queue.quoteSeason(request);
+    expect(free.estimatedCostMicros, 0);
+    final id = await queue.queueSeason(request, free);
+    await first.future;
+    prefs = const LocalPreferences();
+    resume.complete();
+    Future<void> waiting() =>
+        queue.jobs.firstWhere((rows) => rows.firstOrNull?.episodes.single.waitingReason?.contains('重新估价') == true);
+    await waiting();
+    expect(windows, 1);
+    await queue.close();
+    queue = await open();
+    await waiting();
+    expect(windows, 1);
+    await expectLater(queue.queueSeason(request, free), throwsA(isA<EmbyViewFailure>()));
+    final paid = await queue.quoteSeason(request);
+    expect(paid.estimatedCostMicros, greaterThan(0));
+    expect(await queue.queueSeason(request, paid), id);
+    await queue.jobs.firstWhere((rows) => rows.single.completedCount == 1);
+    expect(windows, 2);
+    await queue.close();
+  });
+
   for (final buffered in [false, true]) {
     test(
       'revoked authorization blocks ${buffered ? 'buffered subtitle translation' : 'the next native window'}',
@@ -217,7 +295,7 @@ void main() {
         final generator = SubtitleSeasonGenerator(
           reader: SubtitleAudioReader(channel: channel),
           processor: SubtitleAiProcessor(
-            readSecret: (_) async => 'fixture',
+            readTranslationKey: (_) async => 'fixture',
             meter: usage.charge,
             clientFactory: () => MockClient((_) async {
               paidRequests++;

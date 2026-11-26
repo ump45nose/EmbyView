@@ -99,7 +99,6 @@ final class SubtitleUsageLedger {
       final requestId = response.requestId?.trim();
       final id = requestId == null || requestId.isEmpty ? const Uuid().v4() : requestId;
       final key = response.unmetered ? 'unmetered:$id' : id;
-      if (response.unmetered) own.unmetered.add(key);
       own.calls.putIfAbsent(
         key,
         () => (response.costMicros >= 0 ? response.costMicros : estimatedCostMicros, episode?.id),
@@ -175,7 +174,7 @@ final class SubtitleUsageLedger {
         budgetMicros: budgetMicros(),
         usedMicros: calls == null ? null : sum(calls),
         completedEpisodes: completed.length,
-        unmeteredCalls: records?.unmetered.length ?? 0,
+        unmeteredCalls: records?.calls.keys.where((key) => key.startsWith('unmetered:')).length ?? 0,
         averageEpisodeMicros: completed.isEmpty
             ? null
             : sum(calls!.where((call) => completed.contains(call.$2))) ~/ completed.length,
@@ -220,9 +219,6 @@ final class _UsageRecords {
       }
       if (data['completed'] case final List rows when rows.every((row) => row is String)) {
         result.completed.addAll(rows.cast<String>());
-        if (data['unmetered'] case final List ids) {
-          result.unmetered.addAll(ids.whereType<String>().where(result.calls.containsKey));
-        }
         return result;
       }
     }
@@ -231,7 +227,6 @@ final class _UsageRecords {
 
   final calls = <String, (int, String?)>{};
   final completed = <String>{};
-  final unmetered = <String>{};
   bool merge(_UsageRecords other) {
     var changed = false;
     for (final row in other.calls.entries) {
@@ -241,9 +236,6 @@ final class _UsageRecords {
         calls[row.key] = (cost, original?.$2 ?? row.value.$2);
         changed = true;
       }
-    }
-    for (final id in other.unmetered) {
-      if (unmetered.add(id)) changed = true;
     }
     for (final episode in other.completed) {
       if (completed.add(episode)) changed = true;
@@ -256,6 +248,5 @@ final class _UsageRecords {
       for (final row in calls.entries) row.key: [row.value.$1, row.value.$2],
     },
     'completed': completed.toList(),
-    if (unmetered.isNotEmpty) 'unmetered': unmetered.toList(),
   };
 }

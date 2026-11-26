@@ -144,6 +144,67 @@ void main() {
     expect(fixture.playback.audioInput.started.isCompleted, isFalse);
   });
 
+  for (final seek in [true, false]) {
+    test('a late native subtitle registration cannot select after ${seek ? "seek" : "cancel"}', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final f = await _Fixture.open();
+      addTearDown(f.close);
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      const audio = MethodChannel('embyview/audio_control'), asr = MethodChannel('embyview/asr');
+      messenger.setMockMethodCallHandler(
+        audio,
+        (_) async => [
+          {'startUs': 0, 'sourceUs': 0, 'pcm': Uint8List(48000 * 4 * 20)},
+        ],
+      );
+      messenger.setMockMethodCallHandler(
+        asr,
+        (call) async => call.method == 'modelStatus'
+            ? {'state': 'ready', 'receivedBytes': 1, 'totalBytes': 1}
+            : {
+                'language': 'en',
+                'segments': [
+                  {'startUs': 0, 'endUs': 1000000, 'text': 'Hi'},
+                ],
+              },
+      );
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(audio, null);
+        messenger.setMockMethodCallHandler(asr, null);
+      });
+      f.aiRequest = (_) async => http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'finish_reason': 'stop',
+              'message': {'content': '{"lines":[{"id":0,"text":"Hi"}]}'},
+            },
+          ],
+        }),
+        200,
+      );
+      f.playback.open(_movie, 2, duration: const Duration(seconds: 20));
+      final gate = f.playback.registrationGate = Completer<void>();
+      final pending = f.panel.startAi();
+      await f.playback.registrationStarted.future;
+      if (seek) {
+        f.audioBoundaries.add((
+          sourceGeneration: 2,
+          kind: SubtitleAudioBoundaryKind.seek,
+          ready: false,
+          position: const Duration(seconds: 9),
+          streamIndex: null,
+        ));
+      } else {
+        await f.panel.cancelAi();
+      }
+      gate.complete();
+      await pending;
+      expect(f.playback.rendered, isNull);
+      expect(f.panel.snapshot.selectedTrackId, isNull);
+    });
+  }
+
   test('normal playback end flushes a short final segment in the following mode', () async {
     final fixture = await _Fixture.open();
     addTearDown(fixture.close);
@@ -312,7 +373,7 @@ class _Fixture {
       loadDocument: (_, stream) async => fixture.documents[stream['Index']],
       sources: fixture.sources,
       processor: SubtitleAiProcessor(
-        readSecret: (_) async {
+        readTranslationKey: (_) async {
           fixture.requestedAiKey = true;
           return fixture.aiRequest == null ? null : 'mock-key';
         },
@@ -376,6 +437,8 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
   @override
   final _Audio audioInput = _Audio();
   String? rendered;
+  Completer<void>? registrationGate;
+  final registrationStarted = Completer<void>();
   final registered = <String, String>{};
 
   void open(
@@ -440,6 +503,8 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     String? contentKey,
     PlaybackTrackSource source = PlaybackTrackSource.online,
   }) async {
+    if (!registrationStarted.isCompleted) registrationStarted.complete();
+    await registrationGate?.future;
     final id = '$generation:external${registered.length}';
     final text = await File.fromUri(Uri.parse(url)).readAsString();
     expect(generation, snapshot.generation);

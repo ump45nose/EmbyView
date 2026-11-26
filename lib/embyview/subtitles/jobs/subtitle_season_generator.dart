@@ -80,6 +80,7 @@ final class SubtitleSeasonGenerator {
               segment,
               cancellation: run.cancellation,
               language: language,
+              translationPreferences: run.translationPreferences(),
               mediaContext: context.mediaContext,
               onStage: run.setStage,
             );
@@ -100,7 +101,8 @@ final class SubtitleSeasonGenerator {
           start = end;
         }
       }
-    } on SubtitleBudgetBlocked {
+    } on EmbyViewFailure catch (error) {
+      if (error is! SubtitleBudgetBlocked && error is! SubtitleQuotePriceIncreased) rethrow;
       if (progressed && !run.cancellation.isCancelled) {
         try {
           await _save(context, run, coverage, cues.values, language, partial: true);

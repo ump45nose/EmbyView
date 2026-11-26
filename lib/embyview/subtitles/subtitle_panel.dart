@@ -624,8 +624,12 @@ class BoundSubtitlePanel implements SubtitlePanel {
       if (saved.state == SubtitleSaveState.saved) await store.save(chinese);
       return;
     }
+    final id = await _register(scope, chinese, cues: output.cues);
+    if (!current()) return;
     scope.userApplied = true;
-    final id = await _apply(scope, chinese, cues: output.cues);
+    await session.selectSubtitle(id);
+    _check(scope);
+    if (!current()) return;
     scope.originals[id] = original;
     unawaited(_save(scope, id, chinese, original: original));
   }

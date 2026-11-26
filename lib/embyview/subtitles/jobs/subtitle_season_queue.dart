@@ -86,10 +86,11 @@ final class _EpisodeAuthorizationBlocked extends EmbyViewFailure {
 }
 
 final class SubtitleEpisodeRun {
-  SubtitleEpisodeRun._(this.cancellation, this.setStage);
+  SubtitleEpisodeRun._(this.cancellation, this.setStage, this.translationPreferences);
 
   final SubtitleAiCancellation cancellation;
   final void Function(EpisodeJobState) setStage;
+  final LocalPreferences Function() translationPreferences;
 }
 
 typedef SubtitleEpisodeResolver = Future<SubtitleEpisodeContext> Function(String, SubtitleEpisodeRequest);
@@ -151,7 +152,18 @@ final class SubtitleSeasonQueue {
     final id = await _mutations.run(() async {
       _checkOpen();
       for (final entry in _entries) {
-        if (entry.quoteId == season.quoteId && entry.episodes.any((row) => row.pending)) return entry.id;
+        if (entry.quoteId != season.quoteId || !entry.episodes.any((row) => row.pending)) continue;
+        if (entry.approvedPrice != season.approvedPrice) {
+          final old = entry.approvedPrice;
+          entry.approvedPrice = season.approvedPrice;
+          try {
+            await _persist();
+          } catch (_) {
+            entry.approvedPrice = old;
+            rethrow;
+          }
+        }
+        return entry.id;
       }
       _entries.add(season);
       try {
@@ -213,11 +225,14 @@ final class SubtitleSeasonQueue {
       request.seasonId,
       request.seasonName,
       rows,
+      subtitleTranslationPrice(prefs),
     );
     final count = rows.where((row) => row.completeId != null).length;
     final (budget, reason) = count == rows.length ? (BudgetState.available, null) : await _ledger.episodeBudget();
     final quote = SeasonQuote(
-      id: quoteId,
+      id: sha256
+          .convert(utf8.encode(jsonEncode([quoteId, season.approvedPrice?.input, season.approvedPrice?.output])))
+          .toString(),
       seriesId: season.seriesId,
       seasonId: season.seasonId,
       seasonName: season.name,
@@ -326,6 +341,22 @@ final class SubtitleSeasonQueue {
       await _update(row, () => row.waiting = _foregroundWait);
       return false;
     }
+    LocalPreferences approvedPreferences() {
+      final current = _preferences?.call() ?? const LocalPreferences();
+      final price = subtitleTranslationPrice(current);
+      if (price != null &&
+          (price.input > (season.approvedPrice?.input ?? 0) || price.output > (season.approvedPrice?.output ?? 0))) {
+        throw const SubtitleQuotePriceIncreased();
+      }
+      return current;
+    }
+
+    try {
+      approvedPreferences();
+    } on SubtitleQuotePriceIncreased catch (failure) {
+      await _update(row, () => row.waiting = failure.reason);
+      return false;
+    }
     final (budget, reason) = await _ledger.episodeBudget();
     if (budget != BudgetState.available) {
       await _update(row, () => row.waiting = reason);
@@ -345,7 +376,7 @@ final class SubtitleSeasonQueue {
       if (cancellation.isCancelled || !row.pending) return;
       row.stage = state;
       _publish();
-    });
+    }, approvedPreferences);
     try {
       final contentId = await _ledger.duringEpisode(
         key,
@@ -359,7 +390,10 @@ final class SubtitleSeasonQueue {
     } catch (error) {
       if (cancellation.isCancelled) return true;
       final failure = _failure(error);
-      final waiting = failure is SubtitleBudgetBlocked || failure is _EpisodeAuthorizationBlocked && failure.retryable;
+      final waiting =
+          failure is SubtitleBudgetBlocked ||
+          failure is SubtitleQuotePriceIncreased ||
+          failure is _EpisodeAuthorizationBlocked && failure.retryable;
       await _update(row, () {
         row.stage = EpisodeJobState.queued;
         if (waiting) {
@@ -457,8 +491,22 @@ EmbyViewFailure _failure(Object error) => error is EmbyViewFailure
     : const EmbyViewFailure('此集的字幕处理失败。', retryable: true, code: 'subtitle_job_failed');
 const _foregroundWait = '等待前台 115 播放结束后读取。';
 
+final class SubtitleQuotePriceIncreased extends EmbyViewFailure {
+  const SubtitleQuotePriceIncreased()
+    : super('翻译单价已提高，请重新估价并确认本季生成。', retryable: true, code: 'subtitle_quote_price_increased');
+}
+
 final class _Season {
-  _Season(this.id, this.quoteId, this.accountId, this.seriesId, this.seasonId, this.name, this.episodes);
+  _Season(
+    this.id,
+    this.quoteId,
+    this.accountId,
+    this.seriesId,
+    this.seasonId,
+    this.name,
+    this.episodes,
+    this.approvedPrice,
+  );
 
   factory _Season.fromJson(dynamic row) => _Season(
     row['id'] as String,
@@ -468,10 +516,15 @@ final class _Season {
     row['season'] as String,
     row['name'] as String,
     (row['episodes'] as List).map(_Episode.fromJson).toList(),
+    switch (row['rates']) {
+      [final num input, final num output] => (input: input.toDouble(), output: output.toDouble()),
+      _ => null, // Old jobs have no confirmed price for this translation service.
+    },
   );
 
   final String id, quoteId, accountId, seriesId, seasonId, name;
   final List<_Episode> episodes;
+  SubtitleTranslationPrice? approvedPrice;
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -480,6 +533,7 @@ final class _Season {
     'series': seriesId,
     'season': seasonId,
     'name': name,
+    if (approvedPrice case final price?) 'rates': [price.input, price.output],
     'episodes': episodes.map((row) => row.toJson()).toList(),
   };
 }

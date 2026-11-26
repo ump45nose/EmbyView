@@ -10,6 +10,26 @@ enum SecretKind { openAi, assrt, openSubtitles }
 const defaultTranslationBaseUrl = 'https://api.openai.com/v1';
 const defaultTranslationModel = 'gpt-5.4-mini';
 
+Uri? parseTranslationBaseUrl(String value) {
+  final text = value.trim().replaceFirst(RegExp(r'/+$'), '');
+  if (RegExp(r'[\s\\]').hasMatch(text)) return null;
+  try {
+    final base = Uri.parse(text);
+    if (!['https', 'http'].contains(base.scheme) ||
+        base.host.isEmpty ||
+        base.userInfo.isNotEmpty ||
+        base.hasQuery ||
+        base.hasFragment ||
+        base.port < 1 ||
+        base.port > 65535) {
+      return null;
+    }
+    return base;
+  } on FormatException {
+    return null;
+  }
+}
+
 enum MediaFolderState { unconfigured, authorized, denied, unmounted, invalid }
 
 class MediaFolderStatus {

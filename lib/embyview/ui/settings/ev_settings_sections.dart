@@ -436,10 +436,10 @@ class EvAiSettingsPane extends StatefulWidget {
   const EvAiSettingsPane({
     super.key, required this.prefs, required this.subtitlesAvailable, required this.usage,
     required this.loadingUsage, required this.jobs, required this.onUpdatePrefs, required this.onCancelJob,
-    required this.configuredSecrets, required this.loadingSecrets, required this.onSaveSecret,
+    required this.configuredSecrets, required this.loadingSecrets, required this.savingAddress, required this.onSaveSecret,
   });
   final LocalPreferences prefs;
-  final bool subtitlesAvailable, loadingUsage, loadingSecrets;
+  final bool subtitlesAvailable, loadingUsage, loadingSecrets, savingAddress;
   final Set<SecretKind> configuredSecrets;
   final Future<void> Function(SecretKind, String?) onSaveSecret;
   final AiUsage? usage;
@@ -472,9 +472,8 @@ class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
 
   void _applyTranslation() {
     final address = _address.text.trim(), model = _model.text.trim();
-    final uri = Uri.tryParse(address);
-    final valid = uri != null && (uri.scheme == 'https' || uri.scheme == 'http') &&
-        uri.host.isNotEmpty && uri.userInfo.isEmpty && !uri.hasQuery && !uri.hasFragment;
+    if (widget.savingAddress) return;
+    final valid = parseTranslationBaseUrl(address) != null;
     setState(() {
       _addressError = valid ? null : '请输入有效的翻译服务地址';
       _modelError = model.isEmpty ? '请输入翻译模型名称' : null;
@@ -500,26 +499,29 @@ class _EvAiSettingsPaneState extends State<EvAiSettingsPane> {
         const _AsrModelRow(),
         EvSettingsRow(title: '校正时间轴', subtitle: '本机音频对白匹配，计算偏移与漂移，不额外调用接口', trailing: evValueText(t, s, '本机自动')),
       ]),
-      _SecretGroup(title: '翻译服务', items: const [_translationKey],
-        configuredSecrets: widget.configuredSecrets, loadingSecrets: widget.loadingSecrets, onSaveSecret: widget.onSaveSecret,
-        prefix: [
-          EvSettingsRow(title: '接口地址', subtitle: _addressError ?? '兼容 OpenAI 的服务地址',
-            subtitleColor: _addressError == null ? null : evDangerColor,
-            trailing: SizedBox(width: s.rem(22), child: EvSettingsTextField(
-              key: const Key('ev_ai_translation_address'), controller: _address, keyboardType: TextInputType.url,
-              onSubmitted: (_) => _applyTranslation()))),
-          EvSettingsRow(title: '翻译模型', subtitle: _modelError, subtitleColor: evDangerColor,
-            trailing: SizedBox(width: s.rem(22), child: Row(children: [
-              Expanded(child: EvSettingsTextField(key: const Key('ev_ai_translation_model'), controller: _model,
-                onSubmitted: (_) => _applyTranslation())),
-              SizedBox(width: s.rem(0.5)),
-              ListenableBuilder(listenable: Listenable.merge([_address, _model]), builder: (_, _) {
-                final changed = _address.text != prefs.translationBaseUrl || _model.text != prefs.translationModel;
-                return EvButton.ghost(key: const Key('ev_ai_translation_save'), small: true,
-                  label: '保存配置', onPressed: changed ? _applyTranslation : null);
-              }),
-            ]))),
-        ]),
+      ListenableBuilder(listenable: Listenable.merge([_address, _model]), builder: (_, _) {
+        final addressChanged = _address.text.trim() != prefs.translationBaseUrl;
+        final origin = parseTranslationBaseUrl(prefs.translationBaseUrl)?.origin;
+        final changed = addressChanged || _model.text.trim() != prefs.translationModel;
+        return _SecretGroup(title: '翻译服务', items: const [_translationKey], origin: origin,
+          keyNotice: widget.savingAddress ? '正在保存地址' : addressChanged || origin == null ? '请先保存地址' : null,
+          configuredSecrets: widget.configuredSecrets, loadingSecrets: widget.loadingSecrets, onSaveSecret: widget.onSaveSecret,
+          prefix: [
+            EvSettingsRow(title: '接口地址', subtitle: _addressError ?? '兼容 OpenAI 的服务地址',
+              subtitleColor: _addressError == null ? null : evDangerColor,
+              trailing: SizedBox(width: s.rem(22), child: EvSettingsTextField(
+                key: const Key('ev_ai_translation_address'), controller: _address, keyboardType: TextInputType.url,
+                onSubmitted: (_) => _applyTranslation()))),
+            EvSettingsRow(title: '翻译模型', subtitle: _modelError, subtitleColor: evDangerColor,
+              trailing: SizedBox(width: s.rem(22), child: Row(children: [
+                Expanded(child: EvSettingsTextField(key: const Key('ev_ai_translation_model'), controller: _model,
+                  onSubmitted: (_) => _applyTranslation())),
+                SizedBox(width: s.rem(0.5)),
+                EvButton.ghost(key: const Key('ev_ai_translation_save'), small: true,
+                  label: '保存配置', onPressed: changed && !widget.savingAddress ? _applyTranslation : null),
+              ]))),
+          ]);
+      }),
       EvSettingsGroup(title: '每月预算', children: [
         EvSettingsRow(title: '预算上限', subtitle: '本月累计达到预算后不再开新任务，进行中的集做完为止',
           trailing: EvSegmentedControl<int>(
@@ -705,7 +707,10 @@ class EvVideoSettingsPane extends StatelessWidget {
 
 /// 9. Keychain secrets pane (`keys`).
 class EvKeysSettingsPane extends StatelessWidget {
-  const EvKeysSettingsPane({super.key, required this.configuredSecrets, required this.loadingSecrets, required this.onSaveSecret});
+  const EvKeysSettingsPane({super.key, required this.configuredSecrets, required this.loadingSecrets, required this.onSaveSecret,
+    required this.origin, required this.savingAddress});
+  final String? origin;
+  final bool savingAddress;
   final Set<SecretKind> configuredSecrets;
   final bool loadingSecrets;
   final Future<void> Function(SecretKind kind, String? value) onSaveSecret;
@@ -713,7 +718,8 @@ class EvKeysSettingsPane extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
     evPaneTitle(EvTheme.of(context), EvScale.of(context), '密钥'),
-    _SecretGroup(title: '存在本机钥匙串', configuredSecrets: configuredSecrets, loadingSecrets: loadingSecrets, onSaveSecret: onSaveSecret,
+    _SecretGroup(title: '存在本机钥匙串', origin: origin, keyNotice: savingAddress ? '正在保存地址' : origin == null ? '请先保存地址' : null,
+      configuredSecrets: configuredSecrets, loadingSecrets: loadingSecrets, onSaveSecret: onSaveSecret,
       items: const [_translationKey, (SecretKind.assrt, '射手网 assrt', '字幕检索'), (SecretKind.openSubtitles, 'OpenSubtitles', '字幕检索')]),
   ]);
 }
@@ -721,11 +727,12 @@ class EvKeysSettingsPane extends StatelessWidget {
 const _translationKey = (SecretKind.openAi, '翻译密钥', '仅存本机钥匙串');
 
 class _SecretGroup extends StatefulWidget {
-  const _SecretGroup({required this.title, this.prefix = const [], required this.items,
+  const _SecretGroup({required this.title, this.prefix = const [], required this.items, required this.origin, this.keyNotice,
     required this.configuredSecrets, required this.loadingSecrets, required this.onSaveSecret});
   final String title;
   final List<Widget> prefix;
   final List<(SecretKind, String, String)> items;
+  final String? origin, keyNotice;
   final Set<SecretKind> configuredSecrets;
   final bool loadingSecrets;
   final Future<void> Function(SecretKind kind, String? value) onSaveSecret;
@@ -736,13 +743,32 @@ class _SecretGroupState extends State<_SecretGroup> {
   SecretKind? _editing;
   final _ctrl = TextEditingController();
   bool _saving = false;
+  String? _error;
   @override void dispose() { _ctrl.dispose(); super.dispose(); }
 
+  @override void didUpdateWidget(_SecretGroup old) {
+    super.didUpdateWidget(old);
+    if (_editing == SecretKind.openAi && (old.origin != widget.origin || widget.keyNotice != null)) {
+      _ctrl.clear();
+      _editing = null;
+      _error = null;
+    }
+  }
+
   Future<void> _commit(SecretKind kind, String? value) async {
-    if (_saving || (value != null && value.isEmpty)) return;
-    setState(() => _saving = true);
-    try { await widget.onSaveSecret(kind, value); if (mounted) { _ctrl.clear(); setState(() => _editing = null); } }
-    finally { if (mounted) setState(() => _saving = false); }
+    if (_saving || _editing != kind || (value != null && value.isEmpty)) return;
+    setState(() { _saving = true; _error = null; });
+    try {
+      await widget.onSaveSecret(kind, value);
+      if (mounted) { _ctrl.clear(); setState(() => _editing = null); }
+    } catch (error) {
+      if (mounted && _editing == kind) {
+        final reason = error is EmbyViewFailure ? error.reason : '密钥保存失败。';
+        setState(() => _error = reason.contains('重试') ? reason : '$reason请重试。');
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -751,9 +777,11 @@ class _SecretGroupState extends State<_SecretGroup> {
     return EvSettingsGroup(title: widget.title, children: [
         ...widget.prefix,
         for (final (kind, title, sub) in widget.items) () {
-          final ok = widget.configuredSecrets.contains(kind);
+          final notice = kind == SecretKind.openAi ? widget.keyNotice : null;
+          final ok = notice == null && widget.configuredSecrets.contains(kind);
+          final error = _editing == kind ? _error : null;
           return EvSettingsRow(
-            key: Key('ev_secret_row_${kind.name}'), title: title, subtitle: sub,
+            key: Key('ev_secret_row_${kind.name}'), title: title, subtitle: error ?? sub, subtitleColor: error == null ? null : evDangerColor,
             bottom: _editing == kind ? Padding(padding: EdgeInsets.only(top: s.rem(0.625)), child: Row(children: [
               Expanded(child: EvSettingsTextField(key: Key('ev_secret_input_${kind.name}'), controller: _ctrl, obscureText: true,
                 placeholder: '输入密钥（仅存本机钥匙串）', onSubmitted: (_) => _commit(kind, _ctrl.text.trim()))),
@@ -769,10 +797,12 @@ class _SecretGroupState extends State<_SecretGroup> {
             ])) : null,
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
               EvStatusIndicator(key: Key('ev_secret_status_${kind.name}'),
-                label: widget.loadingSecrets ? '检测中' : ok ? '已设置' : '缺少', tone: ok ? EvStatusTone.ok : EvStatusTone.warn),
+                label: notice ?? (widget.loadingSecrets ? '检测中' : ok ? '已设置' : '缺少'), tone: ok && !widget.loadingSecrets ? EvStatusTone.ok : EvStatusTone.warn),
               SizedBox(width: s.rem(0.75)),
               EvButton.ghost(key: Key('ev_secret_edit_${kind.name}'), small: true, label: ok ? '更新' : '填写',
-                onPressed: () => setState(() { _ctrl.clear(); _editing = _editing == kind ? null : kind; })),
+                onPressed: _saving || widget.loadingSecrets || notice != null ? null : () => setState(() {
+                  _ctrl.clear(); _error = null; _editing = _editing == kind ? null : kind;
+                })),
             ]),
           );
         }(),

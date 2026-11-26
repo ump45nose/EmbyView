@@ -49,7 +49,8 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
   bool _zoneEditorOpen = false, _didHandleMountEditor = false;
   ZonePreference? _editingZone;
   String? _bannerError;
-  int _loadToken = 0;
+  int _loadToken = 0, _secretLoadToken = 0;
+  bool _savingTranslationAddress = false;
 
   bool get _hasMissingSecrets => _secretsLoaded && _configuredSecrets.length < SecretKind.values.length;
 
@@ -73,13 +74,27 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
     _cancelSubs();
     _prefs = services.preferences.current;
     _account = services.accounts.snapshot;
+    _configuredSecrets = const {};
+    _secretsLoaded = false;
+    _loadingSecrets = true;
+    _savingTranslationAddress = false;
     _zoneTiles = const []; _tilesById = const {}; _zoneFacets = null; _aiUsage = null; _aiJobs = const []; _loadingAiUsage = false;
 
     _prefsSub = services.preferences.changes.listen((next) {
       final zc = _zonesSig(_prefs.zones) != _zonesSig(next.zones);
       final bc = _prefs.monthlyBudgetMicros != next.monthlyBudgetMicros;
       if (!mounted || !identical(_boundServices, services)) return;
-      setState(() => _prefs = next);
+      final originChanged = parseTranslationBaseUrl(_prefs.translationBaseUrl)?.origin !=
+          parseTranslationBaseUrl(next.translationBaseUrl)?.origin;
+      setState(() {
+        _prefs = next;
+        if (originChanged) {
+          _configuredSecrets = {..._configuredSecrets}..remove(SecretKind.openAi);
+          _loadingSecrets = true;
+          _secretsLoaded = false;
+        }
+      });
+      if (originChanged) unawaited(_refreshSecrets(services));
       if (zc) unawaited(_refreshZones(services));
       if (bc && services.subtitles != null) unawaited(_refreshAiUsage(services));
     });
@@ -110,11 +125,16 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
   String _zonesSig(List<ZonePreference> zs) => zs.map((z) => '${z.id}:${z.name}:${z.iconKey}:${z.colorSlot}').join('|');
 
   Future<void> _refreshSecrets(EmbyViewServices services) async {
+    final token = ++_secretLoadToken;
     try {
-      final s = await services.preferences.configuredSecrets();
-      if (mounted && identical(_boundServices, services)) setState(() { _configuredSecrets = s; _loadingSecrets = false; _secretsLoaded = true; });
+      final kinds = await services.preferences.configuredSecrets();
+      if (mounted && token == _secretLoadToken && identical(_boundServices, services)) {
+        setState(() { _configuredSecrets = kinds; _loadingSecrets = false; _secretsLoaded = true; });
+      }
     } catch (_) {
-      if (mounted && identical(_boundServices, services)) setState(() { _loadingSecrets = false; _secretsLoaded = true; });
+      if (mounted && token == _secretLoadToken && identical(_boundServices, services)) {
+        setState(() { _loadingSecrets = false; _secretsLoaded = true; });
+      }
     }
   }
 
@@ -272,11 +292,26 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
 
   Widget _buildPane(EmbyViewServices services) {
     final openUsers = widget.onOpenUsers ?? EvScope.maybeOf(context)?.shell.onOpenUsers;
-    void update(LocalPreferences next) => unawaited(_guard(() => services.preferences.update(next)));
-    Future<void> saveSecret(SecretKind kind, String? value) => _guard(() async {
+    final origin = parseTranslationBaseUrl(_prefs.translationBaseUrl)?.origin;
+    Future<void> update(LocalPreferences next) async {
+      final addressChanged = next.translationBaseUrl != _prefs.translationBaseUrl;
+      if (addressChanged) {
+        if (_savingTranslationAddress) return;
+        setState(() => _savingTranslationAddress = true);
+      }
+      await _guard(() => services.preferences.update(next));
+      if (addressChanged && mounted && identical(_boundServices, services)) {
+        setState(() => _savingTranslationAddress = false);
+      }
+    }
+    Future<void> saveSecret(SecretKind kind, String? value) async {
+      if (kind == SecretKind.openAi && (_savingTranslationAddress || origin == null ||
+          origin != parseTranslationBaseUrl(services.preferences.current.translationBaseUrl)?.origin)) {
+        throw const EmbyViewFailure('翻译服务地址已更改，请为当前服务填写密钥。');
+      }
       await services.preferences.setSecret(kind, value);
-      await _refreshSecrets(services);
-    });
+      if (mounted && identical(_boundServices, services)) await _refreshSecrets(services);
+    }
     return switch (_section) {
       EvSettingsSection.account => EvAccountSettingsPane(
         snapshot: _account, prefs: _prefs, visibleZoneCount: _displayedZones.length,
@@ -297,11 +332,12 @@ class _EvSettingsPageState extends State<EvSettingsPage> {
       EvSettingsSection.ai => EvAiSettingsPane(
         prefs: _prefs, subtitlesAvailable: services.subtitles != null, usage: _aiUsage,
         loadingUsage: _loadingAiUsage, jobs: _aiJobs, onUpdatePrefs: update,
+        savingAddress: _savingTranslationAddress,
         configuredSecrets: _configuredSecrets, loadingSecrets: _loadingSecrets, onSaveSecret: saveSecret,
         onCancelJob: (id) => _guard(() async { await services.subtitles?.cancelJob(id); })),
       EvSettingsSection.video => EvVideoSettingsPane(prefs: _prefs, onUpdatePrefs: update),
       EvSettingsSection.keys => EvKeysSettingsPane(
-        configuredSecrets: _configuredSecrets, loadingSecrets: _loadingSecrets,
+        origin: origin, savingAddress: _savingTranslationAddress, configuredSecrets: _configuredSecrets, loadingSecrets: _loadingSecrets,
         onSaveSecret: saveSecret),
       EvSettingsSection.about => const EvAboutSettingsPane(),
     };

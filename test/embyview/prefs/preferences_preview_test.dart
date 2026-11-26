@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:moonfin/embyview/contracts/internal/authorized_resources.dart';
 import 'package:moonfin/embyview/contracts/media.dart';
@@ -32,6 +33,37 @@ void main() {
     );
   });
   tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+  test('translation addresses normalize default ports and reject incomplete or credential-bearing URLs', () {
+    expect(parseTranslationBaseUrl(' HTTPS://API.OPENAI.COM:443/v1/// '), Uri.parse(defaultTranslationBaseUrl));
+    for (final value in ['api.example', 'file:///tmp', 'http://', 'https://a:b@api.example/v1', 'https://api.example/v1?q=1',
+      'https://api.example/#key', 'https://api.example:9999999999999999999999/v1', 'https://api.example/a b']) {
+      expect(parseTranslationBaseUrl(value), isNull, reason: value);
+    }
+  });
+
+  test('translation keys follow the saved origin, including the existing official key', () async {
+    FlutterSecureStorage.setMockInitialValues({'embyview.secret.openAi': 'legacy-official'});
+    final prefs = await MachinePreferences.open();
+    final official = parseTranslationBaseUrl(defaultTranslationBaseUrl)!;
+    final gateway = parseTranslationBaseUrl('https://gateway.example:8443/v1/')!;
+    final alternate = parseTranslationBaseUrl('https://gateway.example:9443/v1')!;
+    expect(await prefs.readTranslationKey(official), 'legacy-official');
+    await prefs.update(LocalPreferences(translationBaseUrl: gateway.toString()));
+    expect(await prefs.configuredSecrets(), isNot(contains(SecretKind.openAi)));
+    expect(await prefs.readTranslationKey(gateway), isNull);
+    await prefs.setSecret(SecretKind.openAi, 'gateway-test');
+    expect(await prefs.readTranslationKey(gateway.replace(path: '/compatible/v1')), 'gateway-test');
+    expect(await prefs.readTranslationKey(alternate), isNull);
+    expect(await prefs.readTranslationKey(gateway.replace(scheme: 'http')), isNull);
+    await prefs.update(const LocalPreferences());
+    expect(await prefs.configuredSecrets(), contains(SecretKind.openAi));
+    expect(await prefs.readTranslationKey(official), 'legacy-official');
+    await prefs.close();
+    final restored = await MachinePreferences.open();
+    expect(await restored.readTranslationKey(gateway), 'gateway-test');
+    await restored.close();
+  });
 
   test('old preferences take the standard translation defaults and keep unrelated choices', () async {
     SharedPreferences.setMockInitialValues({'embyview.machine.v1': '{"theme":"paper","translationProvider":"gemini"}'});

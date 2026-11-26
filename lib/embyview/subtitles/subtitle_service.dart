@@ -81,7 +81,7 @@ class SubtitleRuntime {
   );
   late final ledger = _openLedger();
   late final processor = SubtitleAiProcessor(
-    readSecret: preferences.readSecret,
+    readTranslationKey: preferences.readTranslationKey,
     preferences: () => preferences.current,
     meter: <T>(cost, invoke) async => (await ledger).charge<T>(cost, invoke),
   );

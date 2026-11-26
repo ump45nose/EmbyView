@@ -61,7 +61,11 @@ class _FakePreferences implements EmbyViewPreferences {
     Set<SecretKind>? configuredSecrets,
     MediaFolderStatus? authorizedFolderResult,
   }) : _current = initial ?? const LocalPreferences(zones: _kDefaultZones),
-       _secrets = {...?configuredSecrets},
+       _secrets = {...?configuredSecrets}..remove(SecretKind.openAi),
+       _translationOrigins = {
+         if (configuredSecrets?.contains(SecretKind.openAi) == true)
+           Uri.parse(initial?.translationBaseUrl ?? defaultTranslationBaseUrl).origin,
+       },
        _authorizedFolderResult =
            authorizedFolderResult ??
            const MediaFolderStatus(
@@ -73,6 +77,10 @@ class _FakePreferences implements EmbyViewPreferences {
 
   LocalPreferences _current;
   final Set<SecretKind> _secrets;
+  final Set<String> _translationOrigins;
+  Completer<void>? preferenceWrite;
+  Completer<Set<SecretKind>>? nextSecretsRead;
+  bool failNextSecretWrite = false;
   final MediaFolderStatus _authorizedFolderResult;
   final _changes = StreamController<LocalPreferences>.broadcast();
 
@@ -129,6 +137,7 @@ class _FakePreferences implements EmbyViewPreferences {
   @override
   Future<void> update(LocalPreferences value) async {
     updateCalls.add(value);
+    await preferenceWrite?.future;
     _emit(value);
   }
 
@@ -193,12 +202,28 @@ class _FakePreferences implements EmbyViewPreferences {
   }
 
   @override
-  Future<Set<SecretKind>> configuredSecrets() async =>
-      Set.unmodifiable(_secrets);
+  Future<Set<SecretKind>> configuredSecrets() async {
+    final pending = nextSecretsRead;
+    nextSecretsRead = null;
+    if (pending != null) return pending.future;
+    return Set.unmodifiable({
+      ..._secrets,
+      if (_translationOrigins.contains(Uri.parse(current.translationBaseUrl).origin)) SecretKind.openAi,
+    });
+  }
 
   @override
   Future<void> setSecret(SecretKind kind, String? value) async {
     setSecretCalls.add((kind, value));
+    if (failNextSecretWrite) {
+      failNextSecretWrite = false;
+      throw const EmbyViewFailure('无法保存钥匙串，请检查系统授权。', retryable: true);
+    }
+    if (kind == SecretKind.openAi) {
+      final origin = Uri.parse(current.translationBaseUrl).origin;
+      if (value == null) { _translationOrigins.remove(origin); } else { _translationOrigins.add(origin); }
+      return;
+    }
     if (value == null || value.trim().isEmpty) {
       _secrets.remove(kind);
     } else {
@@ -1059,6 +1084,84 @@ void main() {
       await tester.pumpAndSettle();
       expect(env.prefs.setSecretCalls.last, (SecretKind.openAi, null));
       expect(find.byKey(const Key('ev_settings_keys_badge')), findsOneWidget);
+    });
+
+    testWidgets('translation key follows saved origin, drops old drafts, and ignores stale checks', (tester) async {
+      final env = await _pumpSettings(tester, initialSection: EvSettingsSection.ai);
+      Finder key(String name) => find.byKey(Key(name));
+      final edit = key('ev_secret_edit_openAi'), field = key('ev_secret_input_openAi');
+      final status = key('ev_secret_status_openAi');
+      final address = find.descendant(of: key('ev_ai_translation_address'), matching: find.byType(EditableText));
+      Finder statusText(String label) => find.descendant(of: status, matching: find.text(label));
+
+      expect(statusText('已设置'), findsOneWidget);
+      await tester.tap(edit);
+      await tester.pumpAndSettle();
+      await tester.enterText(find.descendant(of: field, matching: find.byType(EditableText)), 'unsaved-old-key');
+      await tester.enterText(address, 'https://example.com/v1');
+      await tester.pump();
+      expect(field, findsNothing);
+      expect(tester.widget<EvButton>(edit).onPressed, isNull);
+      expect(statusText('已设置'), findsNothing);
+
+      final writing = env.prefs.preferenceWrite = Completer<void>();
+      await tester.tap(key('ev_ai_translation_save'));
+      await tester.pump();
+      await tester.tap(key('ev_settings_nav_keys'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<EvButton>(edit).onPressed, isNull);
+      writing.complete();
+      await tester.pumpAndSettle();
+      expect(statusText('缺少'), findsOneWidget);
+      await tester.tap(key('ev_settings_nav_ai'));
+      await tester.pumpAndSettle();
+      await tester.tap(edit);
+      await tester.pumpAndSettle();
+      expect(tester.widget<EditableText>(find.descendant(of: field, matching: find.byType(EditableText))).controller.text, isEmpty);
+
+      final lateRead = env.prefs.nextSecretsRead = Completer<Set<SecretKind>>();
+      await tester.enterText(address, defaultTranslationBaseUrl);
+      await tester.pump();
+      await tester.tap(key('ev_ai_translation_save'));
+      await tester.pumpAndSettle();
+      expect(statusText('检测中'), findsOneWidget);
+      expect(tester.widget<EvButton>(edit).onPressed, isNull);
+
+      await tester.enterText(address, 'https://example.org/v1');
+      await tester.pump();
+      await tester.tap(key('ev_ai_translation_save'));
+      await tester.pumpAndSettle();
+      expect(statusText('缺少'), findsOneWidget);
+      lateRead.complete({SecretKind.openAi});
+      await tester.pumpAndSettle();
+      expect(statusText('缺少'), findsOneWidget);
+      await tester.enterText(address, defaultTranslationBaseUrl);
+      await tester.pump();
+      await tester.tap(key('ev_ai_translation_save'));
+      await tester.pumpAndSettle();
+      expect(statusText('已设置'), findsOneWidget);
+      expect(env.prefs.setSecretCalls, isEmpty);
+    });
+
+    testWidgets('failed key save keeps masked input and allows retry', (tester) async {
+      final env = await _pumpSettings(tester, initialSection: EvSettingsSection.ai, configuredSecrets: {});
+      final field = find.descendant(of: find.byKey(const Key('ev_secret_input_openAi')), matching: find.byType(EditableText));
+      final save = find.byKey(const Key('ev_secret_save_openAi'));
+      await tester.tap(find.byKey(const Key('ev_secret_edit_openAi')));
+      await tester.pumpAndSettle();
+      await tester.enterText(field, 'input-to-retry');
+      env.prefs.failNextSecretWrite = true;
+      await tester.tap(save);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('无法保存钥匙串'), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('ev_secret_row_openAi')), matching: find.textContaining('请重试')), findsOneWidget);
+      expect(tester.widget<EditableText>(field).obscureText, isTrue);
+      expect(tester.widget<EditableText>(field).controller.text, 'input-to-retry');
+      await tester.tap(save);
+      await tester.pumpAndSettle();
+      expect(field, findsNothing);
+      expect(find.text('已设置'), findsOneWidget);
+      expect(env.prefs.setSecretCalls, List.filled(2, (SecretKind.openAi, 'input-to-retry')));
     });
 
     testWidgets('local model download, progress, cancel, retry and delete', (tester) async {
