@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
 import 'package:moonfin/embyview/ui/player/panel/ev_audio_video_tabs.dart';
+import 'package:moonfin/embyview/ui/player/panel/ev_chapters_tab.dart';
 import 'package:moonfin/embyview/ui/player/panel/ev_subtitle_tab.dart';
 
 const _kPaperInk = Color(0xFF141413), _kPaperSub = Color(0xFF66655F), _kCinemaInk = Color(0xFFF5F5F7);
@@ -184,7 +185,7 @@ class _EvPanelButtonState extends State<EvPanelButton> {
 }
 
 /// Right-hand player side panel (`.panel` in `proto.css`) with animated spring
-/// slide-in, three sliding tabs (`字幕` / `音频` / `画面`), and dual themes.
+/// slide-in, four sliding tabs (`字幕` / `音频` / `画面` / `章节`), and dual themes.
 class EvPlayerPanel extends StatefulWidget {
   const EvPlayerPanel({
     super.key, required this.open, required this.activeTab, required this.snapshot,
@@ -217,6 +218,7 @@ class _EvPlayerPanelState extends State<EvPlayerPanel> {
     ('subs', '字幕', EvIcons.cc, Key('ev_panel_tab_subs')),
     ('audio', '音频', EvIcons.audio, Key('ev_panel_tab_audio')),
     ('video', '画面', EvIcons.image, Key('ev_panel_tab_video')),
+    ('chapters', '章节', EvIcons.chapters, Key('ev_panel_tab_chapters')),
   ];
 
   String get _tab => widget.activeTab == 'pic' ? 'video' : widget.activeTab;
@@ -224,6 +226,8 @@ class _EvPlayerPanelState extends State<EvPlayerPanel> {
 
   Widget _header(EvTheme t, EvScale s, EvPanelPalette pal) {
     final dimFg = pal.isPaper ? _kPaperSub : const Color.fromRGBO(255, 255, 255, 0.62);
+    final tabCount = _tabs.length;
+    final alignX = tabCount <= 1 ? 0.0 : -1.0 + _tabIndex * (2.0 / (tabCount - 1));
     return Padding(
       padding: EdgeInsets.fromLTRB(s.rem(1.125), s.rem(1.125), s.rem(1.125), s.rem(0.75)),
       child: Row(children: [
@@ -232,9 +236,9 @@ class _EvPlayerPanelState extends State<EvPlayerPanel> {
           decoration: BoxDecoration(color: pal.isPaper ? const Color(0xFFF0EEE6) : const Color.fromRGBO(255, 255, 255, 0.07), borderRadius: BorderRadius.circular(s.rem(0.875))),
           child: LayoutBuilder(builder: (_, c) => Stack(children: [
             Positioned.fill(child: AnimatedAlign(
-              duration: const Duration(milliseconds: 500), curve: EvCurves.spring, alignment: Alignment(-1.0 + _tabIndex * 1.0, 0),
+              duration: const Duration(milliseconds: 500), curve: EvCurves.spring, alignment: Alignment(alignX, 0),
               child: Container(
-                width: c.maxWidth / 3, height: s.rem(2.25),
+                width: c.maxWidth / tabCount, height: s.rem(2.25),
                 decoration: BoxDecoration(
                   color: pal.isPaper ? const Color(0xFFFFFFFF) : const Color.fromRGBO(255, 255, 255, 0.16),
                   borderRadius: BorderRadius.circular(s.rem(0.625)),
@@ -250,10 +254,18 @@ class _EvPlayerPanelState extends State<EvPlayerPanel> {
                     key: key, onTap: () => widget.onSelectTab(id),
                     child: SizedBox(
                       height: s.rem(2.25),
-                      child: Row(mainAxisAlignment: MainAxisAlignment.center, spacing: s.rem(0.4375), children: [
-                        EvIcon(icon, size: s.rem(1.125), color: _tab == id ? pal.ink : dimFg),
-                        Text(label, maxLines: 1, style: t.bodyStyle(s.rem(0.9375), fontWeight: FontWeight.w600, color: _tab == id ? pal.ink : dimFg)),
-                      ]),
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(horizontal: s.rem(0.25)),
+                        child: Row(mainAxisAlignment: MainAxisAlignment.center, spacing: s.rem(0.3125), children: [
+                          EvIcon(icon, size: s.rem(1.0), color: _tab == id ? pal.ink : dimFg),
+                          Flexible(
+                            child: Text(
+                              label, maxLines: 1, softWrap: false, overflow: TextOverflow.ellipsis,
+                              style: t.bodyStyle(s.rem(0.875), fontWeight: FontWeight.w600, color: _tab == id ? pal.ink : dimFg),
+                            ),
+                          ),
+                        ]),
+                      ),
                     ),
                   ),
                 )),
@@ -286,6 +298,7 @@ class _EvPlayerPanelState extends State<EvPlayerPanel> {
     final body = switch (_tab) {
       'audio' => EvAudioTab(snapshot: widget.snapshot, onSelectAudio: widget.onSelectAudio),
       'video' => EvVideoTab(snapshot: widget.snapshot, onToggleAnime4k: widget.onToggleAnime4k, onStartCompare: widget.onStartCompare),
+      'chapters' => EvChaptersTab(snapshot: widget.snapshot, onSeek: widget.onSeek),
       _ => EvSubtitleTab(
           snapshot: widget.snapshot, subtitleSnapshot: widget.subtitleSnapshot, subtitlePanel: widget.subtitlePanel,
           subtitles: widget.subtitles, initialLowerTab: widget.initialLowerTab,

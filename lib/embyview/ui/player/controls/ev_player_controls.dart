@@ -452,6 +452,8 @@ class _EvPlayerControlsState extends State<EvPlayerControls> with TickerProvider
                             Row(
                               mainAxisSize: MainAxisSize.min, spacing: s.rem(0.125),
                               children: [
+                                if (snap.chapters.isNotEmpty)
+                                  _tool(s, paper, 'ev_player_tab_chapters', '章节', EvIcons.chapters, () => widget.onOpenPanelTab?.call('chapters'), active: widget.panelOpen && widget.activePanelTab == 'chapters'),
                                 _tool(s, paper, 'ev_player_tab_subs', '字幕', EvIcons.cc, () => widget.onOpenPanelTab?.call('subs'), active: widget.panelOpen && widget.activePanelTab == 'subs'),
                                 _tool(s, paper, 'ev_player_tab_audio', '音频', EvIcons.audio, () => widget.onOpenPanelTab?.call('audio'), active: widget.panelOpen && widget.activePanelTab == 'audio'),
                                 _a4kBtn(s, paper),

@@ -16,7 +16,7 @@ import 'package:moonfin/embyview/ui/player/panel/ev_audio_video_tabs.dart';
 import 'package:moonfin/embyview/ui/player/panel/ev_player_panel.dart';
 
 /// Main Stage 5 player control page composing opening transition, video frame,
-/// OSD controls, overlays, and the three-tab side panel around [PlaybackSession].
+/// OSD controls, overlays, and the four-tab side panel around [PlaybackSession].
 class EvPlayerPage extends StatefulWidget {
   const EvPlayerPage({
     super.key,

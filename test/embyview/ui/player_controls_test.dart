@@ -951,5 +951,47 @@ void main() {
       expect(evFormatChapterLabel('城墙夜战'), '城墙夜战');
       expect(evFormatChapterLabel('Tokyo Rain'), 'Tokyo Rain');
     });
+
+    testWidgets('shows chapters shortcut button only when chapters exist and opens chapters tab', (tester) async {
+      _setViewport(tester, const Size(1440, 900));
+
+      for (final mode in const [ThemeMode.cinema, ThemeMode.paper]) {
+        final openedTabs = <String>[];
+        await tester.pumpWidget(
+          _harness(
+            mode: mode,
+            child: EvPlayerControls(
+              snapshot: _sampleSnapshot(),
+              visible: true,
+              panelOpen: true,
+              activePanelTab: 'chapters',
+              onSeek: (_) {},
+              onOpenPanelTab: openedTabs.add,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(tester.takeException(), isNull, reason: 'mode=$mode');
+        expect(find.byKey(const Key('ev_player_tab_chapters')), findsOneWidget);
+
+        await tester.tap(find.byKey(const Key('ev_player_tab_chapters')));
+        await tester.pump();
+        expect(openedTabs, ['chapters']);
+      }
+
+      // Hidden when there are no chapters.
+      await tester.pumpWidget(
+        _harness(
+          child: EvPlayerControls(
+            snapshot: _sampleSnapshot(chapters: const []),
+            visible: true,
+            panelOpen: false,
+            onSeek: (_) {},
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byKey(const Key('ev_player_tab_chapters')), findsNothing);
+    });
   });
 }

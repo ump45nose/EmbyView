@@ -59,6 +59,7 @@ abstract final class EvIcons {
   static const cc = EvIconData('cc', 'r 3,5,18,14 | a 9.6,12,2.6,40,320 | a 15.8,12,2.6,40,320');
   static const audio = EvIconData('audio', 'p 4,10 4,14 | p 8,7 8,17 | p 12,4 12,20 | p 16,8 16,16 | p 20,10.5 20,13.5');
   static const image = EvIconData('image', 'r 3,5,18,14 | C 9,10,1.8 | B 3.4,17.6 9,12.6 12.6,15.6 15.4,13 20.6,17.6');
+  static const chapters = EvIconData('chapters', 'd 5,7 | p 9,7 19.5,7 | d 5,12 | p 9,12 19.5,12 | d 5,17 | p 9,17 19.5,17');
   static const vol = EvIconData('vol', 'B 3.8,9.4 7.4,9.4 12,5.4 12,18.6 7.4,14.6 3.8,14.6 | a 12.5,12,4,-45,45 | a 12.5,12,7.6,-48,48');
   static const mute = EvIconData('mute', 'B 3.8,9.4 7.4,9.4 12,5.4 12,18.6 7.4,14.6 3.8,14.6 | p 16.2,9.4 21,14.6 | p 21,9.4 16.2,14.6');
   static const back10 = EvIconData('back10', 'a 12,12,7.8,180,-130 | p 4.2,4.4 4.2,9.2 9,9.2 | lbl 12.4,15.4,6.6,10');
@@ -130,7 +131,7 @@ abstract final class EvIcons {
   static const List<EvIconData> all = [
     navHome, navAnime, navMovie, navTv, navDoc, navBox, navSearch,
     play, pause, next, more, star, plus, check, left, right, down, x,
-    search, sort, filter, spark, aisub, cc, audio, image, vol, mute,
+    search, sort, filter, spark, aisub, cc, audio, image, chapters, vol, mute,
     back10, fwd10, pip, full, gear, users, film, wave, key, info,
     shuffle, grid, ok, a4k, cmp, palette, lang, stack, edit, zones,
     heart, rocket, ghost, music, balloon, ball, book, globe, crown,

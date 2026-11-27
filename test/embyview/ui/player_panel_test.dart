@@ -101,6 +101,7 @@ PlaybackSnapshot _snap({
   String? selectedSubtitleId = 'emb',
   String? subtitleOverlayId,
   String? selectedAudioId = 'ja',
+  List<ChapterMark> chapters = const [],
   List<PlaybackTrack>? subtitleTracks,
   List<PlaybackTrack>? audioTracks,
   Anime4kSnapshot anime4k = const Anime4kSnapshot(),
@@ -110,6 +111,7 @@ PlaybackSnapshot _snap({
     generation: generation,
     target: PlayTarget(itemId: card.id, seriesId: card.seriesId, seasonId: card.seasonId, episodeNumber: card.episodeNumber),
     item: card, phase: PlaybackPhase.playing, position: position, duration: duration,
+    chapters: chapters,
     selectedSubtitleId: selectedSubtitleId, subtitleOverlayId: subtitleOverlayId, selectedAudioId: selectedAudioId,
     subtitleTracks: subtitleTracks ?? const [
       PlaybackTrack(id: 'emb', name: '简体中文', language: 'zh', source: PlaybackTrackSource.embedded, format: 'ASS'),
@@ -635,12 +637,20 @@ void main() {
         supported: true, requested: true, state: Anime4kState.active, comparison: ComparisonState.available,
         originalSize: VideoSize(width: 1920, height: 1080), enhancedSize: VideoSize(width: 3840, height: 2160),
       );
-      final snap = _snap(anime4k: activeA4k);
+      final snap = _snap(
+        anime4k: activeA4k,
+        chapters: const [
+          ChapterMark(start: Duration.zero, name: 'Intro'),
+          ChapterMark(start: Duration(minutes: 2), name: 'Chapter 2'),
+          ChapterMark(start: Duration(minutes: 10), name: '城墙夜战'),
+          ChapterMark(start: Duration(minutes: 22), name: 'Credits'),
+        ],
+      );
 
       for (final size in const [Size(1440, 900), Size(2560, 1440)]) {
         await tester.binding.setSurfaceSize(size);
         for (final mode in const [ThemeMode.cinema, ThemeMode.paper]) {
-          for (final tab in const ['subs', 'audio', 'video']) {
+          for (final tab in const ['subs', 'audio', 'video', 'chapters']) {
             await tester.pumpWidget(_wrap(
               size: size, mode: mode,
               child: Stack(fit: StackFit.expand, children: [
@@ -818,6 +828,103 @@ void main() {
 
       expect(find.text('把外语对白听写成文字，再译成简体中文。约 40 秒后开始出字，之后一直领先播放进度。'), findsOneWidget);
       expect(find.descendant(of: find.byKey(const Key('ev_ai_translate')), matching: find.text('外语 → 中文')), findsOneWidget);
+    });
+  });
+
+  group('Chapters tab (Issue #6)', () {
+    testWidgets('renders localized chapters, highlights active chapter, and seeks on tap in cinema & paper', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      const chapters = [
+        ChapterMark(start: Duration.zero, name: 'Intro'),
+        ChapterMark(start: Duration(minutes: 2, seconds: 5), name: 'Chapter 2'),
+        ChapterMark(start: Duration(minutes: 8), name: '城墙夜战'),
+        ChapterMark(start: Duration(minutes: 22, seconds: 30), name: 'Credits'),
+        ChapterMark(start: Duration(hours: 1, minutes: 2, seconds: 9), name: '  '),
+      ];
+
+      for (final mode in const [ThemeMode.cinema, ThemeMode.paper]) {
+        final sought = <Duration>[];
+        String? selectedTab;
+        await tester.pumpWidget(_wrap(
+          mode: mode,
+          child: EvPlayerPanel(
+            open: true,
+            activeTab: 'chapters',
+            snapshot: _snap(
+              position: const Duration(minutes: 9, seconds: 15),
+              duration: const Duration(hours: 1, minutes: 10),
+              chapters: chapters,
+            ),
+            onSelectTab: (tab) => selectedTab = tab,
+            onClose: () {},
+            onSelectSubtitle: (_) {},
+            onSelectAudio: (_) {},
+            onSeek: sought.add,
+            onToggleAnime4k: () {},
+            onStartCompare: () {},
+          ),
+        ));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull, reason: 'mode=$mode');
+
+        expect(find.byKey(const Key('ev_panel_chapters_tab')), findsOneWidget);
+        expect(find.text('5 章'), findsOneWidget);
+        expect(find.text('片头'), findsOneWidget);
+        expect(find.text('第 2 章'), findsOneWidget);
+        expect(find.text('城墙夜战'), findsOneWidget);
+        expect(find.text('片尾'), findsOneWidget);
+        expect(find.text('第 5 章'), findsOneWidget);
+        expect(find.text('0:00'), findsOneWidget);
+        expect(find.text('2:05'), findsOneWidget);
+        expect(find.text('8:00'), findsOneWidget);
+        expect(find.text('22:30'), findsOneWidget);
+        expect(find.text('1:02:09'), findsOneWidget);
+
+        // Position 9:15 is inside chapter index 2 (8:00..22:30).
+        for (var i = 0; i < chapters.length; i++) {
+          final row = tester.widget<EvPanelTrackRow>(find.byKey(Key('ev_chapter_row_$i')));
+          expect(row.selected, i == 2, reason: 'mode=$mode row=$i');
+        }
+
+        // Tapping chapter row triggers onSeek with exact chapter start.
+        await tester.tap(find.byKey(const Key('ev_chapter_row_3')));
+        await tester.pump();
+        expect(sought, [const Duration(minutes: 22, seconds: 30)]);
+
+        // Tapping tab header switches tabs cleanly.
+        await tester.tap(find.byKey(const Key('ev_panel_tab_chapters')));
+        await tester.pump();
+        expect(selectedTab, 'chapters');
+      }
+    });
+
+    testWidgets('shows concise Chinese empty state when movie has no chapters', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      for (final mode in const [ThemeMode.cinema, ThemeMode.paper]) {
+        await tester.pumpWidget(_wrap(
+          mode: mode,
+          child: EvPlayerPanel(
+            open: true,
+            activeTab: 'chapters',
+            snapshot: _snap(chapters: const []),
+            onSelectTab: (_) {},
+            onClose: () {},
+            onSelectSubtitle: (_) {},
+            onSelectAudio: (_) {},
+            onSeek: (_) {},
+            onToggleAnime4k: () {},
+            onStartCompare: () {},
+          ),
+        ));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull, reason: 'mode=$mode');
+        expect(find.byKey(const Key('ev_chapters_empty')), findsOneWidget);
+        expect(find.text('当前影片没有章节信息'), findsOneWidget);
+      }
     });
   });
 }

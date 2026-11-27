@@ -794,6 +794,63 @@ void main() {
     await tester.pump();
     expect(closed, 1);
   });
+
+  testWidgets('control bar chapters button opens chapters tab and tapping a chapter seeks session', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final base = _initialSnap()._withPhase(PlaybackPhase.playing);
+    final session = _TestSession(
+      PlaybackSnapshot(
+        generation: base.generation,
+        target: base.target,
+        item: base.item,
+        phase: PlaybackPhase.playing,
+        position: const Duration(minutes: 3),
+        duration: base.duration,
+        bufferedUntil: base.bufferedUntil,
+        chapters: const [
+          ChapterMark(start: Duration.zero, name: 'Intro'),
+          ChapterMark(start: Duration(minutes: 2), name: 'Chapter 2'),
+          ChapterMark(start: Duration(minutes: 12), name: '决战时刻'),
+        ],
+        audioTracks: base.audioTracks,
+        subtitleTracks: base.subtitleTracks,
+        selectedAudioId: base.selectedAudioId,
+        selectedSubtitleId: base.selectedSubtitleId,
+      ),
+    );
+
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(size: Size(1440, 900), devicePixelRatio: 1.0),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: EvThemeScope(
+            themeMode: ThemeMode.cinema,
+            child: EvPlayerPage(session: session),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 900));
+
+    await tester.tap(find.byKey(const Key('ev_player_tab_chapters')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 800));
+    expect(find.byKey(const Key('ev_panel_chapters_tab')), findsOneWidget);
+    expect(find.text('片头'), findsOneWidget);
+    expect(find.text('第 2 章'), findsOneWidget);
+    expect(find.text('决战时刻'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('ev_chapter_row_2')));
+    await tester.pump();
+    expect(session.seekCalls, [const Duration(minutes: 12)]);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await session.close();
+  });
 }
 
 extension on PlaybackSnapshot {
