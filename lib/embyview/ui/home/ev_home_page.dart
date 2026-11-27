@@ -38,6 +38,8 @@ class _EvHomePageState extends State<EvHomePage> {
   final ValueNotifier<bool> _hoverPaused = ValueNotifier<bool>(false);
 
   EvScope? _scope;
+  StreamSubscription<EvPlaybackEnded>? _playbackEndedSub;
+  bool _pendingPlaybackRefresh = false;
   EmbyViewData? _attachedData;
   String? _attachedSessionId;
   StreamSubscription<LocalPreferences>? _prefsSub;
@@ -98,8 +100,32 @@ class _EvHomePageState extends State<EvHomePage> {
       }
       scope.shell.onRetryHome = _handleNoticeRetry;
     }
+    if (!identical(_scope?.shell, scope.shell)) {
+      unawaited(_playbackEndedSub?.cancel());
+      _playbackEndedSub = scope.shell.playbackEnded.listen((event) {
+        final services = _scope?.services;
+        if (!mounted || services == null || !event.matches(services)) return;
+        if (_activeForcedState != null) return;
+        if (TickerMode.valuesOf(context).enabled) {
+          unawaited(_loadHome());
+        } else {
+          // A detail/search overlay owns the shared stage and chrome.
+          _pendingPlaybackRefresh = true;
+        }
+      });
+    }
     _scope = scope;
-    if (!changed) return;
+    final visible = TickerMode.valuesOf(context).enabled;
+    if (!changed) {
+      if (_pendingPlaybackRefresh && visible) {
+        _pendingPlaybackRefresh = false;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _activeForcedState == null) unawaited(_loadHome());
+        });
+      }
+      return;
+    }
+    _pendingPlaybackRefresh = false;
 
     final sessionChanged = _attachedSessionId != null && _attachedSessionId != scope.services.sessionId;
     if (sessionChanged) {
@@ -435,7 +461,7 @@ class _EvHomePageState extends State<EvHomePage> {
         _emptyLibraries = false;
         _error = null;
       });
-      if (scope.shell.current is EvHomeDestination) {
+      if (scope.shell.current is EvHomeDestination && TickerMode.valuesOf(context).enabled) {
         scope.stage
           ..setMode(nextHero != null ? EvStageMode.hero : EvStageMode.ambient)
           ..setBaseBackdrop(nextHero?.card.art.stage);
@@ -572,6 +598,7 @@ class _EvHomePageState extends State<EvHomePage> {
 
   @override
   void dispose() {
+    unawaited(_playbackEndedSub?.cancel());
     _cancelAutoRetryTimer();
     if (identical(_scope?.shell.onRetryHome, _handleNoticeRetry)) {
       _scope!.shell.onRetryHome = null;

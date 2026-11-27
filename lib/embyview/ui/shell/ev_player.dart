@@ -26,6 +26,17 @@ abstract final class EvPlayer {
   static EvPlayerMenuDelegate? _activePlayerActions;
   static EvPlayerMenuDelegate? get activePlayerActions => _activePlayerActions;
 
+  static PlaybackSession? _activeSession;
+  static Future<void>? _closingSession;
+
+  /// Shared by returning from the player and application teardown. Keep the
+  /// session registered until its final stop report has drained.
+  static Future<void> closeActiveSession() {
+    final session = _activeSession;
+    if (session == null) return Future<void>.value();
+    return _closingSession ??= Future<void>.sync(session.close);
+  }
+
   /// Registers the currently active player's menu bar control callbacks.
   static void registerActivePlayer(EvPlayerMenuDelegate delegate) {
     _activePlayerActions = delegate;
@@ -60,6 +71,7 @@ abstract final class EvPlayer {
       resolvedImmersion?.enterPlayer();
       entered = resolvedImmersion != null;
       session = resolvedPlayback.open(target);
+      _activeSession = session;
       final active = session;
       final customBuilder = builder ?? pageBuilder;
       await navigator.push<void>(PageRouteBuilder<void>(
@@ -88,7 +100,28 @@ abstract final class EvPlayer {
         ),
       ));
     } finally {
-      try { await session?.close(); } catch (_) {}
+      if (session != null) {
+        try {
+          // A queue may advance to another episode while the player is open.
+          final snapshot = session.snapshot;
+          final current = snapshot.target;
+          final targets = [target, PlayTarget(
+            itemId: current.itemId,
+            seriesId: current.seriesId ?? snapshot.item?.seriesId,
+            seasonId: current.seasonId,
+            episodeNumber: current.episodeNumber,
+          )];
+          await closeActiveSession();
+          scope?.shell.notifyPlaybackEnded(EvPlaybackEnded(
+            scope.services.sessionId, scope.services.data, targets,
+          ));
+        } catch (e, st) {
+          debugPrint('[EvPlayer] Closing playback session failed: $e\n$st');
+        } finally {
+          _activeSession = null;
+          _closingSession = null;
+        }
+      }
       if (entered) resolvedImmersion?.exitPlayer();
       _lastOpenedAt = null;
       _isOpening = false;

@@ -1,7 +1,10 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:moonfin/embyview/embyview.dart';
+import 'package:moonfin/embyview/ui/shell/ev_player.dart';
 import 'package:moonfin/playback/mpv_player_registry.dart';
 import 'package:moonfin/util/app_exit.dart';
 
@@ -16,6 +19,29 @@ class _FakePlayer extends Fake implements Player {
     disposeCalls++;
     return _dispose();
   }
+}
+
+class _BlockedSession extends Fake implements PlaybackSession {
+  final gate = Completer<void>();
+  int closeCalls = 0;
+
+  @override
+  PlaybackSnapshot get snapshot => const PlaybackSnapshot(
+    generation: 1, target: PlayTarget(itemId: 'episode'),
+  );
+
+  @override
+  Future<void> close() {
+    closeCalls++;
+    return gate.future;
+  }
+}
+
+class _BlockedPlayback extends Fake implements EmbyViewPlayback {
+  final session = _BlockedSession();
+
+  @override
+  PlaybackSession open(PlayTarget target) => session;
 }
 
 void main() {
@@ -78,7 +104,35 @@ void main() {
     expect(() => registry.create(), throwsStateError);
   });
 
-  test('prepareForExit gives every caller the same cleanup future', () {
-    expect(identical(AppExit.prepareForExit(), AppExit.prepareForExit()), isTrue);
+  testWidgets('prepareForExit caps the stop wait and shares teardown across calls', (tester) async {
+    final playback = _BlockedPlayback();
+    final player = MpvPlayerRegistry.instance.track(_FakePlayer(() async {})) as _FakePlayer;
+    final nav = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(Directionality(
+      textDirection: TextDirection.ltr,
+      child: Navigator(key: nav, onGenerateRoute: (_) => PageRouteBuilder<void>(
+        pageBuilder: (ctx, _, _) => GestureDetector(
+          onTap: () => unawaited(EvPlayer.open(ctx, const PlayTarget(itemId: 'episode'),
+            playback: playback, builder: (_, _, {origin, art}) => const SizedBox.expand())),
+          child: const Text('play'),
+        ),
+      )),
+    ));
+    await tester.tap(find.text('play'));
+    await tester.pumpAndSettle();
+    final exit = AppExit.prepareForExit();
+    expect(identical(exit, AppExit.prepareForExit()), isTrue);
+    await tester.pump(const Duration(milliseconds: 2499));
+    expect(player.disposeCalls, 0);
+    expect(playback.session.closeCalls, 1);
+    await tester.pump(const Duration(milliseconds: 1));
+    await exit;
+    expect(player.disposeCalls, 1);
+
+    nav.currentState!.pop();
+    playback.session.gate.complete();
+    await tester.pumpAndSettle();
+    expect(playback.session.closeCalls, 1);
+    expect(EvPlayer.isOpening, isFalse);
   });
 }

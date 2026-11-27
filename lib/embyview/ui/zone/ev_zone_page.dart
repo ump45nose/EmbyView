@@ -24,6 +24,8 @@ class _EvZonePageState extends State<EvZonePage> {
   final ValueNotifier<bool> _hoverPaused = ValueNotifier<bool>(false);
 
   EvScope? _scope;
+  StreamSubscription<EvPlaybackEnded>? _playbackEndedSub;
+  bool _pendingPlaybackRefresh = false;
   EmbyViewData? _attachedData;
   String? _attachedSessionId;
   StreamSubscription<LocalPreferences>? _prefsSub;
@@ -54,9 +56,30 @@ class _EvZonePageState extends State<EvZonePage> {
     final changed = _scope == null ||
         !identical(_attachedData, scope.services.data) ||
         _attachedSessionId != scope.services.sessionId;
+    if (!identical(_scope?.shell, scope.shell)) {
+      unawaited(_playbackEndedSub?.cancel());
+      _playbackEndedSub = scope.shell.playbackEnded.listen((event) {
+        final services = _scope?.services;
+        if (!mounted || services == null || !event.matches(services)) return;
+        if (TickerMode.valuesOf(context).enabled) {
+          unawaited(_loadZone());
+        } else {
+          // A detail/search overlay owns the shared stage and chrome.
+          _pendingPlaybackRefresh = true;
+        }
+      });
+    }
     _scope = scope;
+    final visible = TickerMode.valuesOf(context).enabled;
+    if (!changed && _pendingPlaybackRefresh && visible) {
+      _pendingPlaybackRefresh = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_loadZone());
+      });
+    }
 
     if (changed) {
+      _pendingPlaybackRefresh = false;
       if (_hoveredCardId != null) {
         scope.immersion.onCardHoverEnd(cardId: _hoveredCardId);
         _hoveredCardId = null;
@@ -108,7 +131,7 @@ class _EvZonePageState extends State<EvZonePage> {
   }
 
   bool _canUpdateStage(EvScope scope) =>
-      !_ownedZoneDest || scope.shell.current == EvZoneDestination(widget.zoneId);
+      TickerMode.valuesOf(context).enabled && (!_ownedZoneDest || scope.shell.current == EvZoneDestination(widget.zoneId));
 
   Color? _pendingAmbientColor(EvScope scope, EvTheme theme) {
     for (final z in scope.shell.zones) {
@@ -207,8 +230,8 @@ class _EvZonePageState extends State<EvZonePage> {
           ..setMode(nextHero != null ? EvStageMode.hero : EvStageMode.ambient)
           ..setAmbientColor(ambient)
           ..setBaseBackdrop(nextHero?.card.art.stage);
+        scope.shell.updateChrome(titlePlate: plate, rightActions: _buildRightActions(result));
       }
-      scope.shell.updateChrome(titlePlate: plate, rightActions: _buildRightActions(result));
     } catch (e) {
       if (!mounted || token != _loadToken || widget.zoneId != expectedZoneId) return;
       if (_zoneData == null) _clearOwnedChrome(scope);
@@ -303,6 +326,7 @@ class _EvZonePageState extends State<EvZonePage> {
 
   @override
   void dispose() {
+    unawaited(_playbackEndedSub?.cancel());
     unawaited(_prefsSub?.cancel());
     if (_hoveredCardId != null) _scope?.immersion.onCardHoverEnd(cardId: _hoveredCardId);
     _scrollController..removeListener(_onScroll)..dispose();

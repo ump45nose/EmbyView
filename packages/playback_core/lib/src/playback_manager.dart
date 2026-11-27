@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'chapter_steps.dart';
 import 'media_stream_resolver.dart';
@@ -4512,9 +4513,19 @@ class PlaybackManager implements AudioOwnable {
             generation.stopPosition,
             releaseLiveStream: _claimLiveStreamRelease(generation.resolution),
           )
-          .catchError((_) {});
+          .catchError((Object error, StackTrace stack) {
+            _logStopReportFailure(error, stack);
+          });
       _trackPlaybackReport(_lastStopReport);
-    } catch (_) {}
+    } catch (error, stack) {
+      _logStopReportFailure(error, stack);
+    }
+  }
+
+  void _logStopReportFailure(Object error, StackTrace stack) {
+    final message = 'Playback stop report failed: $error';
+    developer.log(message, name: 'PlaybackManager', stackTrace: stack);
+    _diagnosticLogger?.call(message);
   }
 
   Future<void> _lastStopReport = Future<void>.value();
@@ -6132,10 +6143,14 @@ class PlaybackManager implements AudioOwnable {
                       pos,
                       releaseLiveStream: _claimLiveStreamRelease(resolution),
                     )
-                    .catchError((_) {}) ??
+                    .catchError((Object error, StackTrace stack) {
+                      _logStopReportFailure(error, stack);
+                    }) ??
                 Future<void>.value();
             _trackPlaybackReport(_lastStopReport);
-          } catch (_) {}
+          } catch (error, stack) {
+            _logStopReportFailure(error, stack);
+          }
         }
         if (releaseServerResources &&
             resolution.playMethod != StreamPlayMethod.directPlay) {

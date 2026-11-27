@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart'
@@ -1116,6 +1117,12 @@ class _GlobalShortcutScopeState extends State<_GlobalShortcutScope>
         eventName == 'leave-full-screen') {
       _scheduleSaveGeometry();
     }
+  }
+
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    await AppExit.prepareForExit();
+    return AppExitResponse.exit;
   }
 
   @override

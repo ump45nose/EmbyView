@@ -803,6 +803,39 @@ Widget _wrapDetail(
 }
 
 void main() {
+  testWidgets('episode exit refreshes series detail and played state without resetting its page', (tester) async {
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final h = _createHarness(initialPrefs: const LocalPreferences(detailTrailerDelay: null));
+    addTearDown(h.dispose);
+    PlayTarget? next;
+    await tester.pumpWidget(_wrapDetail(h, child: EvDetailPage(itemId: 's1', enableAnimations: false, onPlayTarget: (t, _, _) => next = t)));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ev_episode_played_s2_e2')), findsNothing);
+
+    final old = h.data.episodesBySeason['s1:sea2']!;
+    h.data.episodesBySeason['s1:sea2'] = SeasonEpisodes(
+      season: old.season,
+      playedCount: 2,
+      episodes: [
+        old.episodes.first,
+        EpisodeCard(card: old.episodes[1].card, episodeNumber: 2, played: true, still: old.episodes[1].still),
+        old.episodes.last,
+      ],
+    );
+    final detail = h.data.details['s1']!;
+    h.data.details['s1'] = MediaDetail(card: detail.card, playTarget: const PlayTarget(itemId: 's2_e3', seriesId: 's1'));
+    h.shell.notifyPlaybackEnded(EvPlaybackEnded(h.services.sessionId, h.data, const [PlayTarget(itemId: 's2_e2', seriesId: 's1')]));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('ev_detail_loading')), findsNothing);
+    expect(find.byKey(const Key('ev_episode_played_s2_e2')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('ev_detail_play_btn')));
+    await tester.pumpAndSettle();
+    expect(next?.itemId, 's2_e3');
+  });
+
   group('C4.1 Theme music, prepare preflight, chrome, and cleanup', () {
     testWidgets(
       'prepares playback, updates chrome, plays theme with live ring progress, mutes, and stops theme/video on leave',

@@ -559,6 +559,7 @@ Widget _wrapHome(
   _Harness h, {
   Size size = const Size(1440, 900),
   bool enableAnimations = false,
+  bool pageVisible = true,
 }) {
   return MaterialApp(
     home: MediaQuery(
@@ -575,7 +576,7 @@ Widget _wrapHome(
               fit: StackFit.expand,
               children: [
                 EvStage(controller: h.stage, immersion: h.immersion, enableMotion: false),
-                EvHomePage(enableAnimations: enableAnimations),
+                TickerMode(enabled: pageVisible, child: EvHomePage(enableAnimations: enableAnimations)),
               ],
             ),
           ),
@@ -586,6 +587,66 @@ Widget _wrapHome(
 }
 
 void main() {
+  testWidgets('playback refresh invalidates the home cache without resetting scroll or showing a skeleton', (tester) async {
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final refreshed = Completer<HomeData>();
+    var calls = 0;
+    final original = _buildRichHomeData(ShelfSort.added);
+    final h = _createHarness(homeBuilder: (_) async =>
+        ++calls == 1 ? original : refreshed.future);
+    addTearDown(h.dispose);
+    await tester.pumpWidget(_wrapHome(h));
+    await tester.pumpAndSettle();
+    final scroller = tester.widget<SingleChildScrollView>(find.byKey(const Key('ev_home_scroller')));
+    scroller.controller!.jumpTo(300);
+    await tester.pumpAndSettle();
+    final offset = scroller.controller!.offset;
+
+    h.shell.notifyPlaybackEnded(EvPlaybackEnded('different-session', h.data, const [PlayTarget(itemId: 'x')]));
+    await tester.pump();
+    expect(calls, 1);
+    expect(h.shell.cachedHomeFor(h.services.sessionId, h.data), isNotNull);
+
+    h.shell.notifyPlaybackEnded(EvPlaybackEnded(h.services.sessionId, h.data, const [PlayTarget(itemId: 'x')]));
+    await tester.pump();
+    expect(calls, 2);
+    expect(h.shell.cachedHomeFor(h.services.sessionId, h.data), isNull);
+    expect(find.byKey(const Key('ev_home_skeletons')), findsNothing);
+    expect(scroller.controller!.offset, offset);
+
+    refreshed.complete(_buildRichHomeData(ShelfSort.score));
+    await tester.pumpAndSettle();
+    expect(h.shell.cachedHomeFor(h.services.sessionId, h.data), isNotNull);
+    expect(scroller.controller!.offset, offset);
+    expect(find.text('高分番剧一'), findsOneWidget);
+  });
+
+  testWidgets('a hidden home defers playback refresh until it owns the stage again', (tester) async {
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final h = _createHarness();
+    addTearDown(h.dispose);
+    await tester.pumpWidget(_wrapHome(h));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(_wrapHome(h, pageVisible: false));
+    await tester.pumpAndSettle();
+    h.stage.setMode(EvStageMode.detail);
+    h.shell.notifyPlaybackEnded(EvPlaybackEnded(h.services.sessionId, h.data, const [PlayTarget(itemId: 'x')]));
+    await tester.pumpAndSettle();
+    expect(h.stage.mode, EvStageMode.detail);
+    expect(h.data.homeCalls, [ShelfSort.added]);
+    await tester.pumpWidget(_wrapHome(h));
+    await tester.pumpAndSettle();
+    expect(h.data.homeCalls, [ShelfSort.added, ShelfSort.added]);
+    expect(h.stage.mode, EvStageMode.hero);
+    expect(find.byKey(const Key('ev_home_skeletons')), findsNothing);
+  });
+
   group('C3.9 & C3.10 EvHomePage, EvHero, EvZoneStrip, EvFeatureSpread', () {
     testWidgets(
       'renders hero metadata, 9-second rotation, dot click, card hover preview, and all 9 sections in exact order',
@@ -826,10 +887,12 @@ void main() {
         await tester.tap(find.byKey(const Key('test_player_page')));
         await tester.pumpAndSettle();
 
+        expect(h.data.homeCalls, [ShelfSort.added, ShelfSort.added]);
+
         // 3. Changing preferences.seriesSort re-requests data.home(seriesSort: ShelfSort.score).
         await h.prefs.update(const LocalPreferences(seriesSort: ShelfSort.score));
         await tester.pumpAndSettle();
-        expect(h.data.homeCalls, [ShelfSort.added, ShelfSort.score]);
+        expect(h.data.homeCalls, [ShelfSort.added, ShelfSort.added, ShelfSort.score]);
         expect(find.text('高分番剧一'), findsOneWidget);
         expect(find.text('评分最高'), findsWidgets);
 

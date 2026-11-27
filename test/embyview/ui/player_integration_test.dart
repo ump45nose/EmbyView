@@ -5,6 +5,9 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:moonfin/playback/mpv_player_registry.dart';
+import 'package:moonfin/util/app_exit.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/entry.dart';
 import 'package:moonfin/embyview/ui/detail/ev_detail_page.dart';
@@ -29,7 +32,8 @@ class _FakeArt implements ArtworkRef {
 }
 
 class _TestSession implements PlaybackSession {
-  _TestSession(this._snapshot, {this.onThumbnail});
+  _TestSession(this._snapshot, {this.onThumbnail, this.onClose});
+  final Future<void> Function()? onClose;
 
   PlaybackSnapshot _snapshot;
   final Future<ThumbnailFrame?> Function(Duration position)? onThumbnail;
@@ -70,7 +74,7 @@ class _TestSession implements PlaybackSession {
   @override Future<void> dismissCreditsPrompt() async { dismissCreditsCalls++; emit(_copy(creditsPrompt: CreditsPromptState.dismissed)); }
   @override Future<ThumbnailFrame?> thumbnailAt(Duration position) async => onThumbnail != null ? onThumbnail!(position) : null;
   @override Future<void> retryOpen() async { retryOpenCalls++; emit(_copy(phase: PlaybackPhase.preparing)); }
-  @override Future<void> close() async { closeCalls++; await _ctrl.close(); }
+  @override Future<void> close() async { closeCalls++; await onClose?.call(); await _ctrl.close(); }
 
   PlaybackSnapshot _copy({
     int? generation,
@@ -223,7 +227,66 @@ PlaybackSnapshot _initialSnap() {
   );
 }
 
+class _ExitTestPlayer extends Fake implements Player {
+  bool disposed = false;
+  @override
+  Future<void> dispose() async { disposed = true; }
+}
+
 void main() {
+  testWidgets('application exit waits for playback stop, shares close with route pop and notifies only after drain', (tester) async {
+    final gate = Completer<void>();
+    final session = _TestSession(_initialSnap(), onClose: () => gate.future);
+    final services = EmbyViewServices(preferences: _StubPrefs(), accounts: _StubAccounts(), playback: _TestPlayback(session));
+    final stage = EvStageController();
+    final immersion = Immersion(stage: stage, services: services);
+    final shell = EvShellController();
+    final events = <EvPlaybackEnded>[];
+    final sub = shell.playbackEnded.listen(events.add);
+    addTearDown(() async {
+      await sub.cancel();
+      immersion.dispose();
+      stage.dispose();
+      shell.dispose();
+    });
+    final player = _ExitTestPlayer();
+    MpvPlayerRegistry.instance.track(player);
+    final nav = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(Directionality(
+      textDirection: TextDirection.ltr,
+      child: EvScope(services: services, stage: stage, immersion: immersion, shell: shell,
+        child: Navigator(key: nav, onGenerateRoute: (_) => PageRouteBuilder<void>(
+          pageBuilder: (ctx, _, _) => GestureDetector(
+            key: const Key('exit_play'),
+            onTap: () => unawaited(EvPlayer.open(ctx, const PlayTarget(itemId: 'ep9'), builder: (_, _, {origin, art}) => const SizedBox.expand())),
+            child: const Text('play'),
+          ),
+        )),
+      ),
+    ));
+    await tester.tap(find.byKey(const Key('exit_play')));
+    await tester.pumpAndSettle();
+
+    final exiting = AppExit.prepareForExit();
+    await tester.pump();
+    expect(session.closeCalls, 1);
+    expect(player.disposed, isFalse);
+    nav.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(session.closeCalls, 1);
+    expect(events, isEmpty);
+    expect(player.disposed, isFalse);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+    await exiting;
+    expect(player.disposed, isTrue);
+    expect(session.closeCalls, 1);
+    expect(events.single.targets.first.itemId, 'ep9');
+    expect(EvPlayer.isOpening, isFalse);
+  });
+
+
   testWidgets('subtitle failure uses the existing toast once on the active playback', (tester) async {
     final session = _TestSession(_initialSnap()._withPhase(PlaybackPhase.playing));
     await tester.pumpWidget(

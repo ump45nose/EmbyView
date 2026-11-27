@@ -26,6 +26,7 @@ class EvDetailPage extends StatefulWidget {
 class _EvDetailPageState extends State<EvDetailPage> {
   final _scroll = ScrollController();
   EvScope? _scope;
+  StreamSubscription<EvPlaybackEnded>? _playbackEndedSub;
   Immersion? _attachedImmersion;
   EmbyViewData? _attachedData;
   String? _attachedSessionId, _subError, _actionError, _hoveredEpId;
@@ -33,6 +34,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
   StreamSubscription<List<SeasonJob>>? _jobsSub;
 
   LocalPreferences _prefs = const LocalPreferences();
+  int _playbackRefreshToken = 0;
   int _loadToken = 0, _seasonIdx = 0, _bdIdx = 0, _stillIdx = 0, _cdSec = 0, _cdTotal = 0;
   bool _loading = true, _loadingEps = false, _quoting = false, _trailerLive = false, _stillLive = false, _trailerStarting = false;
   bool _epHovering = false, _themeStarted = false, _ownsChrome = false;
@@ -60,6 +62,14 @@ class _EvDetailPageState extends State<EvDetailPage> {
     super.didChangeDependencies();
     final scope = EvScope.of(context);
     final changed = _scope == null || !identical(_attachedData, scope.services.data) || _attachedSessionId != scope.services.sessionId;
+    if (!identical(_scope?.shell, scope.shell)) {
+      unawaited(_playbackEndedSub?.cancel());
+      _playbackEndedSub = scope.shell.playbackEnded.listen((event) {
+        final services = _scope?.services;
+        if (!mounted || services == null || !event.matches(services)) return;
+        unawaited(_refreshPlaybackProgress(event));
+      });
+    }
     _scope = scope;
     if (!changed) return;
     _attachedData = scope.services.data; _attachedSessionId = scope.services.sessionId;
@@ -117,6 +127,52 @@ class _EvDetailPageState extends State<EvDetailPage> {
     if (d == null) return const ArtworkPlan();
     return _backdrops.isEmpty ? d.card.art.stage
         : ArtworkPlan(layers: [ArtworkLayer(source: _backdrops[i.clamp(0, _backdrops.length - 1)], fit: ArtworkFit.cover)], fallbackTitle: d.card.title);
+  }
+
+  Future<void> _refreshPlaybackProgress(EvPlaybackEnded event) async {
+    final data = _attachedData, id = widget.itemId, token = _loadToken;
+    final current = _detail;
+    if (data == null) return;
+    if (!event.targets.any((target) =>
+        target.itemId == id || target.seriesId == id ||
+        target.itemId == current?.playTarget?.itemId ||
+        (current?.collectionItems.any((card) => card.id == target.itemId) ?? false))) {
+      return;
+    }
+    if (current == null) {
+      await _loadAll();
+      return;
+    }
+
+    final refresh = ++_playbackRefreshToken;
+    bool isCurrent() => mounted && token == _loadToken && refresh == _playbackRefreshToken;
+    final updated = await _safe<MediaDetail?>(() => data.detail(id), null);
+    if (!isCurrent()) return;
+    if (updated != null) {
+      setState(() {
+        _detail = updated;
+        if (!_savingPlayed) _played = updated.card.played == true;
+      });
+    }
+    if (current.card.kind == MediaKind.series) {
+      final seasons = await _safe(() => data.seasons(id), _seasons);
+      if (!isCurrent()) return;
+      final cachedIds = {..._epCache.keys, if (_curSeason != null) _curSeason!.id};
+      final refreshed = await Future.wait([
+        for (final season in seasons.where((s) => cachedIds.contains(s.id)))
+          _safe<SeasonEpisodes?>(() => data.episodes(id, season.id), null),
+      ]);
+      if (!isCurrent()) return;
+      setState(() {
+        final selectedId = _curSeason?.id;
+        _seasons = seasons;
+        for (final episodes in refreshed.whereType<SeasonEpisodes>()) {
+          _epCache[episodes.season.id] = episodes;
+        }
+        final index = seasons.indexWhere((s) => s.id == selectedId);
+        _seasonIdx = index >= 0 ? index : 0;
+      });
+    }
   }
 
   Future<void> _loadAll() async {
@@ -456,6 +512,7 @@ class _EvDetailPageState extends State<EvDetailPage> {
 
   @override
   void dispose() {
+    unawaited(_playbackEndedSub?.cancel());
     _attachedImmersion?.removeListener(_onImmersionChanged); _attachedImmersion = null;
     unawaited(_prefsSub?.cancel()); unawaited(_jobsSub?.cancel());
     _stopTimers(stopMedia: false);

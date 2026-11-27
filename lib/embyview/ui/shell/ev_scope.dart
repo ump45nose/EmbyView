@@ -63,6 +63,18 @@ class EvChromeTitlePlate {
   @override int get hashCode => Object.hash(iconKey, title, colorSlot, total, unit, addedThisMonth);
 }
 
+/// Playback progress belongs to the authenticated data binding that opened it.
+class EvPlaybackEnded {
+  const EvPlaybackEnded(this.sessionId, this.dataOwner, this.targets);
+
+  final String? sessionId;
+  final EmbyViewData? dataOwner;
+  final List<PlayTarget> targets;
+
+  bool matches(EmbyViewServices services) =>
+      sessionId == services.sessionId && identical(dataOwner, services.data);
+}
+
 /// Shared navigation stack, zone catalog, top-bar chrome state, global overlays
 /// (shortcuts reference & connection notice capsule), and macOS menu bar
 /// dispatcher owned by or supplied to [EvShell].
@@ -199,6 +211,24 @@ class EvShellController extends ChangeNotifier {
     _cachedHomeSessionId = sessionId;
     _cachedHomeDataOwner = dataOwner;
     _cachedHome = home;
+  }
+
+  final _playbackEnded = StreamController<EvPlaybackEnded>.broadcast();
+  Stream<EvPlaybackEnded> get playbackEnded => _playbackEnded.stream;
+
+  void notifyPlaybackEnded(EvPlaybackEnded event) {
+    if (_playbackEnded.isClosed) return;
+    if (_cachedHomeSessionId == event.sessionId &&
+        identical(_cachedHomeDataOwner, event.dataOwner)) {
+      clearHomeCache();
+    }
+    _playbackEnded.add(event);
+  }
+
+  @override
+  void dispose() {
+    unawaited(_playbackEnded.close());
+    super.dispose();
   }
 
   void clearHomeCache() {

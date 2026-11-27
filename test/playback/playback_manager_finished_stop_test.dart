@@ -141,6 +141,7 @@ class _TestService extends Fake implements PlayerService {
   /// Keeps each progress report in flight until the test completes it, like
   /// a slow server.
   final bool holdProgress;
+  bool failStop = false;
   final List<Completer<void>> progressRequests = <Completer<void>>[];
   final List<Duration> stops = <Duration>[];
 
@@ -176,7 +177,10 @@ class _TestService extends Fake implements PlayerService {
     StreamResolutionResult resolution,
     Duration position, {
     bool releaseLiveStream = true,
-  }) async => stops.add(position);
+  }) async {
+    stops.add(position);
+    if (failStop) throw StateError('stop rejected');
+  }
 
   @override
   Future<void> closeLiveStream(String liveStreamId) async {}
@@ -215,6 +219,20 @@ void main() {
   Future<void> playEpisode() => manager.playItems(<dynamic>[
     <String, dynamic>{'Id': 'episode', 'Type': 'Episode'},
   ]);
+
+  test('stop report failure is diagnosed without failing the drain contract', () async {
+    manager = managerWith();
+    final diagnostics = <String>[];
+    manager.setDiagnosticLogger(diagnostics.add);
+    await playEpisode();
+    backend.emitPosition(credits);
+    service.failStop = true;
+
+    await manager.stopAndDrainReports();
+
+    expect(service.stops, [credits]);
+    expect(diagnostics, contains(contains('Playback stop report failed: Bad state: stop rejected')));
+  });
 
   test('a finished stop reports the end of the item', () async {
     manager = managerWith();

@@ -4,6 +4,7 @@ import 'package:get_it/get_it.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../data/database/offline_database.dart';
+import '../embyview/ui/shell/ev_player.dart';
 import '../playback/mpv_player_registry.dart';
 import 'platform_detection.dart';
 
@@ -26,6 +27,11 @@ class AppExit {
   static Future<void> prepareForExit() => _teardown ??= _tearDown();
 
   static Future<void> _tearDown() async {
+    try {
+      await EvPlayer.closeActiveSession().timeout(const Duration(milliseconds: 2500));
+    } catch (e, st) {
+      debugPrint('[AppExit] Playback stop did not finish before exit: $e\n$st');
+    }
     await MpvPlayerRegistry.instance.disposeAll();
     if (GetIt.instance.isRegistered<OfflineDatabase>()) {
       try {

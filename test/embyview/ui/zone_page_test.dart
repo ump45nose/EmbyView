@@ -496,6 +496,30 @@ Widget _wrapInScope(
 }
 
 void main() {
+  testWidgets('playback completion silently refreshes zone data for the current account', (tester) async {
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final original = _buildSixZonesData()['movie']!;
+    final refresh = Completer<ZoneData>();
+    var calls = 0;
+    final h = _createHarness(zoneBuilder: (_) async => ++calls == 1 ? original : refresh.future);
+    addTearDown(h.dispose);
+    await tester.pumpWidget(_wrapInScope(h, const EvZonePage(zoneId: 'movie', enableAnimations: false)));
+    await tester.pumpAndSettle();
+    h.shell.notifyPlaybackEnded(EvPlaybackEnded('other-user', h.data, const [PlayTarget(itemId: 'movie')]));
+    await tester.pump();
+    expect(calls, 1);
+    h.shell.notifyPlaybackEnded(EvPlaybackEnded(h.services.sessionId, h.data, const [PlayTarget(itemId: 'movie')]));
+    await tester.pump();
+    expect(calls, 2);
+    expect(find.byKey(const Key('ev_zone_skeletons')), findsNothing);
+    refresh.complete(original);
+    await tester.pumpAndSettle();
+    expect(h.data.zoneCalls, ['movie', 'movie']);
+  });
+
   group('C3.11 EvZonePage', () {
     testWidgets(
       'opens all 5 default zones + 1 custom zone, updates title plate, ambient color, hero, and shelf card styles',
