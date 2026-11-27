@@ -56,6 +56,7 @@
   ```
 - **直接安装已签名 App**：改用 `--app <path/to/signed/EmbyView.app>`（可选 `--identity <name-or-sha1>` 仅用于 `--candidate` 模式）。
 - **仅签名安装不启动**：传入 `--skip-launch` 可完成验签与原子替换，跳过 `open -n` 启动及窗口检测（适用于无人值守预装或延迟启动场景）。
+- **保住钥匙串访问**：若钥匙串中已有 `flutter_secure_storage_service` 条目（如 `embyview.*` 密钥及登录凭据），通过 `secrets run` 注入 `EMBYVIEW_KEYCHAIN_PASSWORD`（本机与 `--host` 远程安装均经标准输入安全透传，不落盘、不打印），脚本会在安装或回退后自动解锁钥匙串并将这些条目的访问控制与分区列表（`cdhash`）更新为新安装包。
 - **回退**：替换后若验签或启动检查失败且存在备份，脚本自动恢复 `previous.app` 并重新核验；也可手动回退：
   ```bash
   scripts/embyview/install-macos.sh --rollback [--host <ssh-host>]

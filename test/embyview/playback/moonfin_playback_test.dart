@@ -145,6 +145,7 @@ class _Native extends Fake implements EmbyViewNativePlayback {
   final externalLoads = <(int, String, bool)>[];
   Completer<void>? selecting, selectGate;
   String? failingSelectionUrl;
+  bool failUnselectedLoad = false;
   @override
   Future<void> loadExternalSubtitle(
     String url, {
@@ -156,6 +157,9 @@ class _Native extends Fake implements EmbyViewNativePlayback {
   }) async {
     expect(sourceGeneration, generation);
     externalLoads.add((sourceGeneration!, url, select));
+    if (!select && failUnselectedLoad) {
+      throw StateError('播放源已变更或尚未就绪');
+    }
     if (select) {
       if (selecting?.isCompleted == false) selecting!.complete();
       await selectGate?.future;
@@ -661,6 +665,114 @@ void main() {
       }
     });
   }
+  test('NAS AI tracks still appear when reopening and immediately seeking before native session ready', () async {
+    final directory = await Directory.current.createTemp('.subtitle-reopen-seek-');
+    const enSrt = '1\n00:00:01,000 --> 00:00:03,000\nHello world\n';
+    const zhSrt = '1\n00:00:01,000 --> 00:00:03,000\n你好世界\n';
+    await File('${directory.path}/movie.mkv').writeAsString('video');
+    final backend = _Backend();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend)..failUnselectedLoad = true;
+    final client = _Client();
+    client.itemsApi.metadata['movie'] = {
+      'Path': '/mnt/media/movie.mkv',
+      'MediaSources': [
+        {'Id': 'source', 'Path': '/mnt/media/movie.mkv'},
+      ],
+    };
+    final store = SubtitleStore(
+      folderStatus: () async =>
+          MediaFolderStatus(state: MediaFolderState.authorized, localRoot: directory.path, writable: true),
+      localDirectory: () async => Directory('${directory.path}/cache'),
+    );
+    final media = const SubtitleMedia(
+      itemId: 'movie',
+      mediaSourceId: 'source',
+      itemFilePath: '/mnt/media/movie.mkv',
+      duration: Duration(minutes: 30),
+    );
+    for (final (lang, text) in [('en', enSrt), ('zh', zhSrt)]) {
+      final doc = SubtitleDocument.parse(utf8.encode(text), format: 'srt', language: lang);
+      final retained = await store.retain(
+        media,
+        doc,
+        language: lang,
+        origin: SubtitleOrigin.ai,
+        pairId: 'pair-1',
+        coverage: const [TimeRange(start: Duration(minutes: 24), end: Duration(minutes: 28))],
+      );
+      expect((await store.save(retained)).state, SubtitleSaveState.saved);
+    }
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(
+        request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.test/movie')),
+      ),
+    );
+    final sources = SubtitleSources(readSecret: (_) async => null);
+    final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 24)));
+    final panel = BoundSubtitlePanel(
+      session: session,
+      input: session as PlaybackSubtitleInput,
+      store: store,
+      loadItem: (id, _) async => (
+        item: {'Name': id},
+        source: (session as PlaybackSubtitleInput).subtitleSource!,
+        streams: client.playbackApi.subtitles,
+        duration: session.snapshot.duration,
+        audioIndex: null,
+      ),
+      loadDocument: (_, _) async => null,
+      sources: sources,
+      processor: SubtitleAiProcessor(
+        readTranslationKey: (_) async => null,
+        meter: <T>(_, invoke) async => (await invoke()).value,
+      ),
+      preferences: () => const LocalPreferences(subtitleAutoMode: SubtitleAutoMode.off),
+      onClosed: () {},
+      boundaries: const Stream.empty(),
+    );
+    addTearDown(() async {
+      await panel.close();
+      sources.close();
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+      await directory.delete(recursive: true);
+    });
+
+    // Seek immediately upon reopen while native loadExternalSubtitle(select: false)
+    // is still rejecting because engine.isSessionReady == false.
+    final discovered = panel.changes
+        .firstWhere(
+          (state) =>
+              state.tracks.length == 2 &&
+              state.tracks.every((t) => t.origin == SubtitleOrigin.ai && t.save == SubtitleSaveState.saved),
+        )
+        .timeout(const Duration(seconds: 5));
+    await session.seek(const Duration(minutes: 25));
+    await discovered;
+    expect(session.snapshot.subtitleTracks, hasLength(2));
+    expect(session.snapshot.subtitleTracks.map((t) => t.language), unorderedEquals(['en', 'zh']));
+
+    // Once the native engine reaches first frame, deferred pre-registration retries
+    // and selecting the Chinese AI track renders bilingual dialogue.
+    native.failUnselectedLoad = false;
+    final loadsBeforeFirstFrame = native.externalLoads.length;
+    native.events.add(NativePlaybackSnapshot(sourceGeneration: native.generation, firstFrame: true));
+    await pumpEventQueue(times: 20);
+    expect(native.externalLoads.length, greaterThanOrEqualTo(loadsBeforeFirstFrame + 2));
+
+    final zhTrack = session.snapshot.subtitleTracks.singleWhere((t) => t.language == 'zh');
+    await session.selectSubtitle(zhTrack.id);
+    await pumpEventQueue();
+    expect(session.snapshot.selectedSubtitleId, zhTrack.id);
+    expect(panel.snapshot.cues?.single.text, 'Hello world');
+    expect(panel.snapshot.cues?.single.translation, '你好世界');
+  });
   test('115 direct mov_text switches AI, embedded, AI, off, AI without reopening', () async {
     final backend = _Backend(), client = _Client();
     final manager = PlaybackManager()..setBackend(backend);

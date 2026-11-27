@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_env_kc="${EMBYVIEW_SIGN_KEYCHAIN-}"
+[[ -f "${HOME}/.config/embyview/signing.env" ]] && source "${HOME}/.config/embyview/signing.env"
+export EMBYVIEW_SIGN_KEYCHAIN="${_env_kc:-${EMBYVIEW_SIGN_KEYCHAIN:-}}"
 export EMBYVIEW_SCRIPT_DIR="${SCRIPT_DIR}" EMBYVIEW_REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+exec 3<&0
 exec python3 - "$@" <<'PY'
 import argparse, ctypes, json, os, plistlib, pwd, re, shlex, shutil, signal, socket, subprocess, sys, tempfile, time
 
 BUNDLE_ID, DEF_TARGET, DEF_BACKUP = "io.github.ump45nose.embyview", "~/Applications/EmbyView.app", "~/Library/Application Support/EmbyViewInstaller/backups"
+KEYCHAIN_SERVICE = "flutter_secure_storage_service"
+KEYCHAIN_ACCT_PREFIXES = ("embyview.", "server_token_", "client_cert_")
+KEYCHAIN_ACCT_EXACT = {"mtls_client_cert_hosts"}
 REQ_ENTS = ("com.apple.security.app-sandbox", "com.apple.security.cs.allow-jit", "com.apple.security.network.client",
             "com.apple.security.network.server", "com.apple.security.files.user-selected.read-write", "com.apple.security.files.bookmarks.app-scope")
 def run(cmd, **kw):
@@ -20,12 +27,35 @@ def rm_any(p):
 def base_res(host, action, target):
     return {"host": host, "action": action, "status": "failed", "targetPath": target, "previousVersion": None, "installedVersion": None,
             "bundleId": BUNDLE_ID, "signatureVerified": False, "designatedRequirement": None, "continuityVerified": None,
+            "keychainAccessUpdated": None, "keychainItemsMatched": 0, "keychainItemsUpdated": 0, "keychainPartitionId": None,
             "desktopSessionAvailable": None, "launchedPid": None, "windowVisible": False, "windowCount": 0,
             "authorizationContinuity": "pending_runtime_check", "backupPath": None, "rollbackPerformed": False, "rollbackSucceeded": None, "error": None}
 def emit(rep, rpath, code):
     out = json.dumps(rep, indent=2, ensure_ascii=False); print(out)
     if rpath: os.makedirs(os.path.dirname(os.path.abspath(rpath)), exist_ok=True); open(rpath, "w", encoding="utf-8").write(out + "\n")
     sys.exit(code)
+def read_kc_pass(from_stdin):
+    pw = ""
+    try:
+        if from_stdin:
+            with os.fdopen(3, "r", encoding="utf-8") as f:
+                pw = f.readline().rstrip("\r\n")
+        else:
+            os.close(3)
+    except OSError:
+        pass
+    return pw if from_stdin else os.environ.get("EMBYVIEW_KEYCHAIN_PASSWORD", "")
+def resolve_keychain(arg):
+    raw = arg or os.environ.get("EMBYVIEW_SIGN_KEYCHAIN") or run(["security", "default-keychain", "-d", "user"]).stdout.strip().strip('"')
+    return os.path.expanduser(raw) if raw else ""
+def sec_i(commands, timeout=20):
+    lines = []
+    q = lambda s: '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    for sub, args in commands:
+        if any("\n" in x or "\r" in x for x in args):
+            return subprocess.CompletedProcess(["security"], 1, "", f"{sub}: invalid newline in argument")
+        lines.append(f"{sub} " + " ".join(q(x) for x in args))
+    return run(["security", "-q", "-i"], input="\n".join(lines) + "\n", timeout=timeout)
 def read_plist(app):
     p = os.path.join(app, "Contents/Info.plist")
     if not os.path.isfile(p): return None
@@ -36,6 +66,91 @@ def read_plist(app):
 def designated_req(app):
     r = run(["codesign", "-d", "-r-", app]); m = re.search(r"designated\s*=>\s*(.+)", r.stdout) if r.returncode == 0 else None
     return m.group(1).strip() if m else None
+def app_partition_id(app):
+    dv = run(["codesign", "-dvvv", app]).stderr
+    if (tm := re.search(r"^TeamIdentifier=(.+)$", dv, re.M)) and tm.group(1).strip() not in ("", "not set"):
+        return f"teamid:{tm.group(1).strip()}"
+    if (cm := re.search(r"^CDHash=([0-9A-Fa-f]+)$", dv, re.M)):
+        return f"cdhash:{cm.group(1).strip().lower()}"
+    return None
+def parse_keychain_items(kc):
+    r = run(["security", "dump-keychain", "-a", kc])
+    if r.returncode != 0: return None, f"dump-keychain failed: {emsg(r)}"
+    items = []
+    for blk in r.stdout.split("keychain: "):
+        if 'class: "genp"' not in blk or f'"svce"<blob>="{KEYCHAIN_SERVICE}"' not in blk: continue
+        acct = None
+        if (mh := re.search(r'"acct"<blob>=0x([0-9A-Fa-f]+)', blk)):
+            try: acct = bytes.fromhex(mh.group(1)).decode("utf-8")
+            except Exception: acct = None
+        if acct is None and (ms := re.search(r'"acct"<blob>="([^"]*)"', blk)):
+            acct = ms.group(1)
+        if not acct: continue
+        acc_part = blk.split("access:", 1)[1] if "access:" in blk else ""
+        matched = acct.startswith(KEYCHAIN_ACCT_PREFIXES) or acct in KEYCHAIN_ACCT_EXACT or f'identifier "{BUNDLE_ID}"' in acc_part
+        if not matched: continue
+        decrypt_reqs, security_allowed, partitions = set(), False, set()
+        for ent in re.split(r"\n\s*entry\s+\d+:\s*\n", acc_part)[1:]:
+            if re.search(r"authorizations\b[^\n]*\bdecrypt\b", ent):
+                for rm in re.finditer(r"requirement:\s*(.+)", ent): decrypt_reqs.add(rm.group(1).strip())
+                if "/usr/bin/security" in ent: security_allowed = True
+            if re.search(r"authorizations\b[^\n]*\bpartition_id\b", ent):
+                if (dm := re.search(r"description:\s*(.+)", ent)):
+                    partitions.update(t.strip() for t in dm.group(1).split(",") if t.strip())
+        items.append({"acct": acct, "decrypt_reqs": decrypt_reqs, "security_allowed": security_allowed, "partitions": partitions})
+    return items, None
+def inspect_keychain_sync(app, kc):
+    if not kc or not os.path.exists(kc): return None, None, [], [], f"keychain not found: {kc}"
+    part_id, req = app_partition_id(app), designated_req(app)
+    if not part_id or not req: return part_id, req, [], [], "unable to read app CDHash/TeamIdentifier or designated requirement"
+    items, err = parse_keychain_items(kc)
+    if err: return part_id, req, [], [], err
+    need = [it for it in items if (req not in it["decrypt_reqs"]) or (part_id not in it["partitions"])]
+    return part_id, req, items, need, None
+def sync_keychain_access(app, kc, kc_pass, rep):
+    part_id, req, items, need, err = inspect_keychain_sync(app, kc)
+    rep["keychainPartitionId"] = part_id
+    rep["keychainItemsMatched"] = len(items)
+    if err:
+        rep.update(keychainAccessUpdated=False, keychainItemsUpdated=0)
+        return False, err
+    if not need:
+        rep.update(keychainAccessUpdated=True, keychainItemsUpdated=0)
+        return True, None
+    if not kc_pass:
+        rep.update(keychainAccessUpdated=False, keychainItemsUpdated=0)
+        return False, f"EMBYVIEW_KEYCHAIN_PASSWORD is required to update keychain access for {len(need)} item(s)"
+    ur = sec_i([("unlock-keychain", ["-p", kc_pass, kc])])
+    if ur.returncode != 0:
+        rep.update(keychainAccessUpdated=False, keychainItemsUpdated=0)
+        return False, "failed to unlock keychain for access update"
+    desired_parts = f"{part_id},apple-tool:,apple:"
+    for it in need:
+        acct = it["acct"]
+        if req not in it["decrypt_reqs"]:
+            if not it["security_allowed"]:
+                rep.update(keychainAccessUpdated=False, keychainItemsUpdated=0)
+                return False, "keychain item decrypt ACL does not trust the new app signing requirement"
+            fr = run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", acct, "-w", kc], timeout=15)
+            if fr.returncode != 0:
+                rep.update(keychainAccessUpdated=False, keychainItemsUpdated=0)
+                return False, "failed to read keychain item for ACL refresh"
+            val = fr.stdout.rstrip("\r\n")
+            ar = sec_i([("add-generic-password", ["-U", "-s", KEYCHAIN_SERVICE, "-a", acct, "-T", app, "-w", val, kc])])
+            val = ""
+            if ar.returncode != 0:
+                rep.update(keychainAccessUpdated=False, keychainItemsUpdated=0)
+                return False, "failed to update keychain item ACL"
+        pr = sec_i([("set-generic-password-partition-list", ["-S", desired_parts, "-s", KEYCHAIN_SERVICE, "-a", acct, "-k", kc_pass, kc])])
+        if pr.returncode != 0:
+            rep.update(keychainAccessUpdated=False, keychainItemsUpdated=0)
+            return False, "failed to update keychain item partition list"
+    _, _, _, still_need, verr = inspect_keychain_sync(app, kc)
+    if verr or still_need:
+        rep.update(keychainAccessUpdated=False, keychainItemsUpdated=len(need) - len(still_need))
+        return False, verr or f"keychain access verification failed for {len(still_need)} item(s)"
+    rep.update(keychainAccessUpdated=True, keychainItemsUpdated=len(need))
+    return True, None
 def verify_app(app):
     if not os.path.isdir(app): return False, f"app bundle not found: {app}", None
     if not (info := read_plist(app)): return False, f"invalid or missing Info.plist in {app}", None
@@ -117,7 +232,7 @@ def atomic_replace(src_app, dst):
         if moved and not os.path.lexists(dst) and os.path.lexists(old): os.rename(old, dst)
         rm_any(stage); raise
     rm_any(old)
-def run_remote(a):
+def run_remote(a, kc_pass):
     rep, sdir, rroot, ltmp, rtmp = base_res(a.host, "rollback" if a.rollback else "install", a.target or DEF_TARGET), os.environ["EMBYVIEW_SCRIPT_DIR"], os.environ["EMBYVIEW_REPO_ROOT"], tempfile.mkdtemp(prefix="embyview-remote-"), None
     ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", a.host]
     fail = lambda msg: (rep.update(error=msg), emit(rep, a.report, 1))
@@ -143,9 +258,9 @@ def run_remote(a):
         p1 = subprocess.Popen(["tar", "-cf", "-", "-C", ltmp, "."], stdout=subprocess.PIPE)
         p2 = subprocess.run([*ssh, f"tar -xf - -C {shlex.quote(rtmp)}"], stdin=p1.stdout, capture_output=True, text=True); p1.stdout.close(); p1.wait()
         if p1.returncode != 0 or p2.returncode != 0: fail(f"remote transfer failed: {emsg(p2)}")
-        rcmd = ["bash", f"{rtmp}/scripts/embyview/install-macos.sh", *(c.replace("__RTMP__", rtmp) for c in cmd)] + [x for fl, v in (("--identity", a.identity), ("--target", a.target), ("--backup-dir", a.backup_dir)) if v for x in (fl, v)] + (["--skip-launch"] if a.skip_launch else [])
+        rcmd = ["bash", f"{rtmp}/scripts/embyview/install-macos.sh", *(c.replace("__RTMP__", rtmp) for c in cmd)] + [x for fl, v in (("--identity", a.identity), ("--keychain", a.keychain), ("--target", a.target), ("--backup-dir", a.backup_dir)) if v for x in (fl, v)] + (["--skip-launch"] if a.skip_launch else []) + (["--keychain-password-stdin"] if kc_pass else [])
         pre = f"mkdir -p {shlex.quote(rtmp + '/unpacked')} && ditto -x -k {shlex.quote(rtmp + '/app.zip')} {shlex.quote(rtmp + '/unpacked')} && " if a.app else ""
-        rr = run([*ssh, pre + " ".join(shlex.quote(c) for c in rcmd)])
+        rr = run([*ssh, pre + " ".join(shlex.quote(c) for c in rcmd)], **({"input": kc_pass + "\n"} if kc_pass else {}))
         try: data = json.loads(rr.stdout)
         except Exception: fail(f"remote execution failed: {emsg(rr)}")
         emit(data, a.report, rr.returncode)
@@ -155,11 +270,12 @@ def run_remote(a):
         if rtmp: run([*ssh, f"python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' {shlex.quote(rtmp)}"])
 def main():
     ap = argparse.ArgumentParser(prog="install-macos.sh")
-    for fl in ("--host", "--app", "--candidate", "--identity", "--target", "--backup-dir", "--report"): ap.add_argument(fl)
-    ap.add_argument("--rollback", action="store_true"); ap.add_argument("--skip-launch", action="store_true"); a = ap.parse_args()
+    for fl in ("--host", "--app", "--candidate", "--identity", "--keychain", "--target", "--backup-dir", "--report"): ap.add_argument(fl)
+    ap.add_argument("--rollback", action="store_true"); ap.add_argument("--skip-launch", action="store_true"); ap.add_argument("--keychain-password-stdin", action="store_true"); a = ap.parse_args()
+    kc_pass = read_kc_pass(a.keychain_password_stdin)
     if sum(bool(x) for x in (a.app, a.candidate, a.rollback)) != 1: emit(base_res(a.host or socket.gethostname().split(".")[0], "install", a.target or DEF_TARGET) | {"error": "specify exactly one of --app, --candidate, or --rollback"}, a.report, 1)
-    if a.host: run_remote(a)
-    target, bdir = os.path.expanduser(a.target or DEF_TARGET), os.path.expanduser(a.backup_dir or DEF_BACKUP)
+    if a.host: run_remote(a, kc_pass)
+    target, bdir, kc = os.path.expanduser(a.target or DEF_TARGET), os.path.expanduser(a.backup_dir or DEF_BACKUP), resolve_keychain(a.keychain)
     bapp, had_prev = os.path.join(bdir, "previous.app"), os.path.isdir(target)
     prev_ok, _, prev_vinfo = verify_app(target) if had_prev else (False, None, None)
     prev_info = prev_vinfo or (read_plist(target) if had_prev else None)
@@ -172,12 +288,15 @@ def main():
             rep.update(rollbackPerformed=True, backupPath=bapp if os.path.isdir(bapp) else None)
             ok, err, _ = verify_app(bapp) if os.path.isdir(bapp) else (False, f"backup not found: {bapp}", None)
             if not ok: rep.update(rollbackSucceeded=False, error=f"backup check failed: {err}"); emit(rep, a.report, 1)
-            stop_running(target); atomic_replace(bapp, target); ok, err = verify_and_launch(target, a.skip_launch, rep)
+            stop_running(target); atomic_replace(bapp, target)
+            kok, kerr = sync_keychain_access(target, kc, kc_pass, rep)
+            ok, err = (verify_and_launch(target, a.skip_launch, rep) if kok else (False, kerr))
             if prev_req and ok: rep["continuityVerified"] = run(["codesign", "--verify", "--strict", f"--test-requirement=={prev_req}", target]).returncode == 0
             rep.update(rollbackSucceeded=ok, status="ok" if ok else "failed", error=err); emit(rep, a.report, 0 if ok else 1)
         if a.candidate:
-            sc = ["bash", os.path.join(os.environ["EMBYVIEW_SCRIPT_DIR"], "sign-macos.sh"), "--candidate", a.candidate, "--output", staged] + (["--identity", a.identity] if a.identity else []) + (["--previous-app", target] if prev_req else [])
-            sr = run(sc)
+            sc = ["bash", os.path.join(os.environ["EMBYVIEW_SCRIPT_DIR"], "sign-macos.sh"), "--candidate", a.candidate, "--output", staged] + (["--identity", a.identity] if a.identity else []) + (["--keychain", kc] if a.keychain else []) + (["--previous-app", target] if prev_req else [])
+            senv = dict(os.environ, EMBYVIEW_KEYCHAIN_PASSWORD=kc_pass) if kc_pass else None
+            sr = run(sc, env=senv)
             try: srep = json.loads(sr.stdout)
             except Exception: srep = {}
             if sr.returncode != 0:
@@ -193,13 +312,22 @@ def main():
             if prev_req:
                 cont = run(["codesign", "--verify", "--strict", f"--test-requirement=={prev_req}", staged]).returncode == 0; rep["continuityVerified"] = cont
                 if not cont: rep["error"] = "designated requirement continuity check failed"; emit(rep, a.report, 1)
+        part_id, _, kitems, kneed, kerr = inspect_keychain_sync(staged, kc)
+        rep.update(keychainPartitionId=part_id, keychainItemsMatched=len(kitems))
+        if kerr:
+            rep.update(keychainAccessUpdated=False, error=kerr); emit(rep, a.report, 1)
+        if kneed and not kc_pass:
+            rep.update(keychainAccessUpdated=False, error=f"EMBYVIEW_KEYCHAIN_PASSWORD is required to update keychain access for {len(kneed)} item(s)"); emit(rep, a.report, 1)
         stop_running(target)
         if prev_ok: atomic_replace(target, bapp); rep["backupPath"] = bapp
-        atomic_replace(staged, target); ok, err = verify_and_launch(target, a.skip_launch, rep)
+        atomic_replace(staged, target)
+        kok, kerr = sync_keychain_access(target, kc, kc_pass, rep)
+        ok, err = (verify_and_launch(target, a.skip_launch, rep) if kok else (False, kerr))
         if ok: rep["status"] = "ok"; emit(rep, a.report, 0)
         rep["error"] = err
         if rep["backupPath"] and os.path.isdir(rep["backupPath"]):
             rep["rollbackPerformed"] = True; stop_running(target); atomic_replace(rep["backupPath"], target)
+            sync_keychain_access(target, kc, kc_pass, rep)
             rok, rerr = verify_and_launch(target, a.skip_launch, rep)
             rep.update(rollbackSucceeded=rok, status="rolled_back" if rok else "failed", error=err if rok else f"{err}; rollback failed: {rerr}")
         emit(rep, a.report, 1)

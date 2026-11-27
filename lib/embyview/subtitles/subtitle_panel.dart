@@ -128,23 +128,29 @@ class BoundSubtitlePanel implements SubtitlePanel {
           _resetAudio(continueLive: true);
         }
       }
-      if (!scope.scanning && (play.phase == PlaybackPhase.playing || play.phase == PlaybackPhase.paused)) {
+      if (!scope.scanning &&
+          (play.phase == PlaybackPhase.playing ||
+              play.phase == PlaybackPhase.paused ||
+              play.phase == PlaybackPhase.buffering)) {
         scope.scanning = true;
-        if (scope.resumeAi) {
-          // Some engine track switches reopen the same file. Continue with
-          // its new generation as soon as the new playhead is available.
-          scheduleMicrotask(() {
-            if (identical(scope, _scope) && scope.resumeAi) {
-              unawaited(
-                _startAi(
-                  resume: scope.reselectRevision != input.subtitleSelectionRevision,
-                  checkpoint: scope.checkpoint,
-                ),
-              );
-            }
-          });
-        }
         unawaited(_loadNas(scope, play.selectedSubtitleId));
+      }
+      if (scope.resumeAi &&
+          !scope.aiResumeScheduled &&
+          (play.phase == PlaybackPhase.playing || play.phase == PlaybackPhase.paused)) {
+        scope.aiResumeScheduled = true;
+        // Some engine track switches reopen the same file. Continue with
+        // its new generation as soon as the new playhead is available.
+        scheduleMicrotask(() {
+          if (identical(scope, _scope) && scope.resumeAi) {
+            unawaited(
+              _startAi(
+                resume: scope.reselectRevision != input.subtitleSelectionRevision,
+                checkpoint: scope.checkpoint,
+              ),
+            );
+          }
+        });
       }
       for (final track in play.subtitleTracks) {
         if (track.id != _liveTrackId &&
@@ -999,7 +1005,7 @@ class _PanelScope {
   int? runAudioIndex;
   int? reselectRevision;
   var selectionRequest = 0;
-  var scanning = false, userApplied = false, hasNas = false, autoSelectionSettled = false;
+  var scanning = false, aiResumeScheduled = false, userApplied = false, hasNas = false, autoSelectionSettled = false;
 
   Future<T> guard<T>(Future<T> work) => Future.any([work, _closed.future.then<T>((_) => throw _expired)]);
   void close() {

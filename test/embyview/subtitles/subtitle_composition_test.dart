@@ -640,6 +640,50 @@ void main() {
     await pumpEventQueue(times: 10);
     expect(fixture.playback.snapshot.selectedSubtitleId, isNull);
   });
+
+  test('NAS AI tracks are discovered even when reopening directly into seek buffering', () async {
+    final fixture = await _Fixture.open();
+    addTearDown(fixture.close);
+    fixture.mount();
+    fixture.autoSelect = false;
+    final media = SubtitleMedia.fromPlayback(fixture.playback.subtitleSource, duration: const Duration(minutes: 25));
+    final chinese = SubtitleDocument.parse(utf8.encode(_srt), format: 'srt');
+    final original = SubtitleDocument.parse(utf8.encode(_srt.replaceFirst('中文字幕', 'English line')), format: 'srt');
+    for (final (language, document) in [('zh', chinese), ('en', original)]) {
+      final track = await fixture.store.retain(
+        media,
+        document,
+        language: language,
+        origin: SubtitleOrigin.ai,
+        pairId: 'ai-pair',
+        coverage: const [TimeRange(start: Duration(minutes: 10), end: Duration(minutes: 12))],
+      );
+      expect((await fixture.store.save(track)).state, SubtitleSaveState.saved);
+    }
+
+    final discovered = fixture.panel.changes
+        .firstWhere(
+          (state) =>
+              state.generation == 2 &&
+              state.tracks.length == 2 &&
+              state.tracks.every((t) => t.origin == SubtitleOrigin.ai && t.save == SubtitleSaveState.saved),
+        )
+        .timeout(const Duration(seconds: 3));
+    fixture.playback.open(
+      _movie,
+      2,
+      phase: PlaybackPhase.buffering,
+      position: const Duration(minutes: 11),
+      duration: const Duration(minutes: 25),
+    );
+    final state = await discovered;
+    expect(state.tracks, hasLength(2));
+
+    final zhTrack = fixture.playback.snapshot.subtitleTracks.singleWhere((t) => t.language == 'zh');
+    await fixture.playback.selectSubtitle(zhTrack.id);
+    expect(fixture.panel.snapshot.cues?.single.text, 'English line');
+    expect(fixture.panel.snapshot.cues?.single.translation, '中文字幕');
+  });
 }
 
 class _Fixture {
@@ -764,6 +808,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
   void open(
     PlayTarget target,
     int generation, {
+    PlaybackPhase phase = PlaybackPhase.playing,
     List<PlaybackTrack> subtitles = const [],
     String? selectedSubtitleId,
     List<PlaybackTrack> audio = const [],
@@ -791,7 +836,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     snapshot = PlaybackSnapshot(
       generation: generation,
       target: target,
-      phase: PlaybackPhase.playing,
+      phase: phase,
       duration: duration,
       position: position,
       subtitleTracks: subtitles,

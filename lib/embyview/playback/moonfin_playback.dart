@@ -612,6 +612,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         if (native.firstFrame && _firstFrame == null) {
           _firstFrame = _intent.elapsed;
           _record('firstFrame');
+          if (_reloadExternal) unawaited(_restoreExternalSubtitles());
         }
         _emit();
       }),
@@ -1627,7 +1628,15 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     final subtitle = existing >= 0
         ? _externalSubtitles[existing]
         : _SessionSubtitle(url, title, language, codec, contentKey, source);
-    await _loadExternal(subtitle, generation, select: false);
+    try {
+      await _loadExternal(subtitle, generation, select: false);
+    } catch (_) {
+      // Native playback may still be opening, seeking, or reloading when NAS
+      // sidecars are discovered. Keep the sidecar in the session track list;
+      // first-frame/bringup restoration retries pre-registration and selecting
+      // it loads it on demand.
+      _reloadExternal = true;
+    }
     checkRegistration();
     if (existing >= 0) return _visibleExternalId(existing);
     final index = _externalSubtitles.length;
