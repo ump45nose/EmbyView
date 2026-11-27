@@ -190,10 +190,17 @@ class _EvSearchPageState extends State<EvSearchPage> {
     }
   }
 
-  void _openItem(String id) {
+  void _openCard(MediaCard card) {
     if (_playingCardId != null) setState(() { _playRequest++; _playingCardId = null; });
-    if (widget.onOpenItem != null) { widget.onOpenItem!(id); }
-    else { EvScope.of(context).shell.onOpenDetail?.call(id); }
+    if (card.kind == MediaKind.collection) {
+      final openCol = EvScope.maybeOf(context)?.shell.onOpenCollection;
+      if (openCol != null) {
+        openCol(card.id);
+        return;
+      }
+    }
+    if (widget.onOpenItem != null) { widget.onOpenItem!(card.id); }
+    else { EvScope.of(context).shell.openCard(card); }
   }
   void _playTarget(PlayTarget target, CardArtwork art, {Rect? origin}) => widget.onPlayTarget != null
       ? widget.onPlayTarget!(target, art, origin) : unawaited(EvPlayer.open(context, target, origin: origin, art: art));
@@ -293,7 +300,7 @@ class _EvSearchPageState extends State<EvSearchPage> {
       else SizedBox(height: s.rem(2.5)),
       for (final sh in landing.shelves.where((sh) => sh.items.isNotEmpty))
         EvShelf(key: ValueKey<String>('ev_search_landing_shelf_${sh.id}'), title: sh.title,
-          badge: sh.total != null ? '${sh.total}' : null, items: sh.items, onCardTap: (c) => _openItem(c.id), onCardPlay: _playCard),
+          badge: sh.total != null ? '${sh.total}' : null, items: sh.items, onCardTap: _openCard, onCardPlay: _playCard),
     ]);
   }
 
@@ -328,7 +335,7 @@ class _EvSearchPageState extends State<EvSearchPage> {
           _heading(t, s, '最佳匹配'),
           EvSearchTopMatch(card: res.bestMatch!, query: _activeQuery,
             playing: _playingCardId == res.bestMatch!.id, playError: _playError,
-            onPlay: (origin) => unawaited(_playBestMatch(res.bestMatch!, origin: origin)), onOpenDetail: () => _openItem(res.bestMatch!.id)),
+            onPlay: (origin) => unawaited(_playBestMatch(res.bestMatch!, origin: origin)), onOpenDetail: () => _openCard(res.bestMatch!)),
         ],
         for (final g in groups) ...[
           _heading(t, s, g.name, count: g.total),
@@ -366,7 +373,7 @@ class _EvSearchPageState extends State<EvSearchPage> {
             key: ValueKey<String>('ev_search_card_${group.libraryId}_${card.id}'), card: card,
             style: card.kind == MediaKind.collection ? EvCardStyle.collection : EvCardStyle.poster,
             width: cardW, posterHeight: cardW * 1.5, alwaysShowLabel: true,
-            onTap: () => _openItem(card.id), onPlay: () => _playCard(card),
+            onTap: () => _openCard(card), onPlay: () => _playCard(card),
           ),
       ]);
     });

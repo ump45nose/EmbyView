@@ -30,6 +30,7 @@ class EmbyItemsApi implements ItemsApi {
       'nextUp' => '/Shows/NextUp',
       'genres' => '/Genres',
       'persons' => '/Persons',
+      'person' when id != null => '/Persons/$id',
       'videoTypes' => '/ExtendedVideoTypes',
       'audioLayouts' => '/AudioLayouts',
       _ => throw ArgumentError.value(resource, 'resource'),

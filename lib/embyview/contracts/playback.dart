@@ -175,7 +175,7 @@ class ImmersionSnapshot {
 }
 
 abstract interface class EmbyViewPlayback {
-  Future<void> prepare(String itemId);
+  Future<void> prepare(String itemId, {String? mediaSourceId});
   PlaybackSession open(PlayTarget target);
 }
 

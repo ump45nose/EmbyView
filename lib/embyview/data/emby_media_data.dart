@@ -73,6 +73,8 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
   String get _cacheKey => "embyview.index.v1.${base64Url.encode(utf8.encode(jsonEncode([_cacheIdentity, _user])))}";
   String get _backdropTextCacheKey =>
       "embyview.backdrop_text.v1.${base64Url.encode(utf8.encode(jsonEncode([_cacheIdentity, _user])))}";
+  String get _versionChoiceCacheKey =>
+      "embyview.version_picks.v1.${base64Url.encode(utf8.encode(jsonEncode([_cacheIdentity, _user])))}";
   final CancelToken _cancel = CancelToken();
   late final BackdropTextSelector _backdrops;
   late final MediaMapper _mapper;
@@ -179,7 +181,13 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
   }
   final List<String> _recent = [];
   final Map<String, List<Json>> _collectionArt = {};
+  final Map<String, ({String id, String name})> _movieToCollection = {};
   bool _collectionIndexReady = false;
+  bool _boxsetMembershipLoaded = false;
+  Future<void>? _boxsetMembershipLoad;
+  Map<String, String>? _versionPicks;
+  VersionTasteProfile? _lastVersionTaste;
+  Future<void>? _versionPicksLoad;
   final Set<String> _forbiddenScopes = {};
 
   static const _fields =
@@ -198,6 +206,12 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     _visibleViews = const [];
     _recent.clear();
     _collectionArt.clear();
+    _movieToCollection.clear();
+    _boxsetMembershipLoaded = false;
+    _boxsetMembershipLoad = null;
+    _versionPicks = null;
+    _lastVersionTaste = null;
+    _versionPicksLoad = null;
     _invalidateBrowse();
   }
 
@@ -216,7 +230,10 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     _invalidateBrowse();
     _viewLoad = null;
     _collectionArt.clear();
+    _movieToCollection.clear();
     _collectionIndexReady = false;
+    _boxsetMembershipLoaded = false;
+    _boxsetMembershipLoad = null;
   }
 
   void _check() {
@@ -731,17 +748,39 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     return order != 0 ? order : a['Id'].toString().compareTo(b['Id'].toString());
   }
 
+  int _collectionReleaseOrder(Json a, Json b) {
+    final ay = integer(a['ProductionYear']);
+    final by = integer(b['ProductionYear']);
+    if (ay != null && by != null && ay != by) return ay.compareTo(by);
+    if (ay != null && by == null) return -1;
+    if (ay == null && by != null) return 1;
+    return _collectionOrder(a, b);
+  }
+
   void _indexCollections(List<_IndexItem> index) {
     final groups = <String, Map<String, Json>>{};
+    final boxNames = <String, String>{};
+    for (final item in index.where((e) => e.raw['Type'] == 'BoxSet')) {
+      boxNames[item.id] = item.raw['Name'] as String? ?? '';
+    }
+    _movieToCollection.clear();
     for (final item in index.where((e) => e.raw['Type'] == 'Movie' || e.raw['Type'] == 'Series')) {
       for (final collection in records(item.raw['Collections'])) {
-        final id = collection['Id'];
-        if (id != null && !_forbiddenScopes.contains(id.toString())) (groups[id.toString()] ??= {})[item.id] = item.raw;
+        final id = collection['Id']?.toString();
+        if (id != null && !_forbiddenScopes.contains(id)) {
+          (groups[id] ??= {})[item.id] = item.raw;
+          _movieToCollection.putIfAbsent(
+            item.id,
+            () => (id: id, name: (collection['Name'] as String?)?.trim().isNotEmpty == true
+                ? (collection['Name'] as String).trim()
+                : (boxNames[id] ?? '')),
+          );
+        }
       }
     }
     _collectionArt.clear();
     for (final entry in groups.entries) {
-      _collectionArt[entry.key] = entry.value.values.toList()..sort(_collectionOrder);
+      _collectionArt[entry.key] = entry.value.values.toList()..sort(_collectionReleaseOrder);
     }
     _collectionIndexReady = true;
   }
@@ -1297,12 +1336,384 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
   }
 
   Future<Json> _item(String id, {String? mediaSourceId}) async =>
-      (await _get('item', id: id, params: {'Fields': '$_fields,Chapters', 'MediaSourceId': ?mediaSourceId}) as Map)
+      (await _get('item', id: id, params: {'Fields': '$_fields,Chapters,Collections,Path', 'MediaSourceId': ?mediaSourceId}) as Map)
           .cast<String, dynamic>();
+
+  Future<void> _ensureVersionPicksLoaded() => _versionPicksLoad ??= _readVersionPicks();
+
+  Future<void> _readVersionPicks() async {
+    final prefs = await _storage;
+    _check();
+    final raw = prefs.getString(_versionChoiceCacheKey);
+    if (raw == null || raw.isEmpty) {
+      _versionPicks = {};
+      return;
+    }
+    try {
+      final decoded = jsonDecode(raw) as Map;
+      final picks = <String, String>{};
+      final rawPicks = decoded['picks'];
+      if (rawPicks is Map) {
+        for (final entry in rawPicks.entries) {
+          if (entry.key is String && entry.value is String && (entry.value as String).isNotEmpty) {
+            picks[entry.key as String] = entry.value as String;
+          }
+        }
+      }
+      _versionPicks = picks;
+      final taste = decoded['taste'];
+      if (taste is Map) {
+        final originName = taste['origin'] as String?;
+        _lastVersionTaste = VersionTasteProfile(
+          resolution: taste['resolution'] as String?,
+          videoRange: taste['videoRange'] as String?,
+          origin: originName == null
+              ? null
+              : MediaOrigin.values.where((o) => o.name == originName).firstOrNull,
+          preferSmall: taste['preferSmall'] == true,
+        );
+      }
+    } catch (_) {
+      _versionPicks = {};
+      _lastVersionTaste = null;
+    }
+  }
+
+  Future<void> _saveVersionPicks() async {
+    _check();
+    final taste = _lastVersionTaste;
+    await (await _storage).setString(
+      _versionChoiceCacheKey,
+      jsonEncode({
+        'picks': _versionPicks ?? const <String, String>{},
+        if (taste != null)
+          'taste': {
+            'resolution': taste.resolution,
+            'videoRange': taste.videoRange,
+            'origin': taste.origin?.name,
+            'preferSmall': taste.preferSmall,
+          },
+      }),
+    );
+  }
+
+  @override
+  Future<void> rememberMediaVersion(String itemId, MediaVersion version) async {
+    _check();
+    await _ensureVersionPicksLoaded();
+    _check();
+    (_versionPicks ??= {})[itemId] = version.id;
+    _lastVersionTaste = VersionTasteProfile.fromVersion(version);
+    await _saveVersionPicks();
+  }
+
+  Future<void> _ensureBoxsetMembershipLoaded() async {
+    if (_boxsetMembershipLoaded) return;
+    if (_boxsetMembershipLoad != null) {
+      await _boxsetMembershipLoad;
+      return;
+    }
+    final load = () async {
+      try {
+        final boxsets = await _all({
+          'Recursive': true,
+          'IncludeItemTypes': 'BoxSet',
+          'Fields': 'BasicSyncInfo',
+        });
+        await mapBounded(boxsets, 4, (box) async {
+          final boxId = box['Id']?.toString();
+          if (boxId == null || boxId.isEmpty || _forbiddenScopes.contains(boxId)) return;
+          final boxName = (box['Name'] as String?)?.trim() ?? '';
+          try {
+            final members = await _all({
+              'ParentId': boxId,
+              'Recursive': false,
+              'IncludeItemTypes': 'Movie,Series',
+              'Fields': 'ProductionYear,SortName',
+            });
+            for (final m in members) {
+              final mid = m['Id']?.toString();
+              if (mid != null && mid.isNotEmpty) {
+                _movieToCollection.putIfAbsent(mid, () => (id: boxId, name: boxName));
+              }
+            }
+          } on EmbyViewFailure {
+            _check();
+          }
+        });
+      } on EmbyViewFailure {
+        _check();
+      }
+      _boxsetMembershipLoaded = true;
+    }();
+    _boxsetMembershipLoad = load;
+    try {
+      await load;
+    } finally {
+      if (identical(_boxsetMembershipLoad, load)) _boxsetMembershipLoad = null;
+    }
+  }
+
+  Future<CollectionMembership?> _resolveCollectionMembership(String itemId, Json raw) async {
+    String? boxId;
+    String boxName = '';
+    for (final c in records(raw['Collections'])) {
+      final cid = c['Id']?.toString();
+      if (cid != null && cid.isNotEmpty && !_forbiddenScopes.contains(cid)) {
+        boxId = cid;
+        boxName = (c['Name'] as String?)?.trim() ?? '';
+        break;
+      }
+    }
+    if (boxId == null) {
+      final cached = _movieToCollection[itemId];
+      if (cached != null && !_forbiddenScopes.contains(cached.id)) {
+        boxId = cached.id;
+        boxName = cached.name;
+      }
+    }
+    if (boxId == null) {
+      await _ensureBoxsetMembershipLoaded();
+      final cached = _movieToCollection[itemId];
+      if (cached != null && !_forbiddenScopes.contains(cached.id)) {
+        boxId = cached.id;
+        boxName = cached.name;
+      }
+    }
+    if (boxId == null) return null;
+
+    if (boxName.isEmpty) {
+      try {
+        final box = await _item(boxId);
+        boxName = (box['Name'] as String?)?.trim() ?? '';
+      } on EmbyViewFailure {
+        _check();
+      }
+    }
+    List<Json> children;
+    try {
+      children = await _all({
+        'ParentId': boxId,
+        'Recursive': false,
+        'IncludeItemTypes': 'Movie,Series',
+        'Fields': _fields,
+        'EnableUserData': true,
+        'EnableImageTypes': 'Primary,Backdrop,Logo,Thumb',
+        'SortBy': 'ProductionYear,SortName',
+        'SortOrder': 'Ascending,Ascending',
+      });
+    } on EmbyViewFailure {
+      _check();
+      return null;
+    }
+    if (children.isEmpty) return null;
+    children.sort(_collectionReleaseOrder);
+    _collectionArt[boxId] = children;
+    for (final c in children) {
+      final cid = c['Id']?.toString();
+      if (cid != null && cid.isNotEmpty) {
+        _movieToCollection[cid] = (id: boxId, name: boxName);
+      }
+    }
+    final pos = children.indexWhere((c) => c['Id']?.toString() == itemId);
+    if (pos < 0) return null;
+    return CollectionMembership(
+      id: boxId,
+      name: boxName,
+      position: pos + 1,
+      total: children.length,
+      items: children.map((e) => _card(e)).toList(),
+    );
+  }
+
+  @override
+  Future<CollectionDetail> collection(String collectionId) async {
+    final box = await _item(collectionId);
+    final children = await _all({
+      'ParentId': collectionId,
+      'Recursive': false,
+      'IncludeItemTypes': 'Movie,Series',
+      'Fields': _fields,
+      'EnableUserData': true,
+      'EnableImageTypes': 'Primary,Backdrop,Logo,Thumb',
+      'SortBy': 'ProductionYear,SortName',
+      'SortOrder': 'Ascending,Ascending',
+    });
+    children.sort(_collectionReleaseOrder);
+    _collectionArt[collectionId] = children;
+    final boxName = (box['Name'] as String?)?.trim() ?? '';
+    for (final child in children) {
+      final cid = child['Id']?.toString();
+      if (cid != null && cid.isNotEmpty) {
+        _movieToCollection[cid] = (id: collectionId, name: boxName);
+      }
+    }
+    await _prepareBackdrops([box, if (children.isNotEmpty) children.first]);
+    if (children.isNotEmpty) _prefetchBackdrops(children);
+    final boxCard = _card(box, collection: children);
+    final items = <CollectionItem>[
+      for (final child in children) () {
+        final card = _card(child);
+        final userData = child['UserData'] as Map? ?? const {};
+        final played = userData['Played'] == true;
+        final pos = ticks(userData['PlaybackPositionTicks']);
+        final resume = pos != null && pos > Duration.zero
+            ? ResumeCard(
+                card: card,
+                target: _mapper.target(child),
+                position: pos,
+                duration: ticks(child['RunTimeTicks']),
+              )
+            : null;
+        return CollectionItem(card: card, resume: resume, played: played);
+      }(),
+    ];
+    return CollectionDetail(card: boxCard, rawName: boxName, items: items);
+  }
+
+  static DateTime? _parseEmbyUtcDate(dynamic raw) {
+    if (raw is! String || raw.trim().isEmpty) return null;
+    final text = raw.trim();
+    final parsed = DateTime.tryParse(text);
+    if (parsed == null) return null;
+    return parsed.isUtc ? parsed : parsed.toUtc();
+  }
+
+  @override
+  Future<PersonDetail> person(
+    String personId, {
+    String? name,
+    String? roleHint,
+    MediaCard? sourceItem,
+  }) async {
+    _check();
+    Json? rawPerson;
+    try {
+      final fetched = await _get(
+        'item',
+        id: personId,
+        params: {'Fields': 'Overview,PremiereDate,ProductionLocations,PrimaryImageAspectRatio,ImageTags'},
+      );
+      if (fetched is Map) rawPerson = fetched.cast<String, dynamic>();
+    } on EmbyViewFailure {
+      _check();
+    }
+    final fallbackName = (rawPerson?['Name'] as String?)?.trim() ?? name?.trim() ?? '';
+    if ((rawPerson == null ||
+            (rawPerson['Overview'] as String?)?.trim().isEmpty != false &&
+                rawPerson['PremiereDate'] == null) &&
+        fallbackName.isNotEmpty) {
+      try {
+        final byName = await _get(
+          'person',
+          id: fallbackName,
+          params: {'Fields': 'Overview,PremiereDate,ProductionLocations,PrimaryImageAspectRatio,ImageTags'},
+        );
+        if (byName is Map) {
+          final merged = byName.cast<String, dynamic>();
+          rawPerson = rawPerson == null ? merged : {...merged, ...rawPerson, if ((rawPerson['Overview'] as String?)?.trim().isEmpty != false) 'Overview': merged['Overview'], if (rawPerson['PremiereDate'] == null) 'PremiereDate': merged['PremiereDate'], if (rawPerson['ProductionLocations'] == null) 'ProductionLocations': merged['ProductionLocations']};
+        }
+      } on EmbyViewFailure {
+        _check();
+      }
+    }
+
+    List<Json> workRows = const [];
+    try {
+      workRows = await _all({
+        'PersonIds': personId,
+        'Recursive': true,
+        'IncludeItemTypes': 'Movie,Series',
+        'Fields': _fields,
+        'EnableUserData': true,
+        'EnableImageTypes': 'Primary,Backdrop,Logo,Thumb',
+      });
+    } on EmbyViewFailure {
+      _check();
+    }
+
+    final resolvedName = (rawPerson?['Name'] as String?)?.trim().isNotEmpty == true
+        ? (rawPerson!['Name'] as String).trim()
+        : (name?.trim() ?? '');
+
+    if (workRows.isNotEmpty) {
+      final topRow = ([...workRows]
+            ..sort((a, b) => ((b['CommunityRating'] as num?)?.toDouble() ?? 0)
+                .compareTo((a['CommunityRating'] as num?)?.toDouble() ?? 0)))
+          .first;
+      await _prepareBackdrops([topRow]);
+      _prefetchBackdrops(workRows);
+    }
+
+    const rolePriority = [
+      PersonWorkRole.director,
+      PersonWorkRole.actor,
+      PersonWorkRole.writer,
+      PersonWorkRole.producer,
+    ];
+    final works = <PersonWork>[];
+    final seenIds = <String>{};
+    for (final row in workRows) {
+      final itemId = row['Id']?.toString() ?? '';
+      if (itemId.isEmpty || !seenIds.add(itemId)) continue;
+      final card = _card(row);
+      final credits = records(row['People']).where((p) {
+        final pid = p['Id']?.toString() ?? '';
+        if (pid == personId) return true;
+        if (resolvedName.isNotEmpty &&
+            (p['Name'] as String?)?.trim().toLowerCase() == resolvedName.toLowerCase()) {
+          return true;
+        }
+        return false;
+      }).toList();
+      final roles = <PersonWorkRole>{};
+      String? character;
+      for (final c in credits) {
+        final parsedRole = parsePersonWorkRole(c['Type'] as String?);
+        if (parsedRole != null) roles.add(parsedRole);
+        if (parsedRole == PersonWorkRole.actor && (character == null || character.isEmpty)) {
+          final roleText = (c['Role'] as String?)?.trim();
+          if (roleText != null && roleText.isNotEmpty) character = roleText;
+        }
+      }
+      final fallbackRole = parsePersonWorkRole(roleHint) ?? PersonWorkRole.actor;
+      if (roles.isEmpty) roles.add(fallbackRole);
+      final primary = rolePriority.firstWhere((r) => roles.contains(r), orElse: () => roles.first);
+      works.add(PersonWork(card: card, role: primary, roles: Set.unmodifiable(roles), character: character));
+    }
+
+    if (works.isEmpty && sourceItem != null) {
+      final fallbackRole = parsePersonWorkRole(roleHint) ?? PersonWorkRole.actor;
+      works.add(PersonWork(card: sourceItem, role: fallbackRole, roles: {fallbackRole}));
+    }
+
+    final locations = (rawPerson?['ProductionLocations'] as List?)
+        ?.whereType<String>()
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    final overview = (rawPerson?['Overview'] as String?)?.trim();
+    ArtworkRef? portrait;
+    if (rawPerson != null) {
+      portrait = _mapper.image(rawPerson, 'Primary');
+    }
+
+    return PersonDetail(
+      id: personId,
+      name: resolvedName,
+      primaryRole: roleHint ?? (rawPerson?['Role'] as String?) ?? (rawPerson?['Type'] as String?),
+      portrait: portrait,
+      birthDateUtc: _parseEmbyUtcDate(rawPerson?['PremiereDate']),
+      birthPlace: locations?.firstOrNull,
+      overview: overview == null || overview.isEmpty ? null : overview,
+      works: List.unmodifiable(works),
+    );
+  }
 
   @override
   Future<MediaDetail> detail(String itemId) async {
     final raw = await _item(itemId);
+    await _ensureVersionPicksLoaded();
     List<Json> children = [];
     if (raw['Type'] == 'BoxSet') {
       children = await _all({
@@ -1310,12 +1721,12 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
         'Recursive': false,
         'IncludeItemTypes': 'Movie,Series',
         'Fields': _fields,
-        'SortBy': 'SortName',
-        'SortOrder': 'Ascending',
+        'SortBy': 'ProductionYear,SortName',
+        'SortOrder': 'Ascending,Ascending',
       });
     }
     if (raw['Type'] == 'BoxSet') {
-      children.sort(_collectionOrder);
+      children.sort(_collectionReleaseOrder);
       _collectionArt[itemId] = children;
     }
     Json? series;
@@ -1341,9 +1752,12 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
                 ..sort(_episodeOrder))
               .firstOrNull;
     }
+    final CollectionMembership? collection =
+        raw['Type'] == 'Movie' ? await _resolveCollectionMembership(itemId, raw) : null;
     final position = playable == null ? null : ticks((playable['UserData'] as Map?)?['PlaybackPositionTicks']);
     final sources = records(raw['MediaSources']);
     final streams = records(sources.firstOrNull?['MediaStreams'] ?? raw['MediaStreams']);
+    final versions = _mapper.versions(raw);
     return MediaDetail(
       card: card,
       tagline: (raw['Taglines'] as List?)?.whereType<String>().firstOrNull,
@@ -1367,6 +1781,10 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
           .toSet()
           .toList(),
       collectionItems: children.map((e) => _card(e)).toList(),
+      collection: collection,
+      versions: versions,
+      rememberedVersionId: _versionPicks?[itemId],
+      lastVersionTaste: _lastVersionTaste,
     );
   }
 

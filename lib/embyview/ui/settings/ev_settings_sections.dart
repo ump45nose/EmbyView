@@ -929,6 +929,40 @@ class EvPlaySettingsPane extends StatelessWidget {
     final t = EvTheme.of(context), s = EvScale.of(context);
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       evPaneTitle(t, s, '播放'),
+      EvSettingsGroup(title: '版本', children: [
+        EvSettingsRow(
+          title: '默认版本',
+          subtitle: '一部片有多个版本、又没手动选过时用哪个；在详情页播放键旁边选过的会记在那部片上',
+          trailing: EvSegmentedControl<DefaultVersionRule>(
+            value: prefs.defaultVersionRule,
+            onChanged: (v) => onUpdatePrefs(prefs.copyWith(defaultVersionRule: v)),
+            options: const [
+              EvSegmentOption(
+                key: Key('ev_vrule_bestQuality'),
+                value: DefaultVersionRule.bestQuality,
+                label: '画质最高',
+              ),
+              EvSegmentOption(
+                key: Key('ev_vrule_lastSimilar'),
+                value: DefaultVersionRule.lastSimilar,
+                label: '上次选的同类',
+              ),
+              EvSegmentOption(
+                key: Key('ev_vrule_smallestSize'),
+                value: DefaultVersionRule.smallestSize,
+                label: '体积最小',
+              ),
+            ],
+          ),
+        ),
+        _toggleRow(
+          'ev_toggle_warn_high_bitrate',
+          '外网时',
+          '不在家里的网络时，超过 40 Mbps 的版本先提示，不自动换',
+          prefs.warnHighBitrateOnExternalNetwork,
+          (v) => onUpdatePrefs(prefs.copyWith(warnHighBitrateOnExternalNetwork: v)),
+        ),
+      ]),
       EvSettingsGroup(title: '起播', children: [
         _toggleRow('ev_toggle_preresolve115', '115 起播预解析', '提前用播放器同一 UA 取得跳转后的地址，目标 2 秒内出画面',
           prefs.preResolve115, (v) => onUpdatePrefs(prefs.copyWith(preResolve115: v))),

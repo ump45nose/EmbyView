@@ -240,7 +240,7 @@ class _FakePlayback implements EmbyViewPlayback {
   final List<_FakePlaybackSession> sessions = [];
 
   @override
-  Future<void> prepare(String itemId) async {}
+  Future<void> prepare(String itemId, {String? mediaSourceId}) async {}
 
   @override
   PlaybackSession open(PlayTarget target) {
@@ -1601,7 +1601,7 @@ class _FailingZonesData implements EmbyViewData {
 
 class _ThrowingPlayback implements EmbyViewPlayback {
   @override
-  Future<void> prepare(String itemId) async {}
+  Future<void> prepare(String itemId, {String? mediaSourceId}) async {}
 
   @override
   PlaybackSession open(PlayTarget target) =>

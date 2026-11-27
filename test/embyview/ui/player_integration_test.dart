@@ -125,7 +125,7 @@ class _TestSession implements PlaybackSession {
 class _TestPlayback implements EmbyViewPlayback {
   _TestPlayback(this.session);
   final _TestSession session;
-  @override Future<void> prepare(String itemId) async {}
+  @override Future<void> prepare(String itemId, {String? mediaSourceId}) async {}
   @override PlaybackSession open(PlayTarget target) => session;
 }
 

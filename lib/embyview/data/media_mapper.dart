@@ -210,25 +210,178 @@ class MediaMapper {
       AggregatedItem(id: item['Id'].toString(), serverId: _serverId ?? server, rawData: item);
 
   MediaQuality? quality(Json item) {
-    final streams = records(records(item['MediaSources']).firstOrNull?['MediaStreams'] ?? item['MediaStreams']);
+    final sources = records(item['MediaSources']);
+    final firstSource = sources.firstOrNull;
+    final streams = records(firstSource?['MediaStreams'] ?? item['MediaStreams']);
+    return qualityFromStreams(item, streams, source: firstSource);
+  }
+
+  MediaOrigin detectMediaOrigin(Json item, {Json? source}) {
+    final path = (source?['Path'] ?? item['Path'])?.toString().trim().toLowerCase() ?? '';
+    final container = (source?['Container'] ?? item['Container'])?.toString().trim().toLowerCase() ?? '';
+    final protocol = (source?['Protocol'])?.toString().trim().toLowerCase() ?? '';
+    final isRemote = source?['IsRemote'] == true;
+    if (isRemote ||
+        protocol == 'http' ||
+        protocol == 'https' ||
+        container == 'strm' ||
+        path.endsWith('.strm') ||
+        path.contains('115.com') ||
+        path.contains('115cdn')) {
+      return MediaOrigin.direct115;
+    }
+    return MediaOrigin.nasLocal;
+  }
+
+  MediaQuality? qualityFromStreams(Json item, List<Json> streams, {Json? source}) {
     final media = aggregate({...item, 'MediaStreams': streams});
     final audio = streams.where((s) => s['Type'] == 'Audio').toList();
     final selected = audio.where((s) => s['IsDefault'] == true).firstOrNull ?? audio.firstOrNull;
     final label = selected?['Title'].toString().toLowerCase().contains('atmos') == true
         ? 'Atmos'
         : const {6: '5.1', 8: '7.1'}[media.audioChannels];
-    final videoRange = const {
-      'dolbyvision': '杜比视界',
-      'dovi': '杜比视界',
-      'hdr10': 'HDR10',
-      'hdr10plus': 'HDR10+',
-      'hyperloggamma': 'HLG',
-      'hlg': 'HLG',
-      'hdr': 'HDR',
-    }[media.hdrType?.toLowerCase()];
-    return media.videoResolution == null && label == null && videoRange == null
+    final videoRange = _videoRangeLabel(media.hdrType);
+    final hasSource = source != null || item['Path'] != null;
+    final origin = hasSource ? detectMediaOrigin(item, source: source) : null;
+    return media.videoResolution == null && label == null && videoRange == null && origin == null
         ? null
-        : MediaQuality(resolution: media.videoResolution, videoRange: videoRange, audioLabel: label);
+        : MediaQuality(resolution: media.videoResolution, videoRange: videoRange, audioLabel: label, origin: origin);
+  }
+
+  static String? _videoRangeLabel(String? raw) => const {
+    'dolbyvision': '杜比视界',
+    'dovi': '杜比视界',
+    'hdr10': 'HDR10',
+    'hdr10plus': 'HDR10+',
+    'hyperloggamma': 'HLG',
+    'hlg': 'HLG',
+    'hdr': 'HDR',
+  }[raw?.trim().toLowerCase()];
+
+  static String _cleanVersionName(Json source, Json item, String resolution, String? videoCodec) {
+    final rawName = (source['Name'] as String?)?.trim() ?? '';
+    final itemName = (item['Name'] as String?)?.trim() ?? '';
+    var cleaned = rawName;
+    if (cleaned.isNotEmpty && itemName.isNotEmpty) {
+      final prefixPattern = RegExp('^${RegExp.escape(itemName)}\\s*[-–—·:]\\s*', caseSensitive: false);
+      cleaned = cleaned.replaceFirst(prefixPattern, '').trim();
+    }
+    if (cleaned.isEmpty || cleaned.toLowerCase() == itemName.toLowerCase()) {
+      final parts = [if (resolution.isNotEmpty) resolution, if (videoCodec != null && videoCodec.isNotEmpty) videoCodec];
+      return parts.isNotEmpty ? parts.join(' ') : (rawName.isNotEmpty ? rawName : '默认版本');
+    }
+    return cleaned;
+  }
+
+  static String? _formatVideoCodec(Json? videoStream) {
+    if (videoStream == null) return null;
+    final rawCodec = (videoStream['Codec'] as String?)?.trim().toLowerCase() ?? '';
+    if (rawCodec.isEmpty) return null;
+    final codec = switch (rawCodec) {
+      'hevc' || 'h265' || 'h.265' => 'HEVC',
+      'h264' || 'avc' || 'h.264' => 'H.264',
+      'av1' => 'AV1',
+      'vp9' => 'VP9',
+      _ => rawCodec.toUpperCase(),
+    };
+    final bitDepth = integer(videoStream['BitDepth']);
+    final profile = (videoStream['Profile'] as String?)?.toLowerCase() ?? '';
+    final is10Bit = bitDepth == 10 || profile.contains('10');
+    return is10Bit && codec == 'HEVC' ? '$codec 10bit' : codec;
+  }
+
+  static String? _formatVersionAudio(List<Json> audioStreams) {
+    if (audioStreams.isEmpty) return null;
+    final selected = audioStreams.where((s) => s['IsDefault'] == true).firstOrNull ?? audioStreams.first;
+    final title = '${selected['DisplayTitle'] ?? ''} ${selected['Title'] ?? ''}'.toLowerCase();
+    final codecRaw = (selected['Codec'] as String?)?.trim().toLowerCase() ?? '';
+    final codec = switch (codecRaw) {
+      'truehd' => 'TrueHD',
+      'eac3' || 'ec-3' => 'EAC3',
+      'ac3' => 'AC3',
+      'dts' => 'DTS',
+      'aac' => 'AAC',
+      'flac' => 'FLAC',
+      'opus' => 'Opus',
+      _ => codecRaw.isNotEmpty ? codecRaw.toUpperCase() : '',
+    };
+    final isAtmos = title.contains('atmos') || title.contains('全景声');
+    final channels = integer(selected['Channels']);
+    final rawLayout = (selected['ChannelLayout'] as String?)?.trim().toLowerCase();
+    final layout = switch (rawLayout) {
+      'mono' => '1.0',
+      'stereo' => '2.0',
+      'quad' => '4.0',
+      String v when RegExp(r'^\d+\.\d+').hasMatch(v) => v.split('(').first,
+      _ => const {1: '1.0', 2: '2.0', 6: '5.1', 8: '7.1'}[channels],
+    };
+    final parts = [
+      if (codec.isNotEmpty) codec,
+      if (isAtmos) '全景声',
+      if (layout != null && layout.isNotEmpty) layout,
+    ];
+    return parts.isEmpty ? embyAudioTechnicalLabel(selected) : parts.join(' ');
+  }
+
+  static String? _basename(String? path) {
+    if (path == null || path.trim().isEmpty) return null;
+    final parts = path.trim().split(RegExp(r'[/\\]'));
+    return parts.where((p) => p.isNotEmpty).lastOrNull;
+  }
+
+  List<MediaVersion> versions(Json item) {
+    final sources = records(item['MediaSources']);
+    if (sources.isEmpty) return const [];
+    final out = <MediaVersion>[];
+    for (final source in sources) {
+      final id = source['Id']?.toString().trim() ?? '';
+      if (id.isEmpty) continue;
+      final streams = records(source['MediaStreams']);
+      final effectiveStreams = streams.isNotEmpty ? streams : records(item['MediaStreams']);
+      final media = aggregate({...item, 'MediaStreams': effectiveStreams});
+      final video = effectiveStreams.where((s) => s['Type'] == 'Video').firstOrNull;
+      final audio = effectiveStreams.where((s) => s['Type'] == 'Audio').toList();
+      final width = integer(video?['Width']);
+      final height = integer(video?['Height']);
+      final resolution = media.videoResolution ??
+          (width != null && width >= 3800 || height != null && height >= 2000
+              ? '4K'
+              : height != null && height >= 1000
+              ? '1080p'
+              : height != null && height >= 680
+              ? '720p'
+              : 'HD');
+      final videoRange = _videoRangeLabel(media.hdrType);
+      final videoCodec = _formatVideoCodec(video);
+      final audioLabel = _formatVersionAudio(audio);
+      final sizeBytes = integer(source['Size']);
+      final bitrateBps = integer(source['Bitrate']) ?? integer(video?['BitRate']);
+      final origin = detectMediaOrigin(item, source: source);
+      final embeddedSubs = effectiveStreams
+          .where((s) => s['Type'] == 'Subtitle' && s['IsExternal'] == false)
+          .map((s) => s['Language'])
+          .whereType<String>()
+          .toSet()
+          .toList();
+      out.add(
+        MediaVersion(
+          id: id,
+          name: _cleanVersionName(source, item, resolution, videoCodec),
+          resolution: resolution,
+          width: width,
+          height: height,
+          videoRange: videoRange,
+          videoCodec: videoCodec,
+          audioLabel: audioLabel,
+          sizeBytes: sizeBytes,
+          bitrateBps: bitrateBps,
+          origin: origin,
+          fileName: _basename(source['Path'] as String?),
+          embeddedSubtitleLanguages: embeddedSubs,
+        ),
+      );
+    }
+    return List.unmodifiable(out);
   }
 
   MediaCard card(Json item, {String? library, Json? parent, List<Json> collection = const []}) {

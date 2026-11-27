@@ -121,7 +121,7 @@ class _FakePlayback implements EmbyViewPlayback {
   final List<PlayTarget> openedTargets = [];
 
   @override
-  Future<void> prepare(String itemId) async {}
+  Future<void> prepare(String itemId, {String? mediaSourceId}) async {}
 
   @override
   PlaybackSession open(PlayTarget target) {

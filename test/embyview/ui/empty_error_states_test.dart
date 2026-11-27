@@ -125,7 +125,7 @@ class _FakeImmersion implements ImmersionPlayback {
 
 class _FakePlayback implements EmbyViewPlayback {
   @override
-  Future<void> prepare(String itemId) async {}
+  Future<void> prepare(String itemId, {String? mediaSourceId}) async {}
   @override
   PlaybackSession open(PlayTarget target) => throw UnimplementedError();
 }

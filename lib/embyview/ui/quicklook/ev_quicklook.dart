@@ -347,6 +347,10 @@ class _EvQuickLookHostState extends State<EvQuickLookHost> with SingleTickerProv
     if (target == null) return;
     _restoreFocus = null;
     _controller.close(immediate: true);
+    if (target.card.kind == MediaKind.collection && _scope?.shell.onOpenCollection != null) {
+      _scope!.shell.onOpenCollection!(target.card.id);
+      return;
+    }
     (widget.onOpenDetail ?? _scope?.shell.onOpenDetail)?.call(target.card.id);
   }
 

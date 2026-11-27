@@ -10,6 +10,20 @@ enum SecretKind { openAi, assrt, openSubtitles }
 
 enum SubtitleAutoMode { always, foreignOnly, off }
 
+enum DefaultVersionRule { bestQuality, lastSimilar, smallestSize }
+
+String defaultVersionRuleLabel(DefaultVersionRule rule) => switch (rule) {
+  DefaultVersionRule.bestQuality => '画质最高',
+  DefaultVersionRule.lastSimilar => '上次选的同类',
+  DefaultVersionRule.smallestSize => '体积最小',
+};
+
+String defaultVersionRuleSentenceLabel(DefaultVersionRule rule) => switch (rule) {
+  DefaultVersionRule.bestQuality => '画质最高',
+  DefaultVersionRule.lastSimilar => '上次选的同类版本',
+  DefaultVersionRule.smallestSize => '体积最小',
+};
+
 typedef LanguageOption = ({String code, String label});
 
 const List<LanguageOption> defaultAudioLanguageOptions = [
@@ -132,6 +146,8 @@ class LocalPreferences {
     this.preResolve115 = true,
     this.readAheadBytes = 256 * 1024 * 1024,
     this.autoPlayNext = true,
+    this.defaultVersionRule = DefaultVersionRule.bestQuality,
+    this.warnHighBitrateOnExternalNetwork = true,
     this.anime4kForAnime = true,
     this.anime4kForOther = false,
     this.audioLanguages = const [],
@@ -171,6 +187,8 @@ class LocalPreferences {
   final bool preResolve115;
   final int readAheadBytes;
   final bool autoPlayNext;
+  final DefaultVersionRule defaultVersionRule;
+  final bool warnHighBitrateOnExternalNetwork;
   final bool anime4kForAnime;
   final bool anime4kForOther;
 
@@ -203,6 +221,8 @@ class LocalPreferences {
     bool? preResolve115,
     int? readAheadBytes,
     bool? autoPlayNext,
+    DefaultVersionRule? defaultVersionRule,
+    bool? warnHighBitrateOnExternalNetwork,
     bool? anime4kForAnime,
     bool? anime4kForOther,
     List<String>? audioLanguages,
@@ -236,6 +256,9 @@ class LocalPreferences {
     preResolve115: preResolve115 ?? this.preResolve115,
     readAheadBytes: readAheadBytes ?? this.readAheadBytes,
     autoPlayNext: autoPlayNext ?? this.autoPlayNext,
+    defaultVersionRule: defaultVersionRule ?? this.defaultVersionRule,
+    warnHighBitrateOnExternalNetwork:
+        warnHighBitrateOnExternalNetwork ?? this.warnHighBitrateOnExternalNetwork,
     anime4kForAnime: anime4kForAnime ?? this.anime4kForAnime,
     anime4kForOther: anime4kForOther ?? this.anime4kForOther,
     audioLanguages: audioLanguages ?? this.audioLanguages,

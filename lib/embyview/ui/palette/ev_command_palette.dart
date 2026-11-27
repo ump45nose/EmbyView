@@ -289,7 +289,13 @@ class _EvCommandPaletteOverlayState extends State<EvCommandPaletteOverlay>
         _PaletteItem(
           id: 'movie_${hit.card.id}', title: hit.card.title, hint: _formatMovieSubtitle(hit.card, hit.groupName),
           icon: EvIcons.film, poster: hit.card.art.poster.layers.isNotEmpty ? hit.card.art.poster : null,
-          run: _closeThen(() => (widget.onOpenDetail ?? scope?.shell.onOpenDetail)?.call(hit.card.id)),
+          run: _closeThen(() {
+            if (hit.card.kind == MediaKind.collection && scope?.shell.onOpenCollection != null) {
+              scope!.shell.onOpenCollection!(hit.card.id);
+              return;
+            }
+            (widget.onOpenDetail ?? scope?.shell.onOpenDetail)?.call(hit.card.id);
+          }),
         ),
     ];
     final matched = cmds.where((c) => c.matches(q)).toList();

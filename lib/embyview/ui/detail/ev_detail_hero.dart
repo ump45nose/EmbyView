@@ -6,6 +6,7 @@ import 'package:flutter/material.dart' show Colors, Tooltip;
 import 'package:flutter/widgets.dart';
 import 'package:moonfin/embyview/embyview.dart';
 import 'package:moonfin/embyview/ui/detail/ev_theme_capsule.dart';
+import 'package:moonfin/embyview/ui/detail/ev_version_popover.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
 
 /// Full-bleed detail first screen (`100vh - peek`) mirroring `.detail .first` in `proto.css` / `proto.js`.
@@ -20,6 +21,8 @@ class EvDetailHero extends StatefulWidget {
     this.favoriteBusy = false, this.playedBusy = false,
     this.actionError, this.onDismissActionError,
     this.onToggleFavorite, this.onTogglePlayed,
+    this.activeVersion, this.versionCount = 0, this.versionButtonKey, this.onOpenVersionPicker,
+    this.onOpenCollection, this.onOpenPerson,
   });
 
   final MediaDetail detail;
@@ -35,6 +38,12 @@ class EvDetailHero extends StatefulWidget {
   final VoidCallback onToggleTrailer;
   final void Function(PlayTarget target, CardArtwork art, Rect? origin) onPlay;
   final VoidCallback? onToggleFavorite, onTogglePlayed;
+  final MediaVersion? activeVersion;
+  final int versionCount;
+  final GlobalKey? versionButtonKey;
+  final void Function(Rect anchorRect)? onOpenVersionPicker;
+  final ValueChanged<String>? onOpenCollection;
+  final ValueChanged<PersonCredit>? onOpenPerson;
 
   @override State<EvDetailHero> createState() => _EvDetailHeroState();
 }
@@ -50,7 +59,20 @@ class _EvDetailHeroState extends State<EvDetailHero> {
 
   void _play(BuildContext ctx) {
     final box = ctx.findRenderObject() as RenderBox?, d = widget.detail;
-    widget.onPlay(d.resume?.target ?? d.playTarget ?? PlayTarget(itemId: d.card.id), d.card.art, box != null && box.hasSize ? (box.localToGlobal(Offset.zero) & box.size) : null);
+    final base = d.resume?.target ?? d.playTarget ?? PlayTarget(itemId: d.card.id);
+    final versionId = widget.activeVersion?.id;
+    final target = versionId != null && versionId.isNotEmpty
+        ? PlayTarget(
+            itemId: base.itemId,
+            startAt: base.startAt ?? d.resume?.position,
+            seriesId: base.seriesId,
+            seasonId: base.seasonId,
+            episodeNumber: base.episodeNumber,
+            mediaSourceId: versionId,
+            queueItemIds: base.queueItemIds,
+          )
+        : base;
+    widget.onPlay(target, d.card.art, box != null && box.hasSize ? (box.localToGlobal(Offset.zero) & box.size) : null);
   }
 
   @override
@@ -73,10 +95,12 @@ class _EvDetailHeroState extends State<EvDetailHero> {
 
   Widget _buildInfo(BuildContext ctx, EvTheme t, EvScale s) {
     final d = widget.detail, card = d.card;
-    List<String> byRole(List<String> keys, int cap) =>
-        widget.people.where((p) => keys.contains(p.role.trim().toLowerCase()) && p.name.trim().isNotEmpty).take(cap).map((p) => p.name.trim()).toList();
+    List<PersonCredit> byRole(List<String> keys, int cap) =>
+        widget.people.where((p) => keys.contains(p.role.trim().toLowerCase()) && p.name.trim().isNotEmpty).take(cap).toList();
     final dirs = byRole(const ['director', '导演'], 2), acts = byRole(const ['actor', '主演', '演员'], 4);
     final credLbl = t.bodyStyle(s.font(0.9375), fontWeight: FontWeight.w600, color: t.ink2, height: 1.6);
+    final sepStyle = t.bodyStyle(s.font(0.9375), color: t.ink3, height: 1.6);
+    final col = d.collection;
 
     return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
       _buildStatusPill(ctx, t, s),
@@ -137,15 +161,45 @@ class _EvDetailHeroState extends State<EvDetailHero> {
           ),
         ),
       ],
+      if (col != null) ...[
+        SizedBox(height: s.rem(1.125)),
+        _EvCollectionLink(
+          key: const Key('ev_detail_collection_link'),
+          membership: col,
+          onTap: widget.onOpenCollection != null ? () => widget.onOpenCollection!(col.id) : null,
+        ),
+      ],
       if (dirs.isNotEmpty || acts.isNotEmpty) ...[
         SizedBox(height: s.rem(1.125)),
-        Text.rich(
-          TextSpan(style: t.bodyStyle(s.font(0.9375), color: t.ink3, height: 1.6), children: [
-            if (dirs.isNotEmpty) ...[TextSpan(text: '导演 ', style: credLbl), TextSpan(text: dirs.join('、'))],
-            if (dirs.isNotEmpty && acts.isNotEmpty) const TextSpan(text: '　　'),
-            if (acts.isNotEmpty) ...[TextSpan(text: '主演 ', style: credLbl), TextSpan(text: acts.join('、'))],
-          ]),
-          key: const Key('ev_detail_credits'), maxLines: 2, overflow: TextOverflow.ellipsis,
+        Wrap(
+          key: const Key('ev_detail_credits'),
+          crossAxisAlignment: WrapCrossAlignment.center,
+          runSpacing: s.rem(0.25),
+          children: [
+            if (dirs.isNotEmpty) ...[
+              Padding(padding: EdgeInsets.only(right: s.rem(0.5)), child: Text('导演', style: credLbl)),
+              for (var i = 0; i < dirs.length; i++) ...[
+                if (i > 0) Text('、', style: sepStyle),
+                _EvPersonNameLink(
+                  key: Key('ev_detail_credit_${dirs[i].id}'),
+                  person: dirs[i],
+                  onTap: widget.onOpenPerson != null ? () => widget.onOpenPerson!(dirs[i]) : null,
+                ),
+              ],
+            ],
+            if (dirs.isNotEmpty && acts.isNotEmpty) SizedBox(width: s.rem(1.5)),
+            if (acts.isNotEmpty) ...[
+              Padding(padding: EdgeInsets.only(right: s.rem(0.5)), child: Text('主演', style: credLbl)),
+              for (var i = 0; i < acts.length; i++) ...[
+                if (i > 0) Text('、', style: sepStyle),
+                _EvPersonNameLink(
+                  key: Key('ev_detail_credit_${acts[i].id}'),
+                  person: acts[i],
+                  onTap: widget.onOpenPerson != null ? () => widget.onOpenPerson!(acts[i]) : null,
+                ),
+              ],
+            ],
+          ],
         ),
       ],
     ]);
@@ -334,6 +388,22 @@ class _EvDetailHeroState extends State<EvDetailHero> {
     final sec = res != null && tot != null && tot > Duration.zero ? '· ${EvCard.formatRemaining(tot > res.position ? tot - res.position : Duration.zero)}' : null;
     return Wrap(spacing: s.rem(0.75), runSpacing: s.rem(0.5), crossAxisAlignment: WrapCrossAlignment.center, children: [
       Builder(builder: (c) => EvButton.primary(key: const Key('ev_detail_play_btn'), icon: EvIcons.play, label: pri, secondaryLabel: sec, progress: EvCard.resumeProgress(res), onPressed: () => _play(c))),
+      if (widget.versionCount > 1 && widget.activeVersion != null)
+        Builder(
+          key: widget.versionButtonKey,
+          builder: (c) => EvVersionButton(
+            key: const Key('ev_detail_version_btn'),
+            activeVersion: widget.activeVersion!,
+            totalCount: widget.versionCount,
+            onPressed: () {
+              final box = c.findRenderObject() as RenderBox?;
+              final rect = box != null && box.hasSize
+                  ? (box.localToGlobal(Offset.zero) & box.size)
+                  : Rect.fromLTWH(s.gutter, s.vh(68), s.rem(14), s.rem(3.25));
+              widget.onOpenVersionPicker?.call(rect);
+            },
+          ),
+        ),
       _EvDetailActionButton(
         key: const Key('ev_detail_favorite_btn'),
         icon: widget.isFavorite ? EvIcons.star : EvIcons.plus,
@@ -626,6 +696,141 @@ class _EvDetailActionButtonState extends State<_EvDetailActionButton> {
       enabled: _interactive,
       label: widget.tooltip,
       child: button,
+    );
+  }
+}
+
+class _EvCollectionLink extends StatefulWidget {
+  const _EvCollectionLink({super.key, required this.membership, this.onTap});
+  final CollectionMembership membership;
+  final VoidCallback? onTap;
+  @override
+  State<_EvCollectionLink> createState() => _EvCollectionLinkState();
+}
+
+class _EvCollectionLinkState extends State<_EvCollectionLink> {
+  bool _hovered = false, _focused = false;
+  bool get _hi => _hovered || _focused;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context), m = widget.membership;
+    final radius = BorderRadius.circular(999);
+    final circleBg = t.isPaper ? const Color(0xFFC46686) : t.box;
+    final circleFg = t.isPaper ? Colors.white : const Color(0xFF141413);
+    final child = SizedBox(
+      height: s.rem(2.5),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(s.rem(0.375), 0, s.rem(0.875), 0),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: s.rem(1.75),
+              height: s.rem(1.75),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: circleBg),
+              child: EvIcon(EvIcons.stack, size: s.rem(1.0), color: circleFg),
+            ),
+            SizedBox(width: s.rem(0.625)),
+            Text(
+              '${m.displayName} 系列',
+              style: t.bodyStyle(s.font(0.9375), fontWeight: FontWeight.w600, color: t.ink),
+            ),
+            SizedBox(width: s.rem(0.625)),
+            Text(
+              '第 ${m.position} / ${m.total} 部',
+              style: t.bodyStyle(s.font(0.875), fontWeight: FontWeight.w500, color: t.ink3),
+            ),
+            SizedBox(width: s.rem(0.5)),
+            EvIcon(EvIcons.right, size: s.rem(0.875), color: t.ink.withValues(alpha: t.ink.a * 0.6)),
+          ],
+        ),
+      ),
+    );
+
+    return Semantics(
+      button: true,
+      label: '${m.displayName} 系列，第 ${m.position} / ${m.total} 部',
+      child: Focus(
+        onFocusChange: (v) => setState(() => _focused = v),
+        onKeyEvent: (_, event) {
+          if (widget.onTap == null || !evIsActivateKey(event)) return KeyEventResult.ignored;
+          widget.onTap!();
+          return KeyEventResult.handled;
+        },
+        child: MouseRegion(
+          cursor: widget.onTap != null ? SystemMouseCursors.click : SystemMouseCursors.basic,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: AnimatedScale(
+              scale: _hi && widget.onTap != null ? 1.04 : 1.0,
+              duration: EvDurations.normal,
+              curve: EvCurves.spring,
+              child: EvGlass(
+                borderRadius: radius,
+                color: _hi ? t.fill3 : null,
+                child: child,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EvPersonNameLink extends StatefulWidget {
+  const _EvPersonNameLink({super.key, required this.person, this.onTap});
+  final PersonCredit person;
+  final VoidCallback? onTap;
+  @override
+  State<_EvPersonNameLink> createState() => _EvPersonNameLinkState();
+}
+
+class _EvPersonNameLinkState extends State<_EvPersonNameLink> {
+  bool _hovered = false, _focused = false;
+  bool get _hi => _hovered || _focused;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context);
+    final active = widget.onTap != null;
+    return Semantics(
+      button: active,
+      label: widget.person.name.trim(),
+      child: Focus(
+        canRequestFocus: active,
+        onFocusChange: (v) => setState(() => _focused = v),
+        onKeyEvent: (_, event) {
+          if (!active || !evIsActivateKey(event)) return KeyEventResult.ignored;
+          widget.onTap!();
+          return KeyEventResult.handled;
+        },
+        child: MouseRegion(
+          cursor: active ? SystemMouseCursors.click : SystemMouseCursors.basic,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: Text(
+              widget.person.name.trim(),
+              style: t.bodyStyle(
+                s.font(0.9375),
+                color: _hi && active ? t.ink : t.ink2,
+                height: 1.6,
+              ).copyWith(
+                decoration: _hi && active ? TextDecoration.underline : TextDecoration.none,
+                decorationColor: t.ink4,
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

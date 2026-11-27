@@ -163,7 +163,7 @@ class _EvHeroState extends State<EvHero> with SingleTickerProviderStateMixin {
 
   void _handleDetail(HomeRecommendation rec) {
     if (widget.onDetail != null) { widget.onDetail!(); return; }
-    EvScope.maybeOf(context)?.shell.onOpenDetail?.call(rec.card.id);
+    EvScope.maybeOf(context)?.shell.openCard(rec.card);
   }
 
   @override

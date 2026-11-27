@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:moonfin/embyview/embyview.dart';
 
 /// Visual presentation mode of the persistent full-window stage.
-enum EvStageMode { hero, detail, ambient }
+enum EvStageMode { hero, detail, person, ambient }
 
 /// Computes a stable identity key for [plan] so identical backdrops do not
 /// restart crossfade or Ken Burns animations.

@@ -84,8 +84,11 @@ class EvShellController extends ChangeNotifier {
     List<ZoneTile> zones = const [],
     bool hasVisibleLibraries = true,
     this.onOpenDetail,
+    this.onOpenCollection,
+    this.onOpenPerson,
     this.onOpenSearch,
     this.onOpenSettings,
+    this.onOpenPlaySettings,
     this.onOpenAbout,
     this.onOpenServerSettings,
     this.onOpenUsers,
@@ -122,7 +125,18 @@ class EvShellController extends ChangeNotifier {
   EvNoticeState? _notice;
 
   ValueChanged<String>? onOpenDetail;
-  VoidCallback? onOpenSearch, onOpenSettings, onOpenAbout, onOpenServerSettings;
+  ValueChanged<String>? onOpenCollection;
+  void Function(String personId, {String? name, String? roleHint, MediaCard? sourceItem})? onOpenPerson;
+  VoidCallback? onOpenSearch, onOpenSettings, onOpenPlaySettings, onOpenAbout, onOpenServerSettings;
+
+  /// Routes collection cards to the collection page when registered, else detail.
+  void openCard(MediaCard card) {
+    if (card.kind == MediaKind.collection && onOpenCollection != null) {
+      onOpenCollection!(card.id);
+      return;
+    }
+    onOpenDetail?.call(card.id);
+  }
   VoidCallback? onOpenUsers, onOpenLook, onManageZones;
   VoidCallback? onSignedOutToUserPicker, onSignOut, onSwitchServer, onAddAccount;
   VoidCallback? onToggleCommandPalette, onGoHome, onRetryHome;

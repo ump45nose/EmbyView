@@ -33,11 +33,13 @@ import 'playback/moonfin_playback.dart';
 import 'playback/native_playback.dart';
 import 'prefs/machine_preferences.dart';
 import 'subtitles/subtitle_service.dart';
+import 'ui/collection/ev_collection_page.dart';
 import 'ui/detail/ev_detail_page.dart';
 import 'ui/home/ev_home_page.dart';
 import 'ui/kit.dart';
 import 'ui/login/ev_moonfin_login_backend.dart';
 import 'ui/palette/ev_command_palette.dart';
+import 'ui/person/ev_person_page.dart';
 import 'ui/player/ev_player_page.dart';
 import 'ui/quicklook/ev_quicklook.dart';
 import 'ui/search/ev_search_page.dart';
@@ -162,6 +164,17 @@ EmbyViewRegistration _registerStageFour(EmbyViewRegistration registration) {
       final id = s.pathParameters['itemId'] ?? '';
       return _EmbyViewRouteHost(initialEntry: id.isNotEmpty ? _S4Detail(0, id) : null);
     }),
+    GoRoute(path: 'collection/:collectionId', builder: (_, s) {
+      final id = s.pathParameters['collectionId'] ?? '';
+      return _EmbyViewRouteHost(initialEntry: id.isNotEmpty ? _S4Collection(0, id) : null);
+    }),
+    GoRoute(path: 'person/:personId', builder: (_, s) {
+      final id = s.pathParameters['personId'] ?? '';
+      final qp = s.uri.queryParameters;
+      return _EmbyViewRouteHost(
+        initialEntry: id.isNotEmpty ? _S4Person(0, id, name: qp['name'], roleHint: qp['role']) : null,
+      );
+    }),
     GoRoute(path: 'search', builder: (_, s) {
       final qp = s.uri.queryParameters;
       return _EmbyViewRouteHost(initialEntry: _S4Search(0, zoneId: qp['zone']?.isNotEmpty == true ? qp['zone'] : null, initialQuery: qp['q']));
@@ -197,7 +210,9 @@ Widget _buildStageThreeShell(
 /// Test and smoke-verification helper mounting the full Stage 4 EmbyView host.
 Widget buildStageFourTestShell({
   required EmbyViewServices services, EvShellDestination? initialDestination,
-  String? initialDetailId, bool initialSearch = false, EvSettingsSection? initialSettings,
+  String? initialDetailId, bool openVersionPopoverOnMount = false,
+  String? initialCollectionId, String? initialPersonId, String? initialPersonName,
+  bool initialSearch = false, EvSettingsSection? initialSettings,
   bool initialUsers = false, bool openZoneEditorOnMount = false,
   bool showOnboardingOverlay = false,
   EvShellController? shellController,
@@ -211,7 +226,12 @@ Widget buildStageFourTestShell({
   key: ValueKey(services.sessionId),
   child: _StageFourShellHost(
     services: services, initialDestination: initialDestination,
-    initialEntry: initialDetailId != null ? _S4Detail(0, initialDetailId)
+    initialEntry: initialDetailId != null
+        ? _S4Detail(0, initialDetailId, openVersionPopover: openVersionPopoverOnMount)
+        : initialCollectionId != null
+        ? _S4Collection(0, initialCollectionId)
+        : initialPersonId != null
+        ? _S4Person(0, initialPersonId, name: initialPersonName)
         : initialSearch ? const _S4Search(0)
         : initialSettings != null ? _S4Settings(0, section: initialSettings, openZoneEditor: openZoneEditorOnMount)
         : initialUsers ? const _S4Users(0) : null,
@@ -274,7 +294,9 @@ class _StageThreeRuntime {
 }
 
 sealed class _S4Entry { const _S4Entry(this.id); final int id; }
-final class _S4Detail extends _S4Entry { const _S4Detail(super.id, this.itemId); final String itemId; }
+final class _S4Detail extends _S4Entry { const _S4Detail(super.id, this.itemId, {this.openVersionPopover = false}); final String itemId; final bool openVersionPopover; }
+final class _S4Collection extends _S4Entry { const _S4Collection(super.id, this.collectionId); final String collectionId; }
+final class _S4Person extends _S4Entry { const _S4Person(super.id, this.personId, {this.name, this.roleHint, this.sourceItem}); final String personId; final String? name, roleHint; final MediaCard? sourceItem; }
 final class _S4Search extends _S4Entry { const _S4Search(super.id, {this.zoneId, this.initialQuery}); final String? zoneId, initialQuery; }
 final class _S4Settings extends _S4Entry { const _S4Settings(super.id, {this.section = EvSettingsSection.account, this.openZoneEditor = false}); final EvSettingsSection section; final bool openZoneEditor; }
 final class _S4Users extends _S4Entry { const _S4Users(super.id); }
@@ -377,8 +399,11 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
 
   void _bindShellCallbacks(EvShellController shell) {
     shell.onOpenDetail = _openDetail;
+    shell.onOpenCollection = _openCollection;
+    shell.onOpenPerson = _openPerson;
     shell.onOpenSearch = _openSearch;
     shell.onOpenSettings = _openSettings;
+    shell.onOpenPlaySettings = () => _openSettings(section: EvSettingsSection.play);
     shell.onOpenAbout = () => _openSettings(section: EvSettingsSection.about);
     shell.onOpenServerSettings = () => _openSettings(section: EvSettingsSection.account);
     shell.onOpenUsers = _openUsers;
@@ -688,6 +713,13 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   }
 
   void _openDetail(String id) { final top = _s4Stack.lastOrNull?.entry; if (id.isNotEmpty && (top is! _S4Detail || top.itemId != id)) _pushStageFour(_S4Detail(_nextEntryId++, id)); }
+  void _openCollection(String id) { final top = _s4Stack.lastOrNull?.entry; if (id.isNotEmpty && (top is! _S4Collection || top.collectionId != id)) _pushStageFour(_S4Collection(_nextEntryId++, id)); }
+  void _openPerson(String id, {String? name, String? roleHint, MediaCard? sourceItem}) {
+    final top = _s4Stack.lastOrNull?.entry;
+    if (id.isNotEmpty && (top is! _S4Person || top.personId != id)) {
+      _pushStageFour(_S4Person(_nextEntryId++, id, name: name, roleHint: roleHint, sourceItem: sourceItem));
+    }
+  }
   void _openSearch({String? zoneId, String? query}) {
     final top = _s4Stack.lastOrNull?.entry;
     if (top is _S4Search && top.zoneId == zoneId && query == null) { _closeOverlays(); return; }
@@ -895,8 +927,20 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
   }
 
   Widget _buildStageFourFrame(BuildContext context, _S4Entry entry) {
+    final isBareChrome = entry is _S4Detail || entry is _S4Collection || entry is _S4Person;
     final page = switch (entry) {
-      _S4Detail(:final id, :final itemId) => EvDetailPage(key: ValueKey('s4_detail_${id}_$itemId'), itemId: itemId, onOpenItem: _openDetail),
+      _S4Detail(:final id, :final itemId, :final openVersionPopover) => EvDetailPage(
+        key: ValueKey('s4_detail_${id}_$itemId'), itemId: itemId,
+        openVersionPopoverOnMount: openVersionPopover,
+        onOpenItem: _openDetail, onOpenCollection: _openCollection,
+        onOpenPerson: _openPerson, onOpenPlaySettings: () => _openSettings(section: EvSettingsSection.play)),
+      _S4Collection(:final id, :final collectionId) => EvCollectionPage(
+        key: ValueKey('s4_collection_${id}_$collectionId'), collectionId: collectionId,
+        onOpenItem: _openDetail),
+      _S4Person(:final id, :final personId, :final name, :final roleHint, :final sourceItem) => EvPersonPage(
+        key: ValueKey('s4_person_${id}_$personId'), personId: personId,
+        personName: name, roleHint: roleHint, sourceItem: sourceItem,
+        onOpenItem: _openDetail),
       _S4Search(:final id, :final zoneId, :final initialQuery) => EvSearchPage(
         key: ValueKey('s4_search_$id'), zoneId: zoneId, initialQuery: initialQuery, onOpenItem: _openDetail, onOpenPalette: _palette.open),
       _S4Settings(:final id, :final section, :final openZoneEditor) => EvSettingsPage(
@@ -932,14 +976,14 @@ class _StageFourShellHostState extends State<_StageFourShellHost> {
                     builder: (_, _) => EvTopBar(
                       zones: _shell.zones, activeTabId: entry is _S4Search ? 'search' : null,
                       navigationStyle: _prefs.navigation, scrolled: _shell.scrolled, topFade: _shell.topFade,
-                      onImageBackdrop: _runtime.stage.mode != EvStageMode.ambient, showBack: true,
-                      hideTabs: entry is _S4Detail, hideAvatar: entry is _S4Detail, showSearchTab: true,
+                      onImageBackdrop: _runtime.stage.mode != EvStageMode.ambient && _runtime.stage.mode != EvStageMode.person, showBack: true,
+                      hideTabs: isBareChrome, hideAvatar: isBareChrome, showSearchTab: true,
                       currentProfile: _account.current, avatarMenuOpen: _avatarMenuOpen,
                       windowDragBuilder: _buildMacWindowDragArea, onSelectTab: _selectStageFourTab,
                       onBack: _popStageFour, onAvatarTap: _toggleAvatarMenu,
                     ),
                   )),
-                if (_avatarMenuOpen && entry is! _S4Users && entry is! _S4Detail) ...[
+                if (_avatarMenuOpen && entry is! _S4Users && !isBareChrome) ...[
                   Positioned.fill(child: GestureDetector(key: const Key('ev_avatar_menu_scrim'), behavior: HitTestBehavior.translucent, onTap: () => setState(() => _avatarMenuOpen = false))),
                   Positioned(right: scale.rem(1.5), top: scale.rem(4.0), child: FocusScope(
                     node: _s4MenuScope,

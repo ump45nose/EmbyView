@@ -58,6 +58,9 @@ class EvStage extends StatefulWidget {
               opacity: p * 0.80 * (veilLifted ? 0.3 : 1.0),
               blurSigma: p * 28.0 * (veilLifted ? 0.3 : 1.0),
             ),
+      EvStageMode.person => isPaper
+          ? const EvStageVeilSpec(opacity: 0.80, blurSigma: 36.0)
+          : const EvStageVeilSpec(opacity: 0.58, blurSigma: 28.0),
       EvStageMode.detail => veilLifted
           ? EvStageVeilSpec(opacity: p * 0.30, blurSigma: 0.0)
           : detailNoBlur
@@ -510,8 +513,10 @@ class _StageScrim extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDetail = mode == EvStageMode.detail;
+    final isDetail = mode == EvStageMode.detail || mode == EvStageMode.person;
     final opacity = mode == EvStageMode.ambient
+        ? 0.0
+        : mode == EvStageMode.person && theme.isPaper
         ? 0.0
         : (theme.isPaper ? (1.0 - scrollProgress).clamp(0.0, 1.0) : 1.0);
 

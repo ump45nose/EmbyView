@@ -673,8 +673,11 @@ class _EvWallPageState extends State<EvWallPage> {
 
   void _openCard(MediaCard card, Rect origin) {
     if (widget.onOpenItem != null) { widget.onOpenItem!(card); return; }
-    final openDetail = _scope?.shell.onOpenDetail;
-    if (openDetail != null) { openDetail(card.id); return; }
+    final shell = _scope?.shell;
+    if (shell != null && (shell.onOpenDetail != null || shell.onOpenCollection != null)) {
+      shell.openCard(card);
+      return;
+    }
     _playCard(card, origin: origin);
   }
 

@@ -591,7 +591,7 @@ class _EvHomePageState extends State<EvHomePage> {
     }
   }
 
-  void _openDetail(MediaCard card) => _scope?.shell.onOpenDetail?.call(card.id);
+  void _openDetail(MediaCard card) => _scope?.shell.openCard(card);
 
   void _play(PlayTarget target, CardArtwork art, {Rect? origin}) =>
       unawaited(EvPlayer.open(context, target, origin: origin, art: art));

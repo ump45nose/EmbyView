@@ -188,7 +188,7 @@ class _FakePlaybackSession implements PlaybackSession {
 class _FakePlayback implements EmbyViewPlayback {
   final List<String> preparedIds = [];
   final List<PlayTarget> openedTargets = [];
-  @override Future<void> prepare(String itemId) async => preparedIds.add(itemId);
+  @override Future<void> prepare(String itemId, {String? mediaSourceId}) async => preparedIds.add(itemId);
   @override PlaybackSession open(PlayTarget target) {
     openedTargets.add(target);
     return _FakePlaybackSession(target);
@@ -379,7 +379,7 @@ void main() {
     expect(embyViewRegistration.stageThreeRoutes.length, 2);
     expect(
       embyViewRegistration.stageFourRoutes.map((r) => (r as GoRoute).path).toList(),
-      ['detail/:itemId', 'search', 'settings', 'users'],
+      ['detail/:itemId', 'collection/:collectionId', 'person/:personId', 'search', 'settings', 'users'],
     );
 
     final prefs = _FakePrefs();

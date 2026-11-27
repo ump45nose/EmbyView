@@ -8,6 +8,7 @@ import 'package:moonfin/embyview/ui/detail/ev_detail_episodes.dart';
 import 'package:moonfin/embyview/ui/detail/ev_detail_hero.dart';
 import 'package:moonfin/embyview/ui/detail/ev_detail_sections.dart';
 import 'package:moonfin/embyview/ui/detail/ev_theme_capsule.dart';
+import 'package:moonfin/embyview/ui/detail/ev_version_popover.dart';
 import 'package:moonfin/embyview/ui/kit.dart';
 
 export 'ev_episode_card.dart';
@@ -15,16 +16,26 @@ export 'ev_episode_card.dart';
 /// Complete EmbyView movie & series detail page mirroring `vDetail`, `epCard`,
 /// `themePlay`, and `themeStop` from `.spec/mockups/proto.js` & `proto.css`.
 class EvDetailPage extends StatefulWidget {
-  const EvDetailPage({super.key, required this.itemId, this.enableAnimations = true, this.onOpenItem, this.onPlayTarget});
+  const EvDetailPage({
+    super.key, required this.itemId, this.enableAnimations = true,
+    this.openVersionPopoverOnMount = false,
+    this.onOpenItem, this.onOpenCollection, this.onOpenPerson, this.onOpenPlaySettings,
+    this.onPlayTarget,
+  });
   final String itemId;
   final bool enableAnimations;
+  final bool openVersionPopoverOnMount;
   final ValueChanged<String>? onOpenItem;
+  final ValueChanged<String>? onOpenCollection;
+  final void Function(String personId, {String? name, String? roleHint, MediaCard? sourceItem})? onOpenPerson;
+  final VoidCallback? onOpenPlaySettings;
   final void Function(PlayTarget target, CardArtwork art, Rect? origin)? onPlayTarget;
   @override State<EvDetailPage> createState() => _EvDetailPageState();
 }
 
 class _EvDetailPageState extends State<EvDetailPage> {
   final _scroll = ScrollController();
+  final _versionBtnKey = GlobalKey();
   EvScope? _scope;
   StreamSubscription<EvPlaybackEnded>? _playbackEndedSub;
   Immersion? _attachedImmersion;
@@ -39,6 +50,10 @@ class _EvDetailPageState extends State<EvDetailPage> {
   bool _loading = true, _loadingEps = false, _quoting = false, _trailerLive = false, _stillLive = false, _trailerStarting = false;
   bool _epHovering = false, _themeStarted = false, _ownsChrome = false;
   bool _favorite = false, _played = false, _savingFavorite = false, _savingPlayed = false;
+  bool _versionPopoverOpen = false;
+  bool _didAutoOpenVersionPopover = false;
+  Rect? _versionAnchorRect;
+  String? _selectedVersionId;
   Object? _error;
 
   MediaDetail? _detail;
@@ -180,12 +195,12 @@ class _EvDetailPageState extends State<EvDetailPage> {
     _stopTimers(stopMedia: false);
     _detail = null; _quality = null; _itemAvail = null; _subError = null; _actionError = null;
     _favorite = false; _played = false; _savingFavorite = false; _savingPlayed = false;
+    _versionPopoverOpen = false; _versionAnchorRect = null; _selectedVersionId = null;
     _people = const []; _similar = const []; _themeMedia = const ThemeMedia(); _safeStills = const []; _seasons = const [];
     _epCache.clear(); _epAvail.clear(); _doneJobEpIds.clear();
     _seasonIdx = _bdIdx = 0; _themeStarted = false;
 
     if (scope == null || data == null) { if (mounted) setState(() { _loading = false; _error = null; }); return; }
-    if (scope.services.playback != null) unawaited(_safe(() => scope.services.playback!.prepare(id), null));
     if (mounted) setState(() { _loading = true; _error = null; });
 
     final detailF = data.detail(id), peopleF = _safe(() => data.people(id), const <PersonCredit>[]),
@@ -197,15 +212,34 @@ class _EvDetailPageState extends State<EvDetailPage> {
     if (!mounted || token != _loadToken) return;
 
     final isSeries = detail.card.kind == MediaKind.series;
+    final initialVersion = _resolveActiveVersion(detail, null);
+    if (scope.services.playback != null) {
+      unawaited(_safe(() => scope.services.playback!.prepare(id, mediaSourceId: initialVersion?.id), null));
+    }
     setState(() {
       _detail = detail;
-      _quality = detail.card.quality;
+      _quality = initialVersion?.toQuality() ?? detail.card.quality;
       _favorite = detail.card.favorite == true;
       _played = detail.card.played == true;
       _loading = false;
       _error = null;
       _loadingEps = isSeries;
     });
+    if (widget.openVersionPopoverOnMount && !_didAutoOpenVersionPopover && detail.versions.length > 1) {
+      _didAutoOpenVersionPopover = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || token != _loadToken) return;
+        final box = _versionBtnKey.currentContext?.findRenderObject() as RenderBox?;
+        final s = EvScale.of(context);
+        final rect = box != null && box.hasSize
+            ? (box.localToGlobal(Offset.zero) & box.size)
+            : Rect.fromLTWH(s.gutter + s.rem(8), s.vh(68), s.rem(14), s.rem(3.25));
+        setState(() {
+          _versionAnchorRect = rect;
+          _versionPopoverOpen = true;
+        });
+      });
+    }
     scope.stage..setMode(EvStageMode.detail, detailNoBlur: isSeries)..setScrollProgress(0)..setVeilLifted(false)..clearPreviewBackdrop()..setBaseBackdrop(_bdPlan(0));
     _startBdRotation();
 
@@ -535,10 +569,80 @@ class _EvDetailPageState extends State<EvDetailPage> {
   );
   static Future<T> _safe<T>(Future<T> Function() fn, T fb) async { try { return await fn(); } catch (_) { return fb; } }
 
+  MediaVersion? _resolveActiveVersion(MediaDetail? d, String? overrideId) {
+    if (d == null || d.versions.length <= 1) return null;
+    return selectDefaultMediaVersion(
+      d.versions,
+      ruleName: _prefs.defaultVersionRule.name,
+      rememberedId: overrideId ?? d.rememberedVersionId,
+      lastTaste: d.lastVersionTaste,
+    );
+  }
+
+  MediaVersion? get _activeVersion => _resolveActiveVersion(_detail, _selectedVersionId);
+
+  void _toggleVersionPopover(Rect anchorRect) {
+    setState(() {
+      if (_versionPopoverOpen) {
+        _versionPopoverOpen = false;
+      } else {
+        _versionAnchorRect = anchorRect;
+        _versionPopoverOpen = true;
+      }
+    });
+  }
+
+  void _selectVersion(MediaVersion version) {
+    final data = _scope?.services.data, playback = _scope?.services.playback;
+    setState(() {
+      _selectedVersionId = version.id;
+      _quality = version.toQuality();
+      _versionPopoverOpen = false;
+    });
+    if (data != null) {
+      unawaited(_safe(() => data.rememberMediaVersion(widget.itemId, version), null));
+    }
+    if (playback != null) {
+      unawaited(_safe(() => playback.prepare(widget.itemId, mediaSourceId: version.id), null));
+    }
+  }
+
+  void _openPlaySettings() {
+    setState(() => _versionPopoverOpen = false);
+    if (widget.onOpenPlaySettings != null) {
+      widget.onOpenPlaySettings!();
+      return;
+    }
+    final shell = _scope?.shell;
+    if (shell?.onOpenPlaySettings != null) {
+      shell!.onOpenPlaySettings!();
+    } else {
+      shell?.onOpenSettings?.call();
+    }
+  }
+
+  void _openCollection(String collectionId) {
+    if (widget.onOpenCollection != null) {
+      widget.onOpenCollection!(collectionId);
+      return;
+    }
+    _scope?.shell.onOpenCollection?.call(collectionId);
+  }
+
+  void _openPerson(PersonCredit credit) {
+    final source = _detail?.card;
+    if (widget.onOpenPerson != null) {
+      widget.onOpenPerson!(credit.id, name: credit.name, roleHint: credit.role, sourceItem: source);
+      return;
+    }
+    _scope?.shell.onOpenPerson?.call(credit.id, name: credit.name, roleHint: credit.role, sourceItem: source);
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = EvTheme.of(context), s = EvScale.of(context), scope = _scope, d = _detail;
     final showTheme = d != null && _themeStarted && _themeMedia.songs.isNotEmpty && _prefs.themeMusic && scope != null;
+    final activeVer = _activeVersion;
 
     return Stack(key: const Key('ev_detail_page'), fit: StackFit.expand, children: [
       ScrollConfiguration(behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
@@ -560,6 +664,19 @@ class _EvDetailPageState extends State<EvDetailPage> {
           return snap.theme == PreviewState.failed ? const SizedBox.shrink()
               : EvThemeCapsule(title: d.card.title, snapshot: snap, enableAnimations: widget.enableAnimations, onToggleMute: () => unawaited(scope.immersion.setThemeMuted(!snap.themeMuted)));
         })),
+      if (_versionPopoverOpen && d != null && d.versions.length > 1 && activeVer != null && _versionAnchorRect != null)
+        Positioned.fill(
+          child: EvVersionPopover(
+            versions: d.versions,
+            activeVersion: activeVer,
+            defaultRule: _prefs.defaultVersionRule,
+            warnHighBitrate: _prefs.warnHighBitrateOnExternalNetwork,
+            anchorRect: _versionAnchorRect!,
+            onSelect: _selectVersion,
+            onOpenPlaySettings: _openPlaySettings,
+            onDismiss: () => setState(() => _versionPopoverOpen = false),
+          ),
+        ),
     ]);
   }
 
@@ -583,11 +700,19 @@ class _EvDetailPageState extends State<EvDetailPage> {
     if (d == null) return SizedBox(height: math.max(0.0, s.vh(100)), child: Center(child: Text('未找到条目信息', style: t.shelfStyle(s.font(1.25)))));
 
     final subsOn = _scope?.services.subtitles != null;
-    void open(MediaCard c) => (widget.onOpenItem ?? _scope?.shell.onOpenDetail)?.call(c.id);
+    final activeVer = _activeVersion;
+    final effectiveQuality = activeVer?.toQuality() ?? _quality ?? d.card.quality;
+    void open(MediaCard c) {
+      if (c.kind == MediaKind.collection && (widget.onOpenCollection != null || _scope?.shell.onOpenCollection != null)) {
+        _openCollection(c.id);
+        return;
+      }
+      (widget.onOpenItem ?? _scope?.shell.onOpenDetail)?.call(c.id);
+    }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       EvDetailHero(
         detail: d, people: _people, seasonsCount: _seasons.isNotEmpty ? _seasons.length : d.card.childCount,
-        quality: _quality ?? d.card.quality, backdropCount: _backdrops.length, backdropIndex: _bdIdx,
+        quality: effectiveQuality, backdropCount: _backdrops.length, backdropIndex: _bdIdx,
         onSelectBackdrop: _selectBd, canTrailer: _canTrailer, isTrailerClip: _hasTrailer, trailerLive: _trailerLive,
         countdownSeconds: _cdSec, countdownTotalSeconds: _cdTotal, onToggleTrailer: () => _trailerLive ? _stopLive() : _startLive(), onPlay: _playTarget,
         isFavorite: _favorite, isPlayed: _played, favoriteBusy: _savingFavorite, playedBusy: _savingPlayed,
@@ -595,6 +720,12 @@ class _EvDetailPageState extends State<EvDetailPage> {
         onDismissActionError: () { _actionErrT?.cancel(); setState(() => _actionError = null); },
         onToggleFavorite: () => unawaited(_toggleFavorite()),
         onTogglePlayed: () => unawaited(_togglePlayed()),
+        activeVersion: activeVer,
+        versionCount: d.versions.length,
+        versionButtonKey: _versionBtnKey,
+        onOpenVersionPicker: _toggleVersionPopover,
+        onOpenCollection: _openCollection,
+        onOpenPerson: _openPerson,
       ),
       if (d.card.kind == MediaKind.series && (_seasons.isNotEmpty || _loadingEps))
         EvDetailEpisodesSection(
@@ -608,12 +739,23 @@ class _EvDetailPageState extends State<EvDetailPage> {
           onPlayEpisode: (ep, o) => _playTarget(PlayTarget(itemId: ep.card.id, startAt: ep.resumePosition, seriesId: widget.itemId, seasonId: _curSeason?.id, episodeNumber: ep.episodeNumber), ep.card.art, o),
           onEpisodeHoverChanged: _onEpHover, onEpisodeFocusChanged: _onEpHover,
         ),
+      if (d.collection != null && d.collection!.items.isNotEmpty)
+        EvDetailCollectionStrip(
+          membership: d.collection!,
+          currentItemId: d.card.id,
+          onOpenItem: open,
+          onOpenCollection: () => _openCollection(d.collection!.id),
+          onPlayItem: (c) => _playTarget(PlayTarget(itemId: c.id), c.art, null),
+        ),
       if (d.collectionItems.isNotEmpty)
         EvShelf(key: const Key('ev_detail_collection_shelf'), title: '合集内容', badge: '${d.collectionItems.length} 部', items: d.collectionItems, style: EvCardStyle.poster, onCardTap: open, onCardPlay: (c) => _playTarget(PlayTarget(itemId: c.id), c.art, null)),
       if (_similar.isNotEmpty)
         EvShelf(key: const Key('ev_detail_similar_shelf'), title: '相似推荐', items: _similar, style: EvCardStyle.poster, onCardTap: open, onCardPlay: (c) => _playTarget(PlayTarget(itemId: c.id), c.art, null)),
-      EvDetailPeopleShelf(people: _people),
-      EvDetailFactsSection(detail: d, seasons: _seasons, quality: _quality ?? d.card.quality, subtitlesEnabled: subsOn, subtitleAvailability: _itemAvail),
+      EvDetailPeopleShelf(people: _people, onOpenPerson: _openPerson),
+      EvDetailFactsSection(
+        detail: d, seasons: _seasons, quality: effectiveQuality,
+        subtitlesEnabled: subsOn, subtitleAvailability: _itemAvail, activeVersion: activeVer,
+      ),
     ]);
   }
 }

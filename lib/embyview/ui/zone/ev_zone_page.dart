@@ -263,8 +263,8 @@ class _EvZonePageState extends State<EvZonePage> {
           card == null) {
         return;
       }
-      if (scope.shell.onOpenDetail != null) {
-        scope.shell.onOpenDetail!(card.id);
+      if (scope.shell.onOpenDetail != null || scope.shell.onOpenCollection != null) {
+        scope.shell.openCard(card);
       } else {
         unawaited(EvPlayer.open(context, PlayTarget(itemId: card.id), art: card.art));
       }
@@ -321,7 +321,7 @@ class _EvZonePageState extends State<EvZonePage> {
     }
   }
 
-  void _openDetail(MediaCard card) => _scope?.shell.onOpenDetail?.call(card.id);
+  void _openDetail(MediaCard card) => _scope?.shell.openCard(card);
   void _play(PlayTarget target, CardArtwork art, {Rect? origin}) => unawaited(EvPlayer.open(context, target, origin: origin, art: art));
 
   @override

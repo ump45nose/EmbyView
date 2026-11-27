@@ -121,7 +121,7 @@ class _FakePlayback implements EmbyViewPlayback {
   final List<PlayTarget> openedTargets = [];
 
   @override
-  Future<void> prepare(String itemId) async {
+  Future<void> prepare(String itemId, {String? mediaSourceId}) async {
     prepareCalls.add(itemId);
   }
 
@@ -1067,8 +1067,12 @@ void main() {
         expect(find.descendant(of: heroFinder, matching: find.text('115 直连')), findsOneWidget);
         expect(find.descendant(of: heroFinder, matching: find.text('你的头脑就是犯罪现场。')), findsOneWidget);
 
-        final creditsWidget = tester.widget<Text>(find.byKey(const Key('ev_detail_credits')));
-        final creditsText = creditsWidget.textSpan!.toPlainText();
+        final creditsFinder = find.byKey(const Key('ev_detail_credits'));
+        expect(creditsFinder, findsOneWidget);
+        final creditsText = tester
+            .widgetList<Text>(find.descendant(of: creditsFinder, matching: find.byType(Text)))
+            .map((w) => w.data ?? w.textSpan?.toPlainText() ?? '')
+            .join();
         expect(creditsText, contains('克里斯托弗·诺兰、副导演甲'));
         expect(creditsText, isNot(contains('第三导演')));
         expect(creditsText, contains('莱昂纳多·迪卡普里奥、约瑟夫·高登-莱维特、艾略特·佩吉、汤姆·哈迪'));

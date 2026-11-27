@@ -266,6 +266,8 @@ class MachinePreferences implements EmbyViewPreferences {
     'preResolve115': p.preResolve115,
     'readAheadBytes': p.readAheadBytes,
     'autoPlayNext': p.autoPlayNext,
+    'defaultVersionRule': p.defaultVersionRule.name,
+    'warnHighBitrateOnExternalNetwork': p.warnHighBitrateOnExternalNetwork,
     'anime4kAnime': p.anime4kForAnime,
     'anime4kOther': p.anime4kForOther,
     'audioLanguages': p.audioLanguages,
@@ -311,6 +313,15 @@ class MachinePreferences implements EmbyViewPreferences {
       preResolve115: p['preResolve115'] as bool,
       readAheadBytes: (p['readAheadBytes'] as int).clamp(0, 1024 * 1024 * 1024),
       autoPlayNext: p['autoPlayNext'] as bool,
+      defaultVersionRule: _enum(
+        DefaultVersionRule.values,
+        p['defaultVersionRule'],
+        d.defaultVersionRule,
+      ),
+      warnHighBitrateOnExternalNetwork:
+          p['warnHighBitrateOnExternalNetwork'] is bool
+          ? p['warnHighBitrateOnExternalNetwork'] as bool
+          : d.warnHighBitrateOnExternalNetwork,
       anime4kForAnime: p['anime4kAnime'] as bool,
       anime4kForOther: p['anime4kOther'] as bool,
       audioLanguages: _decodeLanguages(

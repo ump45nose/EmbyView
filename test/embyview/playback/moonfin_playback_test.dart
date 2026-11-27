@@ -194,6 +194,61 @@ class _Items extends Fake implements ItemsApi {
   Future<Map<String, dynamic>> getEpisodes(String seriesId, {String? seasonId, String? fields}) async =>
       {'Items': episodes};
 
+  @override
+  Future<Map<String, dynamic>> getItems({
+    bool? serverWide,
+    String? parentId,
+    List<String>? ids,
+    List<String>? includeItemTypes,
+    List<String>? excludeItemTypes,
+    String? sortBy,
+    String? sortOrder,
+    int? startIndex,
+    int? limit,
+    bool? recursive,
+    String? searchTerm,
+    String? fields,
+    List<String>? personIds,
+    List<String>? artistIds,
+    List<String>? filters,
+    List<String>? seriesStatus,
+    String? nameStartsWith,
+    String? nameLessThan,
+    List<String>? genreIds,
+    List<String>? genres,
+    bool? isFavorite,
+    bool? collapseBoxSetItems,
+    bool? enableTotalRecordCount,
+    String? enableImageTypes,
+    int? imageTypeLimit,
+    List<String>? tags,
+    List<String>? studios,
+    DateTime? minPremiereDate,
+    String? maxOfficialRating,
+    bool? hasParentalRating,
+    String? anyProviderIdEquals,
+    List<String>? officialRatings,
+    List<int>? years,
+    List<String>? videoTypes,
+    List<String>? audioLanguages,
+    List<String>? subtitleLanguages,
+    bool? hasSubtitles,
+    bool? hasTrailer,
+    bool? hasSpecialFeature,
+    bool? hasThemeSong,
+    bool? hasThemeVideo,
+    bool? isHd,
+    bool? is4K,
+    bool? is3D,
+    bool? enableUserData,
+  }) async {
+    final out = <Map<String, dynamic>>[];
+    for (final id in ids ?? const <String>[]) {
+      out.add(await getItem(id));
+    }
+    return {'Items': out, 'TotalRecordCount': out.length};
+  }
+
   int reads = 0;
   @override
   Future<Map<String, dynamic>> getItem(String id, {String? mediaSourceId, String? fields}) async {
@@ -229,32 +284,38 @@ class _PlaybackApi extends Fake implements PlaybackApi {
   Map<String, dynamic> audio = {'Type': 'Audio', 'Index': 1, 'Language': 'jpn'};
   List<Map<String, dynamic>> subtitles = [];
   List<Map<String, dynamic>>? streamsOverride;
-  @override
-  Future<Map<String, dynamic>> getPlaybackInfo(
-    String itemId, {
-    Map<String, dynamic>? requestBody,
-    String? userId,
-    int? startTimeTicks,
-    bool waitForMediaProbe = false,
-  }) async => {
-    'PlaySessionId': 'session-$itemId',
-    'MediaSources': [
-      {
-        'Id': 'source',
-        'Path': 'https://redirect.test/video',
-        'IsRemote': true,
-        'Protocol': 'Http',
-        'SupportsDirectPlay': true,
-        ...sourcePatch,
-        'MediaStreams': streamsOverride ??
+    final requestedMediaSourceIds = <String?>[];
+    List<Map<String, dynamic>>? mediaSourcesOverride;
+    @override
+    Future<Map<String, dynamic>> getPlaybackInfo(
+      String itemId, {
+      Map<String, dynamic>? requestBody,
+      String? userId,
+      int? startTimeTicks,
+      bool waitForMediaProbe = false,
+    }) async {
+      requestedMediaSourceIds.add(requestBody?['MediaSourceId'] as String?);
+      return {
+        'PlaySessionId': 'session-$itemId',
+        'MediaSources': mediaSourcesOverride ??
             [
-              {'Type': 'Video', 'Index': 0, 'Width': 1920},
-              audio,
-              ...subtitles,
+              {
+                'Id': 'source',
+                'Path': 'https://redirect.test/video',
+                'IsRemote': true,
+                'Protocol': 'Http',
+                'SupportsDirectPlay': true,
+                ...sourcePatch,
+                'MediaStreams': streamsOverride ??
+                    [
+                      {'Type': 'Video', 'Index': 0, 'Width': 1920},
+                      audio,
+                      ...subtitles,
+                    ],
+              },
             ],
-      },
-    ],
-  };
+      };
+    }
   @override
   String getStreamUrl(
     String itemId, {
@@ -1876,5 +1937,76 @@ void main() {
     session = await openReady();
     expect(session.snapshot.selectedSubtitleId, isNull);
     await session.close();
+  });
+
+  test('open() selects requested mediaSourceId with resume position and queues sequential collection items', () async {
+    final backend = _Backend();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final client = _Client();
+    client.itemsApi.metadata['movie'] = {
+      'MediaSources': [
+        {'Id': 'uhd', 'Path': 'https://redirect.test/uhd'},
+        {'Id': 'nas', 'Path': '/mnt/media/nas.mkv'},
+      ],
+    };
+    client.playbackApi.mediaSourcesOverride = [
+      {
+        'Id': 'uhd',
+        'Path': 'https://redirect.test/uhd',
+        'IsRemote': true,
+        'Protocol': 'Http',
+        'SupportsDirectPlay': true,
+        'MediaStreams': [
+          {'Type': 'Video', 'Index': 0, 'Width': 3840},
+          {'Type': 'Audio', 'Index': 1, 'Language': 'eng'},
+        ],
+      },
+      {
+        'Id': 'nas',
+        'Path': '/mnt/media/nas.mkv',
+        'IsRemote': false,
+        'Protocol': 'File',
+        'SupportsDirectPlay': true,
+        'MediaStreams': [
+          {'Type': 'Video', 'Index': 0, 'Width': 1920},
+          {'Type': 'Audio', 'Index': 1, 'Language': 'eng'},
+        ],
+      },
+    ];
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(
+        request: (uri, _) async => RedirectReply(302, Uri.parse('https://cdn.115.com${uri.path}')),
+      ),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+
+    // Resume movie with switched version ('nas') preserves resume startAt and selects 'nas' mediaSourceId
+    final session = adapter.open(
+      const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 42), mediaSourceId: 'nas'),
+    );
+    await pumpEventQueue(times: 30);
+    expect(client.playbackApi.requestedMediaSourceIds, contains('nas'));
+    expect(session.snapshot.mediaSourceId, 'nas');
+    expect(backend.starts.last, const Duration(minutes: 42));
+    await session.close();
+
+    // Sequential collection queue starts at item 2 and queues item 3 as next
+    client.playbackApi.mediaSourcesOverride = null;
+    final seqSession = adapter.open(
+      const PlayTarget(itemId: 'm2', queueItemIds: ['m1', 'm2', 'm3']),
+    );
+    await pumpEventQueue(times: 30);
+    expect(seqSession.snapshot.target.itemId, 'm2');
+    expect(seqSession.snapshot.nextEpisode?.id, 'm3');
+    await seqSession.close();
   });
 }

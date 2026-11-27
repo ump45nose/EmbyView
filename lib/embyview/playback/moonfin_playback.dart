@@ -133,10 +133,11 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
   }
 
   @override
-  Future<void> prepare(String itemId) {
+  Future<void> prepare(String itemId, {String? mediaSourceId}) {
     if (!_valid || !prefetch115) return Future.value();
     _syncBaseUrlIfChanged();
-    return _prepared.putIfAbsent(itemId, () async {
+    final key = mediaSourceId == null || mediaSourceId.isEmpty ? itemId : '$itemId|$mediaSourceId';
+    return _prepared.putIfAbsent(key, () async {
       final watch = Stopwatch()..start();
       try {
         final item = await client.itemsApi.getItem(itemId);
@@ -163,6 +164,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
               'preresolve_ok',
               details: {
                 'itemId': itemId,
+                if (mediaSourceId != null) 'mediaSourceId': mediaSourceId,
                 'elapsedMs': watch.elapsedMilliseconds,
                 'infoMs': info.inMilliseconds,
                 if (address != null) 'redirectMs': address.elapsed.inMilliseconds,
@@ -172,7 +174,11 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
           },
         );
         if (_valid) {
-          await resolver.resolve(item, deviceProfile: native.backend.getDeviceProfile());
+          await resolver.resolve(
+            item,
+            deviceProfile: native.backend.getDeviceProfile(),
+            mediaSourceId: mediaSourceId,
+          );
         }
       } catch (error) {
         diagnostics.record(
@@ -195,7 +201,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
           },
         );
       } finally {
-        _prepared.remove(itemId);
+        _prepared.remove(key);
       }
     });
   }
@@ -532,7 +538,32 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       final series = _target.seriesId ?? raw['SeriesId'] as String?;
       var queue = <dynamic>[raw];
       var index = 0;
-      if (series != null) {
+      if (_target.queueItemIds.length > 1) {
+        try {
+          final response = await _owner.client.itemsApi.getItems(
+            ids: _target.queueItemIds,
+            fields: 'MediaSources,MediaStreams,Chapters,Path,UserData,Overview,RunTimeTicks,ProductionYear,CommunityRating,BackdropImageTags',
+            enableUserData: true,
+          );
+          if (!_current) return;
+          final byId = <String, Map<String, dynamic>>{
+            for (final item in (response['Items'] as List? ?? []).whereType<Map>())
+              playbackItemId(item): Map<String, dynamic>.from(item),
+          };
+          byId[_target.itemId] = raw;
+          final ordered = <Map<String, dynamic>>[
+            for (final qid in _target.queueItemIds)
+              if (byId[qid] != null) byId[qid]!,
+          ];
+          final current = ordered.indexWhere((item) => playbackItemId(item) == _target.itemId);
+          if (current >= 0) {
+            queue = ordered;
+            index = current;
+          }
+        } catch (_) {
+          /* Current item can still play when remaining queue items fail to load. */
+        }
+      } else if (series != null) {
         try {
           final response = await _owner.client.itemsApi.getEpisodes(
             series,
@@ -559,6 +590,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         queue,
         startIndex: index,
         startPosition: startPosition ?? _target.startAt ?? Duration.zero,
+        mediaSourceId: _target.mediaSourceId,
       );
       if (_current) _emit();
     } catch (error) {
