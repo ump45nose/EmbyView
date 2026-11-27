@@ -112,6 +112,9 @@ abstract final class EvPlayer {
             episodeNumber: current.episodeNumber,
           )];
           await closeActiveSession();
+          if (scope?.services.data case final BrowseCacheInvalidator invalidator) {
+            invalidator.invalidateBrowseCache();
+          }
           scope?.shell.notifyPlaybackEnded(EvPlaybackEnded(
             scope.services.sessionId, scope.services.data, targets,
           ));

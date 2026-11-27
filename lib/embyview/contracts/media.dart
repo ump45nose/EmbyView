@@ -594,6 +594,10 @@ abstract interface class EmbyViewData {
   Future<void> setPlayed(String itemId, bool played);
 }
 
+abstract interface class BrowseCacheInvalidator {
+  void invalidateBrowseCache();
+}
+
 abstract interface class WallListing {
   WallInfo get info;
   Future<Page<MediaCard>> page({required int offset, required int limit});

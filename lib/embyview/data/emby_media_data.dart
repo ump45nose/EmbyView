@@ -17,7 +17,7 @@ import 'title_index.dart';
 
 /// One instance belongs to exactly one authorized server/user session.
 /// Its owner disposes it before replacing the authenticated client.
-class EmbyMediaData implements EmbyViewData {
+class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
   EmbyMediaData({
     required EmbyMediaServerClient client,
     String? serverId,
@@ -73,6 +73,9 @@ class EmbyMediaData implements EmbyViewData {
   final _titleWalls = <Object, _Wall>{};
   final _requestWaiters = Queue<Completer<void>>();
   int _activeRequests = 0;
+
+  @override
+  void invalidateBrowseCache() => _invalidateBrowse();
 
   void _invalidateBrowse() {
     _revision++;
