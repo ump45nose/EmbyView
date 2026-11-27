@@ -6,6 +6,21 @@ import XCTest
 
 @testable import Moonfin
 
+final class DirectSourceRequestLimitTests: XCTestCase {
+    func testOnlyEmbyView115SourcesUseSerialReads() throws {
+        for host in ["115.com", "a.115cdn.net", "cd.115cdn.com"] {
+            let url = try XCTUnwrap(URL(string: "https://\(host)/video"))
+            XCTAssertEqual(AetherPlayerWrapper.directSourceRequestLimit(url: url, sourceGeneration: 1), 1)
+            XCTAssertNil(AetherPlayerWrapper.directSourceRequestLimit(url: url, sourceGeneration: 0))
+        }
+        for address in ["https://115cdn.net.example.com/video", "https://not115.com/video",
+                        "https://emby.example.com/video", "file:///tmp/115.com/video"] {
+            let url = try XCTUnwrap(URL(string: address))
+            XCTAssertNil(AetherPlayerWrapper.directSourceRequestLimit(url: url, sourceGeneration: 1))
+        }
+    }
+}
+
 /// Subtitle overlay cue selection. The overlay holds the only copy of a sidecar
 /// track's cues (the engine publishes such a file once and clears its drain
 /// target), so anything it drops is gone for the rest of the session.

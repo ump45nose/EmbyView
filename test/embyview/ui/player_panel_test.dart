@@ -191,6 +191,27 @@ void main() {
   }
 
   group('C5.5 Online search, save/index status, and null subtitle service', () {
+    testWidgets('default query uses series name and numeric season/episode, never SeasonId', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final panel = _FakeSubtitlePanel(const SubtitleSnapshot(generation: 1));
+      const episode = MediaCard(id: 'ep', kind: MediaKind.episode, title: '地狱火俱乐部',
+        seriesId: 'series', seriesName: '怪奇物语', seasonId: '50590', seasonNumber: 4, episodeNumber: 1);
+      final cards = [(episode, '怪奇物语 S04E01'), (_movie(), '沙丘 2 2024')];
+      for (final (index, entry) in cards.indexed) {
+        await tester.pumpWidget(_wrap(child: EvPlayerPanel(
+          open: true, activeTab: 'subs', snapshot: _snap(generation: index + 1, item: entry.$1),
+          subtitleSnapshot: const SubtitleSnapshot(generation: 1), subtitlePanel: panel,
+          onSelectTab: (_) {}, onClose: () {}, onSelectSubtitle: (_) {}, onSelectAudio: (_) {},
+          onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
+        )));
+        await tester.pumpAndSettle();
+        final field = tester.widget<EditableText>(find.byKey(const Key('ev_sub_search_input')));
+        expect(field.controller.text, entry.$2);
+      }
+      expect(panel.searchQueries, [null, null]); // Providers use structured metadata on auto-search.
+    });
+
     testWidgets('searches 4 sources, filters chips, uses candidate, and retries failed NAS save', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1440, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));

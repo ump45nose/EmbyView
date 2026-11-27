@@ -137,6 +137,14 @@ class _FakeData implements EmbyViewData {
   SearchLanding landing;
   final List<_CatalogItem> catalog;
   Future<SearchResults> Function(String text, String? zoneId, int offset, int limit)? onSearch;
+  final details = <String, MediaDetail>{};
+  final detailCalls = <String>[];
+  @override
+  Future<MediaDetail> detail(String itemId) async {
+    detailCalls.add(itemId);
+    return details[itemId]!;
+  }
+
   final List<({String? zoneId})> landingCalls = [];
   final List<({String text, String? zoneId, int offset, int limit})> searchCalls = [];
 
@@ -406,6 +414,38 @@ void main() {
     await typeAndWait('莱昂纳多');
     expect(find.text('盗梦空间'), findsOneWidget);
     expect(find.byKey(const ValueKey<String>('ev_search_card_movie_m3')), findsOneWidget);
+  });
+
+  testWidgets('series best match plays the same resume or next-up target as detail', (tester) async {
+    await setViewport(tester, const Size(1440, 900));
+    final catalog = _sampleCatalog();
+    final series = catalog.singleWhere((item) => item.card.id == 't1').card;
+    final data = _FakeData(landing: const SearchLanding(), catalog: catalog);
+    final played = <PlayTarget>[];
+    final h = _Harness(data: data);
+    addTearDown(h.dispose);
+    const resume = PlayTarget(itemId: 'ep3', seriesId: 't1', seasonId: 'season', episodeNumber: 3,
+      startAt: Duration(minutes: 12));
+    const next = PlayTarget(itemId: 'ep4', seriesId: 't1', seasonId: 'season', episodeNumber: 4);
+    data.details['t1'] = MediaDetail(card: series, playTarget: next,
+      resume: const ResumeCard(card: MediaCard(id: 'ep3', kind: MediaKind.episode, title: '继续'),
+        target: resume, position: Duration(minutes: 12)));
+    await tester.pumpWidget(h.wrap(EvSearchPage(initialQuery: '绝命毒师',
+      onPlayTarget: (target, _, _) => played.add(target))));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('ev_search_top_play')));
+    await tester.pumpAndSettle();
+    expect(played.single, same(resume));
+    data.details['t1'] = MediaDetail(card: series, playTarget: next);
+    await tester.tap(find.byKey(const Key('ev_search_top_play')));
+    await tester.pumpAndSettle();
+    expect(played.last, same(next));
+    data.details['t1'] = MediaDetail(card: series);
+    await tester.tap(find.byKey(const Key('ev_search_top_play')));
+    await tester.pumpAndSettle();
+    expect(played, hasLength(2));
+    expect(find.text('没有可播放的分集。'), findsOneWidget);
+    expect(data.detailCalls, ['t1', 't1', 't1']);
   });
 
   testWidgets('default play fallback invokes EvPlayer.open', (tester) async {

@@ -1062,6 +1062,21 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
         }
     }
 
+    #if os(macOS)
+    /// Avoid extra speculative requests to the rate-limited 115 origin.
+    /// Aether's serial-origin policy keeps embedded subtitles on the primary
+    /// packet store instead of opening a second subtitle prefetch connection.
+    /// Scope this to EmbyView's direct 115 source, not other playback routes.
+    nonisolated static func directSourceRequestLimit(url: URL, sourceGeneration: Int) -> Int? {
+        guard sourceGeneration > 0,
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host?.lowercased() else { return nil }
+        return ["115.com", "115cdn.net", "115cdn.com"].contains {
+            host == $0 || host.hasSuffix("." + $0)
+        } ? 1 : nil
+    }
+    #endif
+
     // MARK: - Playback
 
     struct SourceConfiguration {
@@ -1336,6 +1351,8 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
             liveJoinProfile: .fastZap,
             nativeRemoteHLS: isLiveSession && isRemotePlaylist,
             preserveASSMarkup: preserveASS,
+            maxConcurrentSourceRequests: Self.directSourceRequestLimit(
+                url: url, sourceGeneration: sourceConfiguration.sourceGeneration),
             probesize: isLiveSession ? Self.liveProbeBytes : nil,
             maxAnalyzeDuration: isLiveSession ? Self.liveProbeMicroseconds : nil,
             externalSubtitles: sourceConfiguration.externalSubtitles,

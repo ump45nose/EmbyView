@@ -62,6 +62,47 @@ final class _Index implements SubtitleIndexPort {
       recognized ?? (throw StateError('index unavailable'));
 }
 
+// Model an SMB filesystem which supports normal writes and rename, but not
+// advisory byte-range locks. The old save path fails with ENOTSUP here.
+final class _NoLockIO extends IOOverrides {
+  int lockAttempts = 0;
+
+  @override
+  File createFile(String path) {
+    final file = super.createFile(path);
+    return path.endsWith('.lock') ? _NoLockFile(file, this) : file;
+  }
+}
+
+final class _NoLockFile implements File {
+  _NoLockFile(this.file, this.io);
+  final File file;
+  final _NoLockIO io;
+  @override
+  String get path => file.path;
+  @override
+  Future<RandomAccessFile> open({FileMode mode = FileMode.read}) async =>
+      _NoLockHandle(await file.open(mode: mode), io);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+final class _NoLockHandle implements RandomAccessFile {
+  _NoLockHandle(this.handle, this.io);
+  final RandomAccessFile handle;
+  final _NoLockIO io;
+  @override
+  Future<RandomAccessFile> lock([FileLock mode = FileLock.exclusive, int start = 0, int end = -1]) async {
+    io.lockAttempts++;
+    throw FileSystemException('Operation not supported', null, const OSError('ENOTSUP', 45));
+  }
+  @override
+  Future<void> close() => handle.close();
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 void main() {
   late Directory work, mount, mediaFolder;
   late MediaFolderStatus status;
@@ -136,6 +177,34 @@ void main() {
   });
 
   tearDown(() => work.delete(recursive: true));
+
+  test('NAS without advisory locking saves online and paired AI tracks by rename', () async {
+    final io = _NoLockIO();
+    // Prove the filesystem simulation rejects the syscall used by the old code.
+    await IOOverrides.runWithIOOverrides(() async {
+      final probe = await File(p.join(work.path, 'probe.lock')).open(mode: FileMode.append);
+      try {
+        await expectLater(probe.lock(FileLock.blockingExclusive),
+          throwsA(isA<FileSystemException>().having((error) => error.osError?.errorCode, 'errno', 45)));
+      } finally {
+        await probe.close();
+      }
+    }, io);
+    expect(io.lockAttempts, 1);
+    await IOOverrides.runWithIOOverrides(() async {
+      final online = await retain('online', language: 'en');
+      final ja = await retain('日本語', language: 'ja', coverage: [_first], pairId: 'pair');
+      final zh = await retain('中文字幕', coverage: [_first], pairId: 'pair');
+      final saved = await Future.wait([store.save(online), store.save(ja), store.save(zh)]);
+      expect(saved.map((result) => result.state), everyElement(SubtitleSaveState.saved));
+      final scan = await store.scan(regular);
+      expect(scan.nasTracks, hasLength(3));
+      final chinese = scan.nasTracks.singleWhere((track) => track.language == 'zh');
+      expect(scan.dialogue(chinese)!.single.translation, '中文字幕');
+      expect(await mediaFolder.list().any((file) => file.path.endsWith('.lock') || file.path.endsWith('.tmp')), isFalse);
+    }, io);
+    expect(io.lockAttempts, 1);
+  });
 
   test('strm plays locally during an outage and can be saved and reopened', () async {
     final input = inputFor(strm);

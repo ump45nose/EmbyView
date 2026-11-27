@@ -74,10 +74,12 @@ extension on SubtitleSearchScope {
     if (status == 30001 || status == 30002) {
       throw const EmbyViewFailure('射手网请求过于频繁，请稍后重试', code: 'rate_limited', retryable: true);
     }
-    if (status != 0) throw _invalidResponse;
     final subtitles = _object(data['sub'])['subs'];
+    // A successful no-result search may omit the status field entirely.
+    if (action == 'search' && status == null && subtitles is Map && subtitles.isEmpty) return const [];
+    if (status != 0) throw _invalidResponse;
     if (subtitles is List) return _rows(subtitles);
-    // ASSRT returns an empty JSON object `{}` (or null) when no subtitles match.
+    // ASSRT returns an empty JSON object or null when no subtitles match.
     if (subtitles == null || (subtitles is Map && subtitles.isEmpty)) return const [];
     throw _invalidResponse;
   }

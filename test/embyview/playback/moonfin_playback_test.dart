@@ -661,6 +661,49 @@ void main() {
       }
     });
   }
+  test('115 direct mov_text switches AI, embedded, AI, off, AI without reopening', () async {
+    final backend = _Backend(), client = _Client();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    client.playbackApi.subtitles.add({
+      'Type': 'Subtitle', 'Index': 2, 'Codec': 'mov_text', 'Language': 'zhi', 'IsExternal': false,
+      'SupportsExternalStream': true, 'DeliveryMethod': 'Embed',
+    });
+    var redirects = 0;
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager, client: client, native: native, audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(request: (_, _) async {
+        redirects++;
+        return RedirectReply(302, Uri.parse('https://cdn.115cdn.net/fixture'));
+      }),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+    final session = adapter.open(const PlayTarget(itemId: 'movie', startAt: Duration(minutes: 3)));
+    await pumpEventQueue(times: 30);
+    final input = session as PlaybackSubtitleInput;
+    final gen = session.snapshot.generation;
+    final embedded = session.snapshot.subtitleTracks.single.id;
+    await input.setLiveSubtitle('live', generation: gen, select: true);
+    expect(session.snapshot.subtitleOverlayId, 'live');
+    for (final (index, pick) in [embedded, 'live', null, 'live'].indexed) {
+      backend.at = Duration(minutes: 3, seconds: index + 1);
+      await session.selectSubtitle(pick);
+      expect(session.snapshot.selectedSubtitleId, pick);
+      expect(session.snapshot.subtitleOverlayId, pick == 'live' ? pick : null);
+      expect(session.snapshot.generation, gen);
+      expect(backend.at, Duration(minutes: 3, seconds: index + 1));
+      expect(backend.playing, isTrue);
+      expect(backend.urls, hasLength(1));
+      expect(redirects, 1);
+    }
+    expect(backend.subtitlePicks, contains((1, null)));
+    expect(input.subtitleSource!.subtitleSwitchFrom, isNull);
+  });
+
   for (final track in ['subtitle', 'audio']) {
     test('a required $track reopen renews the redirect before stopping and preserves playback intent at the playhead', () async {
       final backend = _Backend();

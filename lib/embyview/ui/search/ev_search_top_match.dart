@@ -7,12 +7,14 @@ import 'package:moonfin/embyview/ui/kit.dart';
 /// Top-match spotlight banner mirroring `.topmatch` in `.spec/mockups/proto.css` / `proto.js`.
 class EvSearchTopMatch extends StatelessWidget {
   const EvSearchTopMatch({
-    super.key, required this.card, required this.query, required this.onPlay, required this.onOpenDetail,
+    super.key, required this.card, required this.query, required this.onPlay, required this.onOpenDetail, this.playing = false, this.playError,
   });
 
   final MediaCard card;
   final String query;
-  final void Function(PlayTarget target, CardArtwork art, Rect? origin) onPlay;
+  final ValueChanged<Rect?> onPlay;
+  final bool playing;
+  final String? playError;
   final VoidCallback onOpenDetail;
 
   ArtworkPlan? _backdropPlan() => card.art.stage.layers.isNotEmpty
@@ -110,13 +112,16 @@ class EvSearchTopMatch extends StatelessWidget {
                     style: t.bodyStyle(s.font(1.0), color: t.ink2, height: 1.6)))),
               SizedBox(height: s.rem(1.25)),
               Wrap(spacing: s.rem(0.75), runSpacing: s.rem(0.5), children: [
-                Builder(builder: (c) => EvButton.primary(key: const Key('ev_search_top_play'), small: true, icon: EvIcons.play, label: '播放',
-                  onPressed: () {
+                Builder(builder: (c) => EvButton.primary(key: const Key('ev_search_top_play'), small: true, icon: EvIcons.play, label: playing ? '正在加载…' : '播放',
+                  onPressed: playing ? null : () {
                     final box = c.findRenderObject() as RenderBox?;
-                    onPlay(PlayTarget(itemId: card.id), card.art, box != null && box.hasSize ? (box.localToGlobal(Offset.zero) & box.size) : null);
+                    onPlay(box != null && box.hasSize ? (box.localToGlobal(Offset.zero) & box.size) : null);
                   })),
                 EvButton.ghost(key: const Key('ev_search_top_detail'), small: true, glass: true, label: '详情', onPressed: onOpenDetail),
               ]),
+              if (playError != null)
+                Padding(padding: EdgeInsets.only(top: s.rem(0.5)),
+                  child: Text(playError!, style: t.bodyStyle(s.font(0.875), color: t.ink2))),
             ])),
           ])),
         ]),

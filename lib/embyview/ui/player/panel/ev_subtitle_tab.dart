@@ -112,11 +112,14 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
   String _defaultQuery() {
     final item = widget.snapshot.item;
     final title = item?.title.trim().isNotEmpty == true ? item!.title.trim() : widget.snapshot.target.itemId;
-    final ep = item?.episodeNumber ?? widget.snapshot.target.episodeNumber;
-    if (ep != null) {
-      final m = RegExp(r'(\d+)').firstMatch(item?.seasonId ?? widget.snapshot.target.seasonId ?? '');
-      final sNum = m != null ? int.tryParse(m.group(1)!) ?? 1 : 1;
-      return '$title S${sNum.toString().padLeft(2, '0')}E${ep.toString().padLeft(2, '0')}';
+    final ep = item?.kind == MediaKind.movie ? null : item?.episodeNumber ?? widget.snapshot.target.episodeNumber;
+    if (item?.kind == MediaKind.episode || ep != null) {
+      final series = item?.seriesName?.trim();
+      final name = series != null && series.isNotEmpty ? series : title;
+      if (ep == null) return name;
+      final season = item?.seasonNumber;
+      final s = season == null ? '' : 'S${season.toString().padLeft(2, '0')}';
+      return '$name ${s}E${ep.toString().padLeft(2, '0')}';
     }
     return item?.year != null ? '$title ${item!.year}' : title;
   }
@@ -124,7 +127,7 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
   void _ensureAutoSearch() {
     if (_autoSearched || widget.subtitlePanel == null) return;
     _autoSearched = true;
-    unawaited(_runSearch(_searchCtrl.text));
+    unawaited(_runSearch(''));
   }
 
   Future<void> _runSearch(String raw) async {

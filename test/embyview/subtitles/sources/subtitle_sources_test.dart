@@ -39,6 +39,33 @@ http.Response assrtResults(List<Object> subtitles) => json({
 });
 
 void main() {
+  test('ASSRT successful empty object is zero results, but malformed data remains an error', () async {
+    Object response = <String, Object>{};
+    int? status;
+    final sources = SubtitleSources(
+      readSecret: (_) async => 'fixture',
+      client: MockClient((request) async {
+        expect(request.url.host, 'api.assrt.net');
+        return json({if (status != null) 'status': status, 'sub': {'subs': response}});
+      }),
+    );
+    addTearDown(sources.close);
+    final scope = sources.openScope();
+    Future<SubtitleSearchGroup> search() async =>
+        (await scope.search(query, enabledSources: {SubtitleSource.assrt}))
+            .singleWhere((group) => group.source == SubtitleSource.assrt);
+    final empty = await search();
+    expect(empty.candidates, isEmpty);
+    expect(empty.failure, isNull);
+    status = 0;
+    expect((await search()).failure, isNull);
+    response = {'unexpected': true};
+    expect((await search()).failure, isNotNull);
+    response = <String, Object>{};
+    status = 1;
+    expect((await search()).failure, isNotNull);
+  });
+
   test('four concurrent searches download each provider’s original text bytes', () async {
     final reached = <String>{};
     final ready = Completer<void>();

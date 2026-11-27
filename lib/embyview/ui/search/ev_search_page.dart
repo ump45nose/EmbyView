@@ -35,6 +35,8 @@ class _EvSearchPageState extends State<EvSearchPage> {
   EmbyViewData? _boundData;
   Timer? _debounceTimer;
   int _landingGen = 0, _searchGen = 0;
+  String? _playingCardId, _playError;
+  int _playRequest = 0;
 
   SearchLanding? _landing;
   SearchResults? _results;
@@ -75,6 +77,7 @@ class _EvSearchPageState extends State<EvSearchPage> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.zoneId == widget.zoneId) return;
     _debounceTimer?.cancel();
+    _playRequest++; _playingCardId = null; _playError = null;
     _landing = null; _results = null; _searchError = null; _landingError = null;
     final q = _controller.text.trim();
     unawaited(q.isNotEmpty ? _executeSearch(q) : _loadLanding());
@@ -89,7 +92,7 @@ class _EvSearchPageState extends State<EvSearchPage> {
     super.dispose();
   }
 
-  void _clearSearchFields() { _activeQuery = ''; _results = null; _searching = false; _loadingMore = false; _searchError = null; }
+  void _clearSearchFields() { _playRequest++; _playingCardId = null; _playError = null; _activeQuery = ''; _results = null; _searching = false; _loadingMore = false; _searchError = null; }
   void _onInputFocus() { if (mounted && _inputFocused != _inputFocus.hasFocus) setState(() => _inputFocused = _inputFocus.hasFocus); }
   void _onScroll() { if (_scrollController.hasClients) _scope?.shell.setScrollOffset(_scrollController.offset); }
 
@@ -126,7 +129,7 @@ class _EvSearchPageState extends State<EvSearchPage> {
     _debounceTimer?.cancel();
     final term = value.trim();
     if (term.isEmpty) { _returnToLanding(); return; }
-    setState(() {});
+    setState(() { _playRequest++; _playingCardId = null; _playError = null; });
     _debounceTimer = Timer(_debounceDelay, () => unawaited(_executeSearch(term)));
   }
 
@@ -147,7 +150,7 @@ class _EvSearchPageState extends State<EvSearchPage> {
     final data = _boundData;
     if (data == null) return;
     final gen = ++_searchGen;
-    setState(() { _activeQuery = term; _searching = true; _loadingMore = false; _searchError = null; });
+    setState(() { _playRequest++; _playingCardId = null; _playError = null; _activeQuery = term; _searching = true; _loadingMore = false; _searchError = null; });
     try {
       final res = await data.search(term, zoneId: widget.zoneId, offset: 0, limit: _pageSize);
       if (!mounted || gen != _searchGen) return;
@@ -187,10 +190,41 @@ class _EvSearchPageState extends State<EvSearchPage> {
     }
   }
 
-  void _openItem(String id) => widget.onOpenItem != null ? widget.onOpenItem!(id) : EvScope.of(context).shell.onOpenDetail?.call(id);
+  void _openItem(String id) {
+    if (_playingCardId != null) setState(() { _playRequest++; _playingCardId = null; });
+    if (widget.onOpenItem != null) { widget.onOpenItem!(id); }
+    else { EvScope.of(context).shell.onOpenDetail?.call(id); }
+  }
   void _playTarget(PlayTarget target, CardArtwork art, {Rect? origin}) => widget.onPlayTarget != null
       ? widget.onPlayTarget!(target, art, origin) : unawaited(EvPlayer.open(context, target, origin: origin, art: art));
   void _playCard(MediaCard card) => _playTarget(PlayTarget(itemId: card.id), card.art);
+
+  Future<void> _playBestMatch(MediaCard card, {Rect? origin}) async {
+    final data = _boundData;
+    final searchGen = _searchGen;
+    final request = ++_playRequest;
+    setState(() { _playingCardId = card.kind == MediaKind.series ? card.id : null; _playError = null; });
+    bool current() => mounted && request == _playRequest && searchGen == _searchGen && identical(data, _boundData);
+    try {
+      var target = PlayTarget(itemId: card.id);
+      if (card.kind == MediaKind.series) {
+        if (data == null) return;
+        final detail = await data.detail(card.id);
+        if (!current()) return;
+        // The detail page uses the same facade result, including resume position.
+        final episode = detail.resume?.target ?? detail.playTarget;
+        if (episode == null || episode.itemId == card.id) {
+          throw const EmbyViewFailure('没有可播放的分集。');
+        }
+        target = episode;
+      }
+      if (current()) _playTarget(target, card.art, origin: origin);
+    } catch (error) {
+      if (current()) setState(() { _playError = error is EmbyViewFailure ? error.reason : '无法加载可播放分集，请重试。'; });
+    } finally {
+      if (mounted && request == _playRequest) setState(() { _playingCardId = null; });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -293,7 +327,8 @@ class _EvSearchPageState extends State<EvSearchPage> {
         if (res.bestMatch != null) ...[
           _heading(t, s, '最佳匹配'),
           EvSearchTopMatch(card: res.bestMatch!, query: _activeQuery,
-            onPlay: (target, art, origin) => _playTarget(target, art, origin: origin), onOpenDetail: () => _openItem(res.bestMatch!.id)),
+            playing: _playingCardId == res.bestMatch!.id, playError: _playError,
+            onPlay: (origin) => unawaited(_playBestMatch(res.bestMatch!, origin: origin)), onOpenDetail: () => _openItem(res.bestMatch!.id)),
         ],
         for (final g in groups) ...[
           _heading(t, s, g.name, count: g.total),

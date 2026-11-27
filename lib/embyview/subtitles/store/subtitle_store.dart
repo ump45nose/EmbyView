@@ -286,16 +286,11 @@ final class SubtitleStore {
     try {
       final pending = _localWrites.then((_) async {
         final mapped = await mapMedia(track.media, await folderStatus(), writing: true);
-        final lock = File(p.join(mapped.directory, '.embyview-subtitles.lock'));
-        await _checkRegularOrMissing(lock);
-        final handle = await lock.open(mode: FileMode.append);
-        try {
-          await handle.lock(FileLock.blockingExclusive);
-          await verifyMappedDirectory(mapped);
-          return await _saveUnderLock(track, mapped, replaceExisting);
-        } finally {
-          await handle.close();
-        }
+        // SMB mounts need not implement advisory file locks. Serialize writes
+        // within this process; the final same-directory rename commits each file
+        // atomically, including when another client writes concurrently.
+        await verifyMappedDirectory(mapped);
+        return _saveMapped(track, mapped, replaceExisting);
       });
       _localWrites = pending.then<void>((_) {}, onError: (Object _) {});
       saved = await pending;
@@ -339,7 +334,7 @@ final class SubtitleStore {
     return notified && checked ? SubtitleIndexState.unrecognized : SubtitleIndexState.unavailable;
   }
 
-  Future<(String, String)> _saveUnderLock(
+  Future<(String, String)> _saveMapped(
     StoredSubtitle track,
     MappedSubtitleMedia mapped,
     bool replaceExisting,
