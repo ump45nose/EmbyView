@@ -8,6 +8,88 @@ final RegExp _kGenericEpisodeTitleRe = RegExp(
   r'^(?:第\s*(\d+)\s*集|episode\s*(\d*))$',
   caseSensitive: false,
 );
+final RegExp _kEnglishChapterNumberRe = RegExp(
+  r'^chapter\s*[-_#:]?\s*(\d+)$',
+  caseSensitive: false,
+);
+final RegExp _kEnglishPartNumberRe = RegExp(
+  r'^part\s*[-_#:]?\s*(\d+)$',
+  caseSensitive: false,
+);
+final RegExp _kEnglishSceneNumberRe = RegExp(
+  r'^scene\s*[-_#:]?\s*(\d+)$',
+  caseSensitive: false,
+);
+final RegExp _kEnglishActNumberRe = RegExp(
+  r'^act\s*[-_#:]?\s*(\d+)$',
+  caseSensitive: false,
+);
+
+const Map<String, String> _kEnglishChapterNames = {
+  'intro': '片头',
+  'introduction': '片头',
+  'opening': '片头',
+  'opening credits': '片头',
+  'opening theme': '片头曲',
+  'op': '片头',
+  'outro': '片尾',
+  'ending': '片尾',
+  'credits': '片尾',
+  'end credits': '片尾',
+  'closing credits': '片尾',
+  'ending theme': '片尾曲',
+  'ed': '片尾',
+  'prologue': '序幕',
+  'epilogue': '尾声',
+  'recap': '前情提要',
+  'previously': '前情提要',
+  'previously on': '前情提要',
+  'preview': '下集预告',
+  'next episode': '下集预告',
+  'next episode preview': '下集预告',
+  'teaser': '预告',
+  'title': '片名',
+  'title card': '片名',
+  'main titles': '片头',
+  'post-credits': '片尾彩蛋',
+  'post credits': '片尾彩蛋',
+  'after credits': '片尾彩蛋',
+  'stinger': '片尾彩蛋',
+  'intermission': '中场休息',
+};
+
+/// Formats a chapter title for Chinese UI display, localizing generic English
+/// placeholders (e.g. `Chapter 1`, `Intro`, `Credits`) while preserving custom titles.
+String? evFormatChapterLabel(String? rawName, {int? index}) {
+  final trimmed = rawName?.trim() ?? '';
+  if (trimmed.isEmpty) {
+    return index != null && index >= 0 ? '第 ${index + 1} 章' : null;
+  }
+  final chapterMatch = _kEnglishChapterNumberRe.firstMatch(trimmed);
+  if (chapterMatch != null) {
+    final num = int.tryParse(chapterMatch.group(1)!);
+    return num != null ? '第 $num 章' : trimmed;
+  }
+  final normalized = trimmed.toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+  final mapped = _kEnglishChapterNames[normalized];
+  if (mapped != null) return mapped;
+  final partMatch = _kEnglishPartNumberRe.firstMatch(trimmed);
+  if (partMatch != null) {
+    final num = int.tryParse(partMatch.group(1)!);
+    return num != null ? '第 $num 部分' : trimmed;
+  }
+  final sceneMatch = _kEnglishSceneNumberRe.firstMatch(trimmed);
+  if (sceneMatch != null) {
+    final num = int.tryParse(sceneMatch.group(1)!);
+    return num != null ? '场景 $num' : trimmed;
+  }
+  final actMatch = _kEnglishActNumberRe.firstMatch(trimmed);
+  if (actMatch != null) {
+    final num = int.tryParse(actMatch.group(1)!);
+    return num != null ? '第 $num 幕' : trimmed;
+  }
+  return trimmed;
+}
 
 /// Formats a playback timestamp as `h:mm:ss` when `>= 1 hour` or `m:ss` otherwise.
 String evFormatPlayerTime(Duration d) {

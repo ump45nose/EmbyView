@@ -935,5 +935,21 @@ void main() {
         const Color(0xFF141413),
       );
     });
+
+    test('evFormatChapterLabel localizes generic English chapter markers and keeps custom titles', () {
+      expect(evFormatChapterLabel('Chapter 1'), '第 1 章');
+      expect(evFormatChapterLabel('chapter 12'), '第 12 章');
+      expect(evFormatChapterLabel('Intro'), '片头');
+      expect(evFormatChapterLabel('Opening Credits'), '片头');
+      expect(evFormatChapterLabel('Credits'), '片尾');
+      expect(evFormatChapterLabel('Ending'), '片尾');
+      expect(evFormatChapterLabel('Prologue'), '序幕');
+      expect(evFormatChapterLabel('Epilogue'), '尾声');
+      expect(evFormatChapterLabel('Part 2'), '第 2 部分');
+      expect(evFormatChapterLabel('   ', index: 2), '第 3 章');
+      expect(evFormatChapterLabel(null), isNull);
+      expect(evFormatChapterLabel('城墙夜战'), '城墙夜战');
+      expect(evFormatChapterLabel('Tokyo Rain'), 'Tokyo Rain');
+    });
   });
 }

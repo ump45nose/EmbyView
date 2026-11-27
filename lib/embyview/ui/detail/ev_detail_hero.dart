@@ -91,11 +91,7 @@ class _EvDetailHeroState extends State<EvDetailHero> {
       ],
       if (card.overview?.trim().isNotEmpty ?? false) ...[
         SizedBox(height: s.rem(1)),
-        ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: s.rem(38)),
-          child: Text(card.overview!.trim(), key: const Key('ev_detail_overview'), maxLines: 2, overflow: TextOverflow.ellipsis,
-              style: t.bodyStyle(s.font(1.125), color: t.ink2, height: 1.62)),
-        ),
+        _buildOverview(ctx, t, s, card.overview!.trim()),
       ],
       SizedBox(height: s.rem(1.5)),
       _buildActions(t, s),
@@ -153,6 +149,95 @@ class _EvDetailHeroState extends State<EvDetailHero> {
         ),
       ],
     ]);
+  }
+
+  Widget _buildOverview(BuildContext ctx, EvTheme t, EvScale s, String overview) {
+    final style = t.bodyStyle(s.font(1.125), color: t.ink2, height: 1.62);
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: s.rem(38)),
+      child: LayoutBuilder(
+        builder: (layoutCtx, constraints) {
+          final maxW = constraints.hasBoundedWidth && constraints.maxWidth > 0 ? constraints.maxWidth : s.rem(38);
+          final painter = TextPainter(
+            text: TextSpan(text: overview, style: style),
+            maxLines: 2,
+            textDirection: Directionality.of(layoutCtx),
+            textScaler: MediaQuery.textScalerOf(layoutCtx),
+          )..layout(maxWidth: maxW);
+          final truncated = painter.didExceedMaxLines;
+          final preview = Text(
+            overview,
+            key: const Key('ev_detail_overview'),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          );
+          if (!truncated) return preview;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _openOverviewDialog(overview),
+                  child: preview,
+                ),
+              ),
+              SizedBox(height: s.rem(0.375)),
+              Focus(
+                onKeyEvent: (_, event) {
+                  if (evIsActivateKey(event)) {
+                    _openOverviewDialog(overview);
+                    return KeyEventResult.handled;
+                  }
+                  return KeyEventResult.ignored;
+                },
+                child: Semantics(
+                  button: true,
+                  label: '展开全部简介',
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: GestureDetector(
+                      key: const Key('ev_detail_overview_expand'),
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => _openOverviewDialog(overview),
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(vertical: s.rem(0.125)),
+                        child: Text(
+                          '展开全部',
+                          style: t.bodyStyle(s.font(0.875), fontWeight: FontWeight.w600, color: t.ink),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _openOverviewDialog(String overview) {
+    final hostTheme = EvTheme.of(context);
+    final d = widget.detail;
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: '关闭简介',
+      transitionDuration: EvDurations.fast,
+      barrierColor: hostTheme.isPaper
+          ? const Color.fromRGBO(250, 249, 245, 0.65)
+          : const Color.fromRGBO(0, 0, 0, 0.55),
+      pageBuilder: (dialogCtx, _, _) => _EvOverviewDialog(
+        title: d.card.title,
+        tagline: d.tagline?.trim(),
+        overview: overview,
+      ),
+    );
   }
 
   Widget _buildStatusPill(BuildContext ctx, EvTheme t, EvScale s) {
@@ -331,6 +416,82 @@ class _EvDetailHeroState extends State<EvDetailHero> {
 }
 
 enum _EvDetailActionKind { favorite, played }
+
+class _EvOverviewDialog extends StatelessWidget {
+  const _EvOverviewDialog({
+    required this.title,
+    this.tagline,
+    required this.overview,
+  });
+
+  final String title;
+  final String? tagline;
+  final String overview;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context);
+    final maxH = math.max(s.rem(18), s.vh(68));
+    return Center(
+      child: Padding(
+        padding: EdgeInsets.all(s.rem(2)),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: s.rem(38), maxHeight: maxH),
+          child: EvGlass(
+            key: const Key('ev_detail_overview_dialog'),
+            solid: true,
+            borderRadius: BorderRadius.circular(s.rem(1.25)),
+            padding: EdgeInsets.all(s.rem(1.5)),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: t.shelfStyle(s.font(1.25)),
+                      ),
+                    ),
+                    SizedBox(width: s.rem(0.75)),
+                    EvButton.ghost(
+                      key: const Key('ev_detail_overview_dialog_close'),
+                      icon: EvIcons.x,
+                      small: true,
+                      round: true,
+                      tooltip: '关闭',
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
+                ),
+                if (tagline != null && tagline!.isNotEmpty) ...[
+                  SizedBox(height: s.rem(0.5)),
+                  Text(
+                    tagline!,
+                    style: t.serifStyle(s.font(1.0625), fontStyle: FontStyle.italic, color: t.ink3, height: 1.5),
+                  ),
+                ],
+                SizedBox(height: s.rem(1)),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Text(
+                      overview,
+                      key: const Key('ev_detail_overview_dialog_text'),
+                      style: t.bodyStyle(s.font(1.0625), color: t.ink2, height: 1.75),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// Glass round toggle button for detail hero actions (`+` favorite / `✓` played).
 /// Renders clear frosted glass when inactive and crisp high-contrast highlight

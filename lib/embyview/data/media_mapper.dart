@@ -130,13 +130,13 @@ class MediaMapper {
         ArtworkPlan(layers: List.unmodifiable(layers), fallbackTitle: title, stack: stack);
     return CardArtwork(
       landscape: plan([
-        if (thumb != null) ArtworkLayer(source: thumb),
+        if (thumb != null) ArtworkLayer(source: thumb, fit: ArtworkFit.cover),
         if (backdrop != null)
           ArtworkLayer(source: backdrop, fit: ArtworkFit.cover, logo: logo, text: logo == null ? title : null),
         if (backdrop != null && logo != null) ArtworkLayer(source: backdrop, fit: ArtworkFit.cover, text: title),
       ]),
       poster: plan([
-        if (primary != null) ArtworkLayer(source: primary),
+        if (primary != null) ArtworkLayer(source: primary, fit: ArtworkFit.cover),
         if (backdrop != null) ArtworkLayer(source: backdrop, fit: ArtworkFit.cover, text: title),
       ], stack: collection.skip(1).take(2).map((e) => image(e, 'Primary')).whereType<ArtworkRef>().toList()),
       stage: plan([
@@ -156,7 +156,7 @@ class MediaMapper {
     return ArtworkPlan(
       fallbackTitle: label ?? '',
       layers: [
-        if (primary != null) ArtworkLayer(source: primary),
+        if (primary != null) ArtworkLayer(source: primary, fit: ArtworkFit.cover),
         if (back != null) ArtworkLayer(source: back, fit: ArtworkFit.cover, text: label),
       ],
     );

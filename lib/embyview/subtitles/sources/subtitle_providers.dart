@@ -66,9 +66,20 @@ extension on SubtitleSearchScope {
       Uri.https(_assrtApi, '/v1/sub/$action', params),
       headers: {'Authorization': 'Bearer $token'},
     );
+    final status = data['status'];
+    if (status == 20900 || (action == 'search' && status == 101)) return const [];
+    if (status == 20001) {
+      throw const EmbyViewFailure('ASSRT_TOKEN 无效或已过期', code: 'invalid_credentials');
+    }
+    if (status == 30001 || status == 30002) {
+      throw const EmbyViewFailure('射手网请求过于频繁，请稍后重试', code: 'rate_limited', retryable: true);
+    }
+    if (status != 0) throw _invalidResponse;
     final subtitles = _object(data['sub'])['subs'];
-    if (data['status'] != 0 || subtitles is! List) throw _invalidResponse;
-    return _rows(subtitles);
+    if (subtitles is List) return _rows(subtitles);
+    // ASSRT returns an empty JSON object `{}` (or null) when no subtitles match.
+    if (subtitles == null || (subtitles is Map && subtitles.isEmpty)) return const [];
+    throw _invalidResponse;
   }
 
   Future<SubtitleDownload> _downloadAssrt(int id, SubtitleQuery query, String? language, String? format) async {

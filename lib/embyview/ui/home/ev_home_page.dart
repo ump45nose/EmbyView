@@ -155,13 +155,15 @@ class _EvHomePageState extends State<EvHomePage> {
     if (initial) {
       final cachedBackdrop = _activeHero?.card.art.stage;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
+        if (!mounted || scope.shell.current is! EvHomeDestination) return;
+        if (_home != null && cachedBackdrop == null) return;
         scope.stage
+          ..clearPreviewBackdrop()
+          ..setAmbientColor(null)
+          ..setVeilLifted(false)
           ..setMode(EvStageMode.hero)
+          ..setBaseBackdrop(cachedBackdrop)
           ..setScrollProgress(0.0);
-        if (cachedBackdrop != null) {
-          scope.stage.setBaseBackdrop(cachedBackdrop);
-        }
         scope.shell.setScrollOffset(0.0);
       });
     }
@@ -433,8 +435,11 @@ class _EvHomePageState extends State<EvHomePage> {
         _emptyLibraries = false;
         _error = null;
       });
-      scope.stage.setMode(EvStageMode.hero);
-      if (nextHero != null) scope.stage.setBaseBackdrop(nextHero.card.art.stage);
+      if (scope.shell.current is EvHomeDestination) {
+        scope.stage
+          ..setMode(nextHero != null ? EvStageMode.hero : EvStageMode.ambient)
+          ..setBaseBackdrop(nextHero?.card.art.stage);
+      }
     } catch (e) {
       if (!mounted || token != _loadToken) return;
       if (allowFailover &&
@@ -629,7 +634,10 @@ class _EvHomePageState extends State<EvHomePage> {
                   pauseAutoRotate: _hoverPaused,
                   onActiveChanged: (rec) {
                     _activeHero = rec;
-                    _scope?.stage.setBaseBackdrop(rec.card.art.stage);
+                    final scope = _scope;
+                    if (scope != null && scope.shell.current is EvHomeDestination) {
+                      scope.stage.setBaseBackdrop(rec.card.art.stage);
+                    }
                   },
                   onDetail: () {
                     final card = _previewCard.value ?? _activeHero?.card;

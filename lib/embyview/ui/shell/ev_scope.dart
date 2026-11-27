@@ -340,8 +340,9 @@ class EvShellController extends ChangeNotifier {
           }
           return false;
         case EvMenuAction.back:
-          if (player?.closePlayer != null) {
-            player!.closePlayer!();
+          final backHandler = player?.handleBack ?? player?.closePlayer;
+          if (backHandler != null) {
+            backHandler();
             return true;
           }
           if (onBack != null) return onBack!();

@@ -75,6 +75,7 @@ class EvPlayerMenuDelegate {
     required this.triggerAiSubtitle,
     required this.toggleAnime4k,
     required this.toggleFullscreen,
+    this.handleBack,
     this.closePlayer,
     this.isFailed,
   });
@@ -87,6 +88,7 @@ class EvPlayerMenuDelegate {
   final VoidCallback triggerAiSubtitle;
   final VoidCallback toggleAnime4k;
   final VoidCallback toggleFullscreen;
+  final VoidCallback? handleBack;
   final VoidCallback? closePlayer;
   final bool Function()? isFailed;
 

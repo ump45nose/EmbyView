@@ -825,5 +825,25 @@ void main() {
         expect(moreHits, 2);
       },
     );
+
+    testWidgets('EvCard forces BoxFit.cover so non-2:3 posters fill without vertical bars', (tester) async {
+      await tester.pumpWidget(
+        _harness(
+          child: SizedBox(
+            width: 200,
+            child: EvCard(
+              card: _card('poster_fit'),
+              style: EvCardStyle.poster,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final img = tester.widget<Image>(
+        find.descendant(of: find.byType(EvCard), matching: find.byType(Image)).first,
+      );
+      expect(img.fit, BoxFit.cover);
+    });
   });
 }

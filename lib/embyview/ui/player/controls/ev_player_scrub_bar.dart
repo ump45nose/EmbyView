@@ -178,8 +178,8 @@ class _EvPlayerScrubBarState extends State<EvPlayerScrubBar> with SingleTickerPr
     for (var i = 0; i < widget.chapters.length; i++) {
       if (widget.chapters[i].start <= pos) idx = i;
     }
-    final name = (idx < 0 ? widget.chapters.first : widget.chapters[idx]).name?.trim();
-    return (name != null && name.isNotEmpty) ? name : (idx < 0 ? null : '第 ${idx + 1} 章');
+    final name = (idx < 0 ? widget.chapters.first : widget.chapters[idx]).name;
+    return evFormatChapterLabel(name, index: idx < 0 ? null : idx);
   }
 
   Widget _tipPill(EvTheme t, EvScale s, String text) {

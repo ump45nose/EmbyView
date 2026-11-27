@@ -39,6 +39,7 @@ class _EvZonePageState extends State<EvZonePage> {
 
   EvChromeTitlePlate? _appliedTitlePlate;
   Color? _appliedAmbientColor;
+  bool _ownedZoneDest = false;
 
   @override
   void initState() {
@@ -64,6 +65,7 @@ class _EvZonePageState extends State<EvZonePage> {
       _previewCard.value = null;
       _attachedData = scope.services.data;
       _attachedSessionId = scope.services.sessionId;
+      _ownedZoneDest = scope.shell.current == EvZoneDestination(widget.zoneId);
       _zoneData = _activeHero = _error = _randomError = null;
       _loading = scope.services.data != null;
       _attachPreferences(scope.services.preferences);
@@ -97,6 +99,7 @@ class _EvZonePageState extends State<EvZonePage> {
     _zoneData = _activeHero = _error = _randomError = null;
     _loading = _attachedData != null;
     if (_scope != null) {
+      _ownedZoneDest = _scope!.shell.current == EvZoneDestination(widget.zoneId);
       _zonePrefSig = _prefSignature(_scope!.services.preferences.current.zones, widget.zoneId);
       _resetStageAndScroll(_scope!);
     }
@@ -104,10 +107,31 @@ class _EvZonePageState extends State<EvZonePage> {
     unawaited(_loadZone());
   }
 
+  bool _canUpdateStage(EvScope scope) =>
+      !_ownedZoneDest || scope.shell.current == EvZoneDestination(widget.zoneId);
+
+  Color? _pendingAmbientColor(EvScope scope, EvTheme theme) {
+    for (final z in scope.shell.zones) {
+      if (z.id == widget.zoneId) return theme.zoneColor(z.colorSlot);
+    }
+    for (final z in scope.services.preferences.current.zones) {
+      if (z.id == widget.zoneId) return theme.zoneColor(z.colorSlot);
+    }
+    return null;
+  }
+
   void _resetStageAndScroll(EvScope scope) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      scope.stage..setMode(EvStageMode.hero)..setScrollProgress(0.0);
+      if (!mounted || !_canUpdateStage(scope) || _zoneData != null) return;
+      final ambient = _pendingAmbientColor(scope, EvTheme.of(context));
+      _appliedAmbientColor = ambient;
+      scope.stage
+        ..clearPreviewBackdrop()
+        ..setBaseBackdrop(null)
+        ..setMode(EvStageMode.ambient)
+        ..setScrollProgress(0.0)
+        ..setVeilLifted(false)
+        ..setAmbientColor(ambient);
       scope.shell.setScrollOffset(0.0);
     });
   }
@@ -178,7 +202,12 @@ class _EvZonePageState extends State<EvZonePage> {
       _previewCard.value = null;
 
       setState(() { _zoneData = result; _activeHero = nextHero; _loading = false; _error = null; _randomError = null; });
-      scope.stage..setMode(EvStageMode.hero)..setAmbientColor(ambient)..setBaseBackdrop(nextHero?.card.art.stage);
+      if (_canUpdateStage(scope)) {
+        scope.stage
+          ..setMode(nextHero != null ? EvStageMode.hero : EvStageMode.ambient)
+          ..setAmbientColor(ambient)
+          ..setBaseBackdrop(nextHero?.card.art.stage);
+      }
       scope.shell.updateChrome(titlePlate: plate, rightActions: _buildRightActions(result));
     } catch (e) {
       if (!mounted || token != _loadToken || widget.zoneId != expectedZoneId) return;
@@ -371,7 +400,13 @@ class _EvZonePageState extends State<EvZonePage> {
                         defaultReasonLabel: data != null ? '${data.zone.name}精选' : '分区精选',
                         enableAutoRotate: widget.enableAnimations,
                         pauseAutoRotate: _hoverPaused,
-                        onActiveChanged: (rec) { _activeHero = rec; _scope?.stage.setBaseBackdrop(rec.card.art.stage); },
+                        onActiveChanged: (rec) {
+                          _activeHero = rec;
+                          final scope = _scope;
+                          if (scope != null && _canUpdateStage(scope)) {
+                            scope.stage.setBaseBackdrop(rec.card.art.stage);
+                          }
+                        },
                         onDetail: () { final card = _previewCard.value ?? _activeHero?.card; if (card != null) _openDetail(card); },
                         onPlay: (rec, origin) => _play(rec.resume?.target ?? PlayTarget(itemId: rec.card.id), rec.card.art, origin: origin),
                       ),

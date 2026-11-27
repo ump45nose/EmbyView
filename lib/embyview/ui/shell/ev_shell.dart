@@ -228,14 +228,61 @@ class _EvShellState extends State<EvShell> {
     });
   }
 
+  Color? _zoneAmbientColor(String zoneId) {
+    final prefs = widget.services.preferences.current;
+    int? slot;
+    for (final z in _shell.zones) {
+      if (z.id == zoneId) {
+        slot = z.colorSlot;
+        break;
+      }
+    }
+    if (slot == null) {
+      for (final z in prefs.zones) {
+        if (z.id == zoneId) {
+          slot = z.colorSlot;
+          break;
+        }
+      }
+    }
+    if (slot == null) return null;
+    final theme = prefs.theme == ThemeMode.paper ? EvTheme.paper : EvTheme.cinema;
+    return theme.zoneColor(slot);
+  }
+
   void _syncStageForDestination(EvShellDestination dest) {
     if (dest is EvWallDestination) {
       _immersion.onCardHoverEnd();
       _stage
+        ..clearPreviewBackdrop()
         ..setMode(EvStageMode.ambient)
         ..setScrollProgress(0.0)
         ..setVeilLifted(false)
         ..setAmbientColor(null);
+      return;
+    }
+    if (dest is EvZoneDestination) {
+      _immersion.onCardHoverEnd();
+      _stage
+        ..clearPreviewBackdrop()
+        ..setBaseBackdrop(null)
+        ..setMode(EvStageMode.ambient)
+        ..setScrollProgress(0.0)
+        ..setVeilLifted(false)
+        ..setAmbientColor(_zoneAmbientColor(dest.zoneId));
+      return;
+    }
+    if (dest is EvHomeDestination) {
+      _immersion.onCardHoverEnd();
+      final cachedHome = _shell.cachedHomeFor(widget.services.sessionId, widget.services.data);
+      final cachedBackdrop = cachedHome?.recommendations.firstOrNull?.card.art.stage;
+      _stage
+        ..clearPreviewBackdrop()
+        ..setAmbientColor(null)
+        ..setVeilLifted(false)
+        ..setScrollProgress(0.0)
+        ..setMode(EvStageMode.hero)
+        ..setBaseBackdrop(cachedBackdrop);
     }
   }
 

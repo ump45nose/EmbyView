@@ -78,6 +78,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
   int _retryAttempt = 1, _retryNonce = 0;
   String _toastMessage = '';
   int _trackSelection = 0;
+  KeyEvent? _lastHandledEscapeEvent;
   EvIconData? _toastIcon;
   Timer? _idleTimer, _pauseTimer, _toastTimer, _auroraFlashTimer;
   late final EvPlayerMenuDelegate _menuDelegate;
@@ -118,10 +119,12 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
         unawaited(widget.session.setFullscreen(!_snap.fullscreen));
         _pokeControls();
       },
+      handleBack: _handleEscapeOrBack,
       closePlayer: _handleClose,
       isFailed: () => _snap.phase == PlaybackPhase.failed,
     );
     EvPlayer.registerActivePlayer(_menuDelegate);
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
   }
 
   void _triggerAiSubtitleFromMenu() {
@@ -372,18 +375,55 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     return found;
   }
 
+  void _handleEscapeOrBack() {
+    if (_isTextInputFocused()) {
+      FocusManager.instance.primaryFocus?.unfocus();
+      _reclaimPlayerFocus();
+      return;
+    }
+    if (_panelOpen) {
+      _closePanel();
+      return;
+    }
+    if (_compareActive) {
+      _endCompare();
+      return;
+    }
+    _handleClose();
+  }
+
+  bool _onHardwareKey(KeyEvent event) {
+    if (!mounted) return false;
+    if (ModalRoute.of(context)?.isCurrent == false) return false;
+    if (event.logicalKey != LogicalKeyboardKey.escape) return false;
+    if (identical(event, _lastHandledEscapeEvent)) return true;
+    if (_focusNode.hasFocus) return false;
+    if (event is KeyRepeatEvent) return true;
+    if (event is! KeyDownEvent) return false;
+    _lastHandledEscapeEvent = event;
+    _handleEscapeOrBack();
+    return true;
+  }
+
   KeyEventResult _handleKeyEvent(FocusNode _, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return KeyEventResult.ignored;
     final key = event.logicalKey;
     if (_isTextInputFocused()) {
-      if (key == LogicalKeyboardKey.escape) { FocusManager.instance.primaryFocus?.unfocus(); _focusNode.requestFocus(); return KeyEventResult.handled; }
+      if (key == LogicalKeyboardKey.escape) {
+        if (!identical(event, _lastHandledEscapeEvent)) {
+          _lastHandledEscapeEvent = event;
+          _handleEscapeOrBack();
+        }
+        return KeyEventResult.handled;
+      }
       return KeyEventResult.ignored;
     }
     if (key == LogicalKeyboardKey.escape) {
       if (event is KeyRepeatEvent) return KeyEventResult.handled;
-      if (_panelOpen) { _closePanel(); }
-      else if (_compareActive) { _endCompare(); }
-      else { _handleClose(); }
+      if (!identical(event, _lastHandledEscapeEvent)) {
+        _lastHandledEscapeEvent = event;
+        _handleEscapeOrBack();
+      }
       return KeyEventResult.handled;
     }
     if (_snap.phase == PlaybackPhase.failed) return KeyEventResult.ignored;
@@ -399,6 +439,7 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
     EvPlayer.unregisterActivePlayer(_menuDelegate);
     _idleTimer?.cancel(); _pauseTimer?.cancel(); _toastTimer?.cancel(); _auroraFlashTimer?.cancel();
     unawaited(_sessionSub?.cancel()); unawaited(_subSub?.cancel());

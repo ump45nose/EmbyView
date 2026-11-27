@@ -96,7 +96,7 @@ class EvSearchTopMatch extends StatelessWidget {
             if (hasPoster) ...[
               DecoratedBox(
                 decoration: BoxDecoration(borderRadius: pRadius, boxShadow: [BoxShadow(offset: Offset(0, s.rem(1.0)), blurRadius: s.rem(2.0), color: const Color.fromRGBO(0, 0, 0, 0.40))]),
-                child: EvArtwork(key: const Key('ev_search_top_match_poster'), plan: card.art.poster, width: posterW, height: posterH, decodeWidth: posterW, borderRadius: pRadius),
+                child: EvArtwork(key: const Key('ev_search_top_match_poster'), plan: card.art.poster, width: posterW, height: posterH, decodeWidth: posterW, overrideFit: BoxFit.cover, borderRadius: pRadius),
               ),
               SizedBox(width: s.rem(2.0)),
             ],

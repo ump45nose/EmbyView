@@ -229,4 +229,66 @@ void main() {
     expect(result.language, 'zh-CN');
     expect((await scope.download(kitsunekko)).bytes, srt);
   });
+
+  test('ASSRT falls back across empty object subs and short-keyword status 101, and surfaces auth/rate errors', () async {
+    final seenQueries = <String>[];
+    final sources = SubtitleSources(
+      readSecret: (kind) async => kind == SecretKind.assrt ? 'test-assrt' : null,
+      client: MockClient((request) async {
+        final uri = request.url;
+        if (uri.host != 'api.assrt.net') return unavailable;
+        final q = uri.queryParameters['q'] ?? '';
+        seenQueries.add(q);
+        if (q == 'Up 2009') {
+          return json({'status': 0, 'sub': {'action': 'search', 'result': 'succeed', 'subs': <String, Object>{}}});
+        }
+        if (q == 'Up') {
+          return json({'status': 101, 'sub': {'action': 'search', 'result': 'failed', 'subs': <String, Object>{}}, 'errmsg': 'length of keyword must be longer than 3'});
+        }
+        if (q == '飞屋环游记') {
+          return assrtResults([
+            {'id': 456, 'native_name': '飞屋环游记 简中.srt', 'subtype': 'Subrip(srt)'},
+          ]);
+        }
+        if (q == 'bad-token') {
+          return json({'status': 20001, 'errmsg': 'invalid token'});
+        }
+        if (q == 'rate-limit') {
+          return json({'status': 30001, 'errmsg': 'rate limit'});
+        }
+        return json({'status': 20900, 'errmsg': 'subtitle not found'});
+      }),
+    );
+    addTearDown(sources.close);
+    final scope = sources.openScope();
+
+    final fallback = (await scope.search(
+      const SubtitleQuery(title: 'Up', originalTitle: '飞屋环游记', year: 2009),
+      enabledSources: {SubtitleSource.assrt},
+    )).singleWhere((g) => g.source == SubtitleSource.assrt);
+    expect(seenQueries, ['Up 2009', 'Up', '飞屋环游记']);
+    expect(fallback.failure, isNull);
+    expect(fallback.candidates.single.name, '飞屋环游记 简中.srt');
+
+    final authErr = (await scope.search(
+      const SubtitleQuery(title: 'bad-token'),
+      enabledSources: {SubtitleSource.assrt},
+    )).singleWhere((g) => g.source == SubtitleSource.assrt);
+    expect(authErr.failure?.code, 'invalid_credentials');
+    expect(authErr.failure?.reason, contains('ASSRT_TOKEN'));
+
+    final rateErr = (await scope.search(
+      const SubtitleQuery(title: 'rate-limit'),
+      enabledSources: {SubtitleSource.assrt},
+    )).singleWhere((g) => g.source == SubtitleSource.assrt);
+    expect(rateErr.failure?.code, 'rate_limited');
+    expect(rateErr.failure?.retryable, isTrue);
+
+    final notFound = (await scope.search(
+      const SubtitleQuery(title: 'missing-film'),
+      enabledSources: {SubtitleSource.assrt},
+    )).singleWhere((g) => g.source == SubtitleSource.assrt);
+    expect(notFound.failure, isNull);
+    expect(notFound.candidates, isEmpty);
+  });
 }

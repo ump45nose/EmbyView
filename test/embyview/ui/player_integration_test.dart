@@ -13,6 +13,7 @@ import 'package:moonfin/embyview/ui/player/controls/ev_player_controls.dart';
 import 'package:moonfin/embyview/ui/player/ev_player_page.dart';
 import 'package:moonfin/embyview/ui/player/overlays/ev_credits_overlay.dart';
 import 'package:moonfin/embyview/ui/player/overlays/ev_player_toast.dart';
+import 'package:moonfin/embyview/ui/shell/ev_menu_channel.dart';
 
 final Uint8List _kPngBytes = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -737,6 +738,61 @@ void main() {
     // After 3.2s idle, controls auto-hide again.
     await tester.pump(const Duration(milliseconds: 3300));
     expect(tester.widget<EvPlayerControls>(find.byType(EvPlayerControls)).visible, isFalse);
+  });
+
+  testWidgets('Esc and EvMenuAction.back close open player settings panel first even when focus left player node', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final session = _TestSession(_initialSnap()._withPhase(PlaybackPhase.playing));
+    var closed = 0;
+
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(size: Size(1440, 900), devicePixelRatio: 1.0),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: EvThemeScope(
+            themeMode: ThemeMode.cinema,
+            child: EvPlayerPage(
+              session: session,
+              initialPanelOpen: true,
+              initialPanelTab: 'video',
+              onClose: () => closed++,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    // Simulate focus leaving EvPlayerPage's FocusNode (e.g. rootScope / PlatformView / mouse click).
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump();
+
+    // First Esc must close the panel without exiting playback.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(closed, 0);
+    expect(tester.widget<EvCreditsVideoFrame>(find.byType(EvCreditsVideoFrame)).panelOpen, isFalse);
+
+    // Re-open panel and trigger EvMenuAction.back via shell controller: still closes panel first.
+    await tester.tap(find.byKey(const Key('ev_player_tab_subs')));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(tester.widget<EvCreditsVideoFrame>(find.byType(EvCreditsVideoFrame)).panelOpen, isTrue);
+
+    final shell = EvShellController();
+    addTearDown(shell.dispose);
+    expect(shell.handleMenuAction(EvMenuAction.back), isTrue);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(closed, 0);
+    expect(tester.widget<EvCreditsVideoFrame>(find.byType(EvCreditsVideoFrame)).panelOpen, isFalse);
+
+    // Next Esc exits playback.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(closed, 1);
   });
 }
 

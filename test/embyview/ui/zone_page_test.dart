@@ -999,5 +999,44 @@ void main() {
         expect(openedDetails, ['rand_$guidAnimeId']);
       },
     );
+
+    testWidgets(
+      'switching into a loading zone clears stale previous backdrop instead of flashing default hero',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final completer = Completer<ZoneData>();
+        final map = _buildSixZonesData();
+        final movieData = map['movie']!;
+        final h = _createHarness(zonesMap: map, zoneBuilder: (_) => completer.future, initialZoneId: 'movie');
+        addTearDown(h.dispose);
+
+        // Pre-populate global stage with an earlier page's hero backdrop (e.g. home default film).
+        final staleCard = _makeCard(id: 'tokyo_godfathers', title: '东京教父');
+        h.stage
+          ..setMode(EvStageMode.hero)
+          ..setBaseBackdrop(staleCard.art.stage);
+        expect(h.stage.activeBackdropKey, contains('tokyo_godfathers'));
+
+        await tester.pumpWidget(_wrapInScope(h, const EvZonePage(zoneId: 'movie', enableAnimations: false)));
+        await tester.pump();
+
+        // While zone data is still loading, stale backdrop must be cleared and stage ambient set to target zone.
+        expect(h.stage.activeBackdrop, isNull);
+        expect(h.stage.mode, EvStageMode.ambient);
+        expect(h.stage.ambientColor, EvTheme.cinema.zoneColor(movieData.zone.colorSlot));
+
+        completer.complete(movieData);
+        await tester.pumpAndSettle();
+
+        expect(h.stage.mode, EvStageMode.hero);
+        expect(h.stage.activeBackdropKey, contains('zone_test_bg_movie_hero_1'));
+      },
+    );
   });
 }

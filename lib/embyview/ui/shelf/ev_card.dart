@@ -336,6 +336,7 @@ class _EvCardState extends State<EvCard> {
       height: hasFixedArtSize ? widget.posterHeight : null,
       aspectRatio: hasFixedArtSize ? null : aspect,
       decodeWidth: hasFixedArtSize ? widget.width : null,
+      overrideFit: BoxFit.cover,
       animateFade: widget.animateArtworkFade,
       borderRadius: radius,
       overlay: artOverlay,

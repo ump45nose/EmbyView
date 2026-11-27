@@ -2095,5 +2095,48 @@ void main() {
         await verifyHoverToggle(peopleShelf);
       },
     );
+
+    testWidgets(
+      'long detail overview shows expand trigger that opens full overview dialog, while short overview omits it',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 900);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final longOverview = List.filled(18, '这是一段很长的电影剧情介绍，用来验证超过两行时可以点击展开完整内容。').join();
+        final longDetail = MediaDetail(
+          card: _makeCard(id: 'mov_long', title: '长简介电影', overview: longOverview),
+          tagline: '漫长旅途的起点',
+        );
+        final shortDetail = MediaDetail(
+          card: _makeCard(id: 'mov_short', title: '短简介电影', overview: '简短介绍。'),
+        );
+
+        final data = _FakeDetailData(details: {'mov_long': longDetail, 'mov_short': shortDetail});
+        final h = _createHarness(data: data);
+        addTearDown(h.dispose);
+
+        await tester.pumpWidget(_wrapDetail(h, child: const EvDetailPage(itemId: 'mov_long', enableAnimations: false)));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const Key('ev_detail_overview_expand')), findsOneWidget);
+        await tester.tap(find.byKey(const Key('ev_detail_overview_expand')));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const Key('ev_detail_overview_dialog')), findsOneWidget);
+        expect(find.text(longOverview), findsWidgets);
+
+        await tester.tap(find.byKey(const Key('ev_detail_overview_dialog_close')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_detail_overview_dialog')), findsNothing);
+
+        await tester.pumpWidget(_wrapDetail(h, child: const EvDetailPage(itemId: 'mov_short', enableAnimations: false)));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('ev_detail_overview_expand')), findsNothing);
+      },
+    );
   });
 }
