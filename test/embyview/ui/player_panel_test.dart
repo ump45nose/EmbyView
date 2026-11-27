@@ -99,6 +99,7 @@ PlaybackSnapshot _snap({
   Duration position = const Duration(minutes: 6, seconds: 12),
   Duration? duration = const Duration(minutes: 24),
   String? selectedSubtitleId = 'emb',
+  String? secondarySubtitleId,
   String? subtitleOverlayId,
   String? selectedAudioId = 'ja',
   List<ChapterMark> chapters = const [],
@@ -112,7 +113,7 @@ PlaybackSnapshot _snap({
     target: PlayTarget(itemId: card.id, seriesId: card.seriesId, seasonId: card.seasonId, episodeNumber: card.episodeNumber),
     item: card, phase: PlaybackPhase.playing, position: position, duration: duration,
     chapters: chapters,
-    selectedSubtitleId: selectedSubtitleId, subtitleOverlayId: subtitleOverlayId, selectedAudioId: selectedAudioId,
+    selectedSubtitleId: selectedSubtitleId, secondarySubtitleId: secondarySubtitleId, subtitleOverlayId: subtitleOverlayId, selectedAudioId: selectedAudioId,
     subtitleTracks: subtitleTracks ?? const [
       PlaybackTrack(id: 'emb', name: '简体中文', language: 'zh', source: PlaybackTrackSource.embedded, format: 'ASS'),
       PlaybackTrack(id: 'en', name: 'English', language: 'en', source: PlaybackTrackSource.embedded, format: 'SRT'),
@@ -145,6 +146,50 @@ Widget _wrap({required Widget child, Size size = const Size(1440, 900), ThemeMod
 );
 
 void main() {
+  for (final mode in [ThemeMode.cinema, ThemeMode.paper]) {
+    testWidgets('secondary subtitle overlay controls in ${mode.name}', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      String? primary = 'emb', secondary;
+      const tracks = [
+        PlaybackTrack(id: 'emb', name: '中文', language: 'zh', source: PlaybackTrackSource.embedded, format: 'ass'),
+        PlaybackTrack(id: 'en', name: 'English', language: 'en', source: PlaybackTrackSource.embedded, format: 'srt', supportsSecondarySubtitle: true),
+        PlaybackTrack(id: 'nas', name: 'NAS.vtt', source: PlaybackTrackSource.nas, format: 'vtt', supportsSecondarySubtitle: true),
+        PlaybackTrack(id: 'pgs', name: 'PGS', source: PlaybackTrackSource.embedded, format: 'sup'),
+      ];
+      await tester.pumpWidget(_wrap(mode: mode, child: StatefulBuilder(builder: (_, update) =>
+        EvPlayerPanel(open: true, activeTab: 'subs',
+          snapshot: _snap(selectedSubtitleId: primary, secondarySubtitleId: secondary, subtitleTracks: tracks),
+          onSelectTab: (_) {}, onClose: () {},
+          onSelectSubtitle: (id) => update(() { primary = id; if (id == null || id == secondary) secondary = null; }),
+          onSelectSecondarySubtitle: (id) => update(() => secondary = id),
+          onSelectAudio: (_) {}, onSeek: (_) {}, onToggleAnime4k: () {}, onStartCompare: () {},
+        ),
+      )));
+      await tester.pumpAndSettle();
+      expect(find.text('主'), findsOneWidget);
+      expect(find.byKey(const Key('ev_sub_secondary_pgs')), findsNothing);
+      expect(find.byKey(const Key('ev_sub_secondary_emb')), findsNothing);
+      await tester.tap(find.byKey(const Key('ev_sub_secondary_en')));
+      await tester.pumpAndSettle();
+      expect(primary, 'emb');
+      expect(secondary, 'en');
+      expect(find.text('副'), findsOneWidget);
+      expect(find.text('取消叠加'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('ev_sub_secondary_nas')));
+      await tester.pumpAndSettle();
+      expect(secondary, 'nas');
+      await tester.tap(find.byKey(const Key('ev_sub_secondary_nas')));
+      await tester.pumpAndSettle();
+      expect(secondary, isNull);
+      await tester.tap(find.byKey(const Key('ev_sub_track_off')));
+      await tester.pumpAndSettle();
+      expect(primary, isNull);
+      expect(find.byKey(const Key('ev_sub_secondary_en')), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   group('C5.5 Online search, save/index status, and null subtitle service', () {
     testWidgets('searches 4 sources, filters chips, uses candidate, and retries failed NAS save', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1440, 900));

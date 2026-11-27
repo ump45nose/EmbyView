@@ -215,6 +215,7 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
             EmbyPlaySessionService(client),
             backend: native.backend,
             verifyExternalSubtitles: true,
+            restoreSecondarySubtitles: false,
             onAutomaticExternalSubtitleFailure: (error) async {
               await _active?._handleAutomaticExternalSubtitleFailure(error);
             },
@@ -308,6 +309,20 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   final _externalSubtitles = <_SessionSubtitle>[];
   final _indexedExternalIds = <String, int>{};
   int? _selectedExternal;
+  String? _secondaryStreamId;
+  int? _secondaryExternalIndex;
+  String? get _secondaryId => _secondaryExternalIndex != null
+      ? _visibleExternalId(_secondaryExternalIndex!)
+      : _secondaryStreamId;
+
+  void _resetSecondarySelection() {
+    _secondaryStreamId = null;
+    _secondaryExternalIndex = null;
+  }
+
+  bool _isSecondaryText(String? codec) =>
+      const {'srt', 'subrip', 'vtt', 'webvtt'}.contains(codec?.trim().toLowerCase());
+
   int? _pendingExternal;
   String? _liveSubtitleId, _previousSubtitleId;
   bool _wantsLiveSubtitle = false, _liveRendererReady = false;
@@ -519,6 +534,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       _engineOpen = null;
       _native = const NativePlaybackSnapshot();
       _acceptNativeEvents = false;
+      _resetSecondarySelection();
       _externalSubtitles.clear();
       ++_subtitleMediaEpoch;
       _indexedExternalIds.clear();
@@ -562,6 +578,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         _subtitleSource?.target.itemId == _target.itemId;
     _reopenedWithoutSubtitles = reopensForSubtitle && disablesSubtitles;
     _clearLiveSubtitle();
+    _resetSecondarySelection();
     _native = NativePlaybackSnapshot(sourceGeneration: generation);
     _acceptNativeEvents = true;
     if (_subtitleSource?.mediaSourceId != result.mediaSourceId) {
@@ -837,9 +854,11 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
               language: _externalSubtitles[i].language,
               source: _externalSubtitles[i].source,
               format: _externalSubtitles[i].codec,
+              supportsSecondarySubtitle: _isSecondaryText(_externalSubtitles[i].codec),
             ),
       ],
       selectedAudioId: trackId(_manager.audioStreamIndex),
+      secondarySubtitleId: _secondaryId,
       subtitleOverlayId: _wantsLiveSubtitle && _liveRendererReady ? _liveSubtitleId : null,
       subtitleSelectionNotice: _subtitleSelectionNotice,
       selectedSubtitleId: _wantsLiveSubtitle
@@ -879,6 +898,11 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
           layout: stream['ChannelLayout'] as String?,
           isForced: stream['IsForced'] == true,
           qualifiers: type == 'Subtitle' ? embySubtitleQualifiers(stream) : const [],
+          supportsSecondarySubtitle: type == 'Subtitle' &&
+              (_manager.canUseAsSecondarySubtitle((stream['Index'] as num).toInt()) ||
+              _externalSubtitles.any((track) =>
+                  _indexedExternalIds[track.contentKey] == (stream['Index'] as num).toInt() &&
+                  _isSecondaryText(track.codec))),
           source: stream['IsExternal'] == true
               ? PlaybackTrackSource.embyExternal
               : PlaybackTrackSource.embedded,
@@ -1095,6 +1119,64 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     }
   }
 
+  int? _retainedSubtitleIndex(String id) {
+    for (var index = 0; index < _externalSubtitles.length; index++) {
+      if (_visibleExternalId(index) == id || _externalId(index) == id) return index;
+    }
+    return null;
+  }
+
+  Future<void> _clearSecondarySubtitle(int generation) async {
+    if (_secondaryId == null) return;
+    _checkSubtitleGeneration(generation);
+    await _owner.native.backend.setSecondarySubtitle();
+    _checkSubtitleGeneration(generation);
+    _resetSecondarySelection();
+    _emit();
+  }
+
+  @override
+  Future<void> selectSecondarySubtitle(String? trackId) {
+    final generation = _snapshot.generation;
+    return _subtitleOperation(() async {
+      _checkSubtitleGeneration(generation);
+      if (trackId == null || trackId == _snapshot.selectedSubtitleId) {
+        await _clearSecondarySubtitle(generation);
+        return;
+      }
+      if (_manager.bringupState.phase.isInProgress) {
+        throw const EmbyViewFailure('请稍候，正在打开影片。', retryable: true);
+      }
+      if (_wantsLiveSubtitle || _snapshot.selectedSubtitleId == null) {
+        throw const EmbyViewFailure('请先选择普通主字幕，再叠加副字幕。');
+      }
+      final track = _snapshot.subtitleTracks.where((t) => t.id == trackId).firstOrNull;
+      if (track == null || !track.supportsSecondarySubtitle) {
+        throw const EmbyViewFailure('仅支持叠加 SRT / VTT 文本字幕。');
+      }
+      final retained = _retainedSubtitleIndex(trackId);
+      if (retained != null) {
+        final subtitle = _externalSubtitles[retained];
+        await _owner.native.backend.setSecondarySubtitle(
+          url: subtitle.url, codec: subtitle.codec, language: subtitle.language,
+        );
+      } else {
+        final delivery = _manager.secondarySubtitleDelivery(_trackIndex(trackId));
+        if (delivery == null) {
+          throw const EmbyViewFailure('此字幕暂不可叠加。', retryable: true);
+        }
+        await _owner.native.backend.setSecondarySubtitle(
+          embeddedTrackId: delivery.embeddedTrackId, url: delivery.url,
+          codec: delivery.codec, language: delivery.language,
+        );
+      }
+      _checkSubtitleGeneration(generation);
+      _secondaryExternalIndex = retained;
+      _secondaryStreamId = retained == null ? trackId : null;
+      _emit();
+    });
+  }
+
   @override
   Future<void> selectSubtitle(String? trackId) async {
     final generation = _snapshot.generation, mediaEpoch = _subtitleMediaEpoch;
@@ -1132,6 +1214,12 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
           if (rendererId != null) rendererId = '$targetGeneration:${rendererId.split(':').last}';
           if (live && _liveSubtitleId == null) _liveSubtitleId = trackId;
           _wantsLiveSubtitle = live;
+        }
+        if (!current()) return;
+        final retained = rendererId == null ? null : _retainedSubtitleIndex(rendererId);
+        final canonicalId = retained == null ? rendererId : _visibleExternalId(retained);
+        if (canonicalId == null || canonicalId == _secondaryId) {
+          await _clearSecondarySubtitle(targetGeneration);
         }
         if (!current()) return;
         await _selectNativeSubtitle(rendererId, targetGeneration, current);
@@ -1342,6 +1430,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     _lastSourceRemote = false;
     _firstFrame = null;
     _acceptNativeEvents = false;
+    _resetSecondarySelection();
     _intent
       ..reset()
       ..start();
@@ -1419,7 +1508,17 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     // finish during a restoration RPC; its eventual selection is then
     // published directly under the surviving Emby ID.
     _indexedExternalIds[contentKey] = index;
-    if (_externalSubtitles.any((track) => track.contentKey == contentKey)) _emit();
+    if (_externalSubtitles.any((track) => track.contentKey == contentKey)) {
+      _emit();
+      if (_secondaryId != null && _secondaryId == _snapshot.selectedSubtitleId) {
+        await _subtitleOperation(() async {
+          _checkSubtitleGeneration(generation);
+          if (_secondaryId != null && _secondaryId == _snapshot.selectedSubtitleId) {
+            await _clearSecondarySubtitle(generation);
+          }
+        });
+      }
+    }
   }
 
   Future<T> _subtitleOperation<T>(Future<T> Function() action) {

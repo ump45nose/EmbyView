@@ -191,6 +191,7 @@ class EvPlayerPanel extends StatefulWidget {
     super.key, required this.open, required this.activeTab, required this.snapshot,
     this.subtitleSnapshot, this.subtitlePanel, this.subtitles, this.initialLowerTab,
     required this.onSelectTab, required this.onClose, required this.onSelectSubtitle,
+    this.onSelectSecondarySubtitle,
     required this.onSelectAudio, required this.onSeek, required this.onToggleAnime4k,
     required this.onStartCompare, this.onToast,
   });
@@ -204,6 +205,7 @@ class EvPlayerPanel extends StatefulWidget {
   final String? initialLowerTab;
   final ValueChanged<String> onSelectTab, onSelectAudio;
   final ValueChanged<String?> onSelectSubtitle;
+  final ValueChanged<String?>? onSelectSecondarySubtitle;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onClose, onToggleAnime4k, onStartCompare;
   final void Function(String message, {EvIconData? icon})? onToast;
@@ -302,7 +304,7 @@ class _EvPlayerPanelState extends State<EvPlayerPanel> {
       _ => EvSubtitleTab(
           snapshot: widget.snapshot, subtitleSnapshot: widget.subtitleSnapshot, subtitlePanel: widget.subtitlePanel,
           subtitles: widget.subtitles, initialLowerTab: widget.initialLowerTab,
-          onSelectSubtitle: widget.onSelectSubtitle, onSeek: widget.onSeek, onToast: widget.onToast,
+          onSelectSubtitle: widget.onSelectSubtitle, onSelectSecondarySubtitle: widget.onSelectSecondarySubtitle, onSeek: widget.onSeek, onToast: widget.onToast,
         ),
     };
 

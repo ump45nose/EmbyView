@@ -66,6 +66,7 @@ class _TestSession implements PlaybackSession {
   @override Future<void> setMuted(bool muted) async { muteCalls.add(muted); emit(_copy(muted: muted)); }
   @override Future<void> selectAudio(String trackId) async => emit(_copy(selectedAudioId: trackId));
   @override Future<void> selectSubtitle(String? trackId) async => emit(_copy(selectedSubtitleId: trackId, clearSub: trackId == null));
+  @override Future<void> selectSecondarySubtitle(String? trackId) async => emit(_copy(secondarySubtitleId: trackId, clearSecondary: trackId == null));
   @override Future<void> setAnime4k(bool enabled) async => anime4kCalls.add(enabled);
   @override Future<void> setAnime4kComparison(double? split) async => compareSplits.add(split);
   @override Future<void> setPictureInPicture(bool enabled) async => emit(_copy(pip: enabled));
@@ -85,6 +86,8 @@ class _TestSession implements PlaybackSession {
     String? selectedAudioId,
     String? selectedSubtitleId,
     bool clearSub = false,
+    String? secondarySubtitleId,
+    bool clearSecondary = false,
     ({int revision, String message})? subtitleSelectionNotice,
     bool? pip,
     bool? fullscreen,
@@ -105,6 +108,7 @@ class _TestSession implements PlaybackSession {
     subtitleTracks: _snapshot.subtitleTracks,
     selectedAudioId: selectedAudioId ?? _snapshot.selectedAudioId,
     selectedSubtitleId: clearSub ? null : (selectedSubtitleId ?? _snapshot.selectedSubtitleId),
+    secondarySubtitleId: clearSecondary ? null : (secondarySubtitleId ?? _snapshot.secondarySubtitleId),
     subtitleSelectionNotice: subtitleSelectionNotice,
     volume: volume ?? _snapshot.volume,
     muted: muted ?? _snapshot.muted,
@@ -286,6 +290,34 @@ void main() {
     expect(EvPlayer.isOpening, isFalse);
   });
 
+  testWidgets('player panel dispatches sidecar overlay selection and clearing to playback session', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final session = _TestSession(const PlaybackSnapshot(
+      generation: 1, target: PlayTarget(itemId: 'movie'), phase: PlaybackPhase.playing,
+      selectedSubtitleId: 'primary',
+      subtitleTracks: [
+        PlaybackTrack(id: 'primary', name: '中文', source: PlaybackTrackSource.embedded, format: 'ass'),
+        PlaybackTrack(id: 'secondary', name: 'English', source: PlaybackTrackSource.nas, format: 'srt', supportsSecondarySubtitle: true),
+      ],
+    ));
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(1440, 900), devicePixelRatio: 1),
+      child: Directionality(textDirection: TextDirection.ltr,
+        child: EvThemeScope(themeMode: ThemeMode.cinema,
+          child: EvPlayerPage(session: session, initialPanelOpen: true))),
+    ));
+    await tester.pumpAndSettle();
+    final button = find.byKey(const Key('ev_sub_secondary_secondary'));
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(session.snapshot.selectedSubtitleId, 'primary');
+    expect(session.snapshot.secondarySubtitleId, 'secondary');
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(session.snapshot.secondarySubtitleId, isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('subtitle failure uses the existing toast once on the active playback', (tester) async {
     final session = _TestSession(_initialSnap()._withPhase(PlaybackPhase.playing));

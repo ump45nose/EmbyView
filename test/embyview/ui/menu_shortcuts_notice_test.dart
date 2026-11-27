@@ -263,6 +263,9 @@ class _FakePlaybackSession implements PlaybackSession {
   Future<void> selectSubtitle(String? trackId) async {}
 
   @override
+  Future<void> selectSecondarySubtitle(String? trackId) async {}
+
+  @override
   Future<void> selectAudio(String trackId) async {}
 
   @override

@@ -880,6 +880,19 @@ class PlaybackManager implements AudioOwnable {
         (_secondarySubtitleUrlForStream(streamIndex)?.isNotEmpty ?? false);
   }
 
+  /// Read-only delivery resolution for clients that own subtitle selection
+  /// state themselves (including locally registered sidecars).
+  ({int? embeddedTrackId, String? url, String? codec, String? language})?
+      secondarySubtitleDelivery(int streamIndex) {
+    if (!canUseAsSecondarySubtitle(streamIndex)) return null;
+    return (
+      embeddedTrackId: _secondaryEmbeddedTrackId(streamIndex),
+      url: _secondarySubtitleUrlForStream(streamIndex),
+      codec: _subtitleCodecForStream(streamIndex),
+      language: _subtitleLanguageForStream(streamIndex),
+    );
+  }
+
   int? get subtitleStreamIndex {
     if (_subtitleStreamIndex != null) {
       return _subtitleStreamIndex;
@@ -1357,7 +1370,12 @@ class PlaybackManager implements AudioOwnable {
   /// launcher's resolver configurator available when that facade is disposed.
   void Function() bindPlaybackSource(MediaStreamResolver resolver, PlayerService service,
       {PlayerBackend? backend, bool verifyExternalSubtitles = false,
+      bool restoreSecondarySubtitles = true,
       Future<void> Function(Object error)? onAutomaticExternalSubtitleFailure}) {
+    final previousSecondarySelector = secondarySubtitleTrackSelector;
+    if (!restoreSecondarySubtitles) {
+      secondarySubtitleTrackSelector = (_, _) => -1;
+    }
     final previousVerification = _verifyExternalSubtitles;
     final previousAutomaticFailure = _automaticExternalSubtitleFailure;
     _verifyExternalSubtitles = verifyExternalSubtitles;
@@ -1378,6 +1396,9 @@ class PlaybackManager implements AudioOwnable {
     }
     return () {
       if (!identical(_resolverConfigurator, configure)) return;
+      if (!restoreSecondarySubtitles) {
+        secondarySubtitleTrackSelector = previousSecondarySelector;
+      }
       _verifyExternalSubtitles = previousVerification;
       _automaticExternalSubtitleFailure = previousAutomaticFailure;
       _resolver = previousResolver; _service = previousService;

@@ -215,7 +215,9 @@ class AetherBackend
   Future<T?> invokeAppleSecondaryControl<T>(
     String method, [
     dynamic arguments,
-  ]) => _invoke<T>(method, arguments);
+  ]) => _nativeSourceGeneration > 0
+      ? invokeNativeControl<T>(method, arguments)
+      : _invoke<T>(method, arguments);
 
   @override
   bool get isSubtitleLoading => _isSubtitleLoading;

@@ -19,7 +19,7 @@ const _kTabular = [FontFeature.tabularFigures()];
 class EvSubtitleTab extends StatefulWidget {
   const EvSubtitleTab({
     super.key, required this.snapshot, this.subtitleSnapshot, this.subtitlePanel,
-    this.subtitles, this.initialLowerTab, required this.onSelectSubtitle, required this.onSeek, this.onToast,
+    this.subtitles, this.initialLowerTab, required this.onSelectSubtitle, this.onSelectSecondarySubtitle, required this.onSeek, this.onToast,
   });
 
   final PlaybackSnapshot snapshot;
@@ -28,6 +28,7 @@ class EvSubtitleTab extends StatefulWidget {
   final EmbyViewSubtitles? subtitles;
   final String? initialLowerTab;
   final ValueChanged<String?> onSelectSubtitle;
+  final ValueChanged<String?>? onSelectSecondarySubtitle;
   final ValueChanged<Duration> onSeek;
   final void Function(String message, {EvIconData? icon})? onToast;
 
@@ -312,6 +313,13 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
   Widget _buildTrackList(EvTheme t, EvScale s, EvPanelPalette pal) {
     final stateById = {for (final st in widget.subtitleSnapshot?.tracks ?? const <SubtitleTrackState>[]) st.trackId: st};
     final selectedId = widget.snapshot.selectedSubtitleId, seen = <String>{};
+    final secondaryId = widget.snapshot.secondarySubtitleId;
+    final primary = widget.snapshot.subtitleTracks.where((track) => track.id == selectedId).firstOrNull;
+    final canOverlay = widget.onSelectSecondarySubtitle != null &&
+        widget.snapshot.phase != PlaybackPhase.preparing && widget.snapshot.phase != PlaybackPhase.opening &&
+        primary != null && widget.snapshot.subtitleOverlayId == null &&
+        (primary.source != PlaybackTrackSource.ai || primary.format != null);
+    final showRoles = canOverlay && widget.snapshot.subtitleTracks.any((track) => track.supportsSecondarySubtitle);
     final rows = <Widget>[
       EvPanelTrackRow(key: const Key('ev_sub_track_off'), badge: _trackBadge(t, s, pal, text: '—'), title: '关闭字幕', selected: selectedId == null, onTap: () => widget.onSelectSubtitle(null)),
     ];
@@ -326,11 +334,28 @@ class _EvSubtitleTabState extends State<EvSubtitleTab> with TickerProviderStateM
       final format = codec == 'sup' ? 'PGS' : codec.toUpperCase();
       final title = isAi || isNas ? name : language.title;
       final qualifiers = {if (track.isForced) '强制', ...track.qualifiers};
+      final isSecondary = secondaryId == id;
       final meta = [_sourceShort(src), if (format.isNotEmpty) format, ...qualifiers, if (st != null && _saveLabel(st.save).isNotEmpty) _saveLabel(st.save), if (st != null && _indexLabel(st.index).isNotEmpty) _indexLabel(st.index)].join(' · ');
+      final retry = st?.save == SubtitleSaveState.failed && widget.subtitlePanel != null
+          ? _retryChip(t, s, pal, Key('ev_sub_retry_$id'), id) : null;
+      final action = isSecondary || (canOverlay && track.supportsSecondarySubtitle && selectedId != id);
       rows.add(EvPanelTrackRow(
         key: Key('ev_sub_track_$id'), selected: selectedId == id, title: title, subtitle: meta, onTap: () => widget.onSelectSubtitle(id),
         badge: _trackBadge(t, s, pal, isAi: isAi, isNas: isNas, text: language.badge),
-        trailingAction: st?.save == SubtitleSaveState.failed && widget.subtitlePanel != null ? _retryChip(t, s, pal, Key('ev_sub_retry_$id'), id) : null,
+        trailingAction: retry == null && !action && !(showRoles && selectedId == id) ? null : Row(mainAxisSize: MainAxisSize.min, spacing: s.rem(0.25), children: [
+          if (isSecondary || (showRoles && selectedId == id))
+            Text(isSecondary ? '副' : '主', style: t.bodyStyle(s.rem(0.8125), fontWeight: FontWeight.w600, color: pal.checkColor)),
+          ?retry,
+          if (action && widget.onSelectSecondarySubtitle != null)
+            evPanelTap(
+              key: Key('ev_sub_secondary_$id'),
+              onTap: () => widget.onSelectSecondarySubtitle!(isSecondary ? null : id),
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: s.rem(0.375), vertical: s.rem(0.5)),
+                child: Text(isSecondary ? '取消叠加' : '叠加', style: t.bodyStyle(s.rem(0.8125), color: pal.ink)),
+              ),
+            ),
+        ]),
       ));
     }
 

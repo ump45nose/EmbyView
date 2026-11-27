@@ -74,6 +74,19 @@ void main() {
       expect(calls.last.method, 'loadExternalSubtitle');
       expect(calls.last.arguments['sourceGeneration'], 17);
       expect(calls.last.arguments['url'], 'file:///good.srt');
+      final sourceCalls = calls.where((call) => call.method == 'setSource').length;
+      final primaryTrack = backend.activeSubtitleTrackIndex;
+      await backend.setSecondarySubtitle(embeddedTrackId: 2);
+      expect(calls.last.method, 'setSecondarySubtitle');
+      expect(calls.last.arguments, {'embeddedTrackId': 2, 'url': null});
+      await backend.setSecondarySubtitle(url: 'file:///secondary.srt');
+      expect(calls.last.arguments, {'embeddedTrackId': null, 'url': 'file:///secondary.srt'});
+      await backend.setSecondarySubtitle(url: 'http://127.0.0.1/secondary.vtt');
+      expect(calls.last.arguments, {'embeddedTrackId': null, 'url': 'http://127.0.0.1/secondary.vtt'});
+      await backend.setSecondarySubtitle();
+      expect(calls.last.arguments, {'embeddedTrackId': null, 'url': null});
+      expect(calls.where((call) => call.method == 'setSource'), hasLength(sourceCalls));
+      expect(backend.activeSubtitleTrackIndex, primaryTrack);
     } finally {
       await native.dispose();
       backend.dispose();

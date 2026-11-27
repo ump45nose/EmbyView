@@ -293,16 +293,16 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     });
   }
 
-  Future<void> _selectTrack(String? id, {bool audio = false}) async {
+  Future<void> _selectTrack(String? id, {bool audio = false, bool secondary = false}) async {
     final session = widget.session, generation = _snap.generation, selection = ++_trackSelection;
     try {
-      await (audio ? session.selectAudio(id!) : session.selectSubtitle(id));
+      await (audio ? session.selectAudio(id!) : secondary ? session.selectSecondarySubtitle(id) : session.selectSubtitle(id));
     } catch (error) {
       // Receipt failures are also emitted for automatic selections, so the
       // playback snapshot owns this toast rather than each individual button.
       if (error is EmbyViewFailure && error.code == 'subtitleLoadFailed') return;
       if (mounted && selection == _trackSelection && identical(widget.session, session) && session.snapshot.generation == generation) {
-        _showToast(error is EmbyViewFailure ? error.reason : audio ? '无法切换音轨，请重试。' : '无法切换字幕，请重试。');
+        _showToast(error is EmbyViewFailure ? error.reason : audio ? '无法切换音轨，请重试。' : secondary ? '无法切换副字幕，请重试。' : '无法切换字幕，请重试。');
       }
     }
   }
@@ -533,7 +533,8 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
               open: _panelOpen && !creditsActive, activeTab: _panelTab, snapshot: _snap, subtitleSnapshot: _activeSubSnap,
               subtitlePanel: _subtitlePanel, subtitles: _resolvedSubtitles, initialLowerTab: widget.initialLowerTab,
               onSelectTab: (tab) => setState(() => _panelTab = tab), onClose: _closePanel,
-              onSelectSubtitle: (id) => unawaited(_selectTrack(id)), onSelectAudio: (id) => unawaited(_selectTrack(id, audio: true)),
+              onSelectSubtitle: (id) => unawaited(_selectTrack(id)),
+              onSelectSecondarySubtitle: (id) => unawaited(_selectTrack(id, secondary: true)), onSelectAudio: (id) => unawaited(_selectTrack(id, audio: true)),
               onSeek: (p) => unawaited(widget.session.seek(p)), onToggleAnime4k: () => unawaited(widget.session.setAnime4k(!_snap.anime4k.requested)),
               onStartCompare: () => _startCompare(persistent: true), onToast: _showToast,
             ),

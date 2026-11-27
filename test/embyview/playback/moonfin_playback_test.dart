@@ -28,6 +28,13 @@ class _Backend extends PlayerBackend implements AetherBackend {
   final starts = <Duration>[];
   final seeks = <Duration>[];
   final subtitlePicks = <(int, String?)>[];
+  final secondaryPicks = <(int?, String?)>[];
+  final secondaryOpenSelections = <Object?>[];
+  @override
+  Future<void> setSecondarySubtitle({String? url, String? codec, String? language, int? embeddedTrackId}) async {
+    secondaryPicks.add((embeddedTrackId, url));
+  }
+
   int? refusedExternal;
   @override
   Future<void> seekTo(Duration position) async { seeks.add(position); at = position; }
@@ -92,6 +99,7 @@ class _Backend extends PlayerBackend implements AetherBackend {
   @override
   Future<void> play(dynamic item, {Duration startPosition = Duration.zero}) async {
     urls.add(item['url'] as String);
+    secondaryOpenSelections.add(item['secondarySubtitleTrackId'] ?? item['secondarySubtitleUrl']);
     starts.add(startPosition);
     if (failOpen) throw TimeoutException('opening');
     if (opening?.isCompleted == false) opening!.complete();
@@ -177,6 +185,11 @@ class _Audio extends Fake implements NativePlaybackAudioInput {
 class _Items extends Fake implements ItemsApi {
   Completer<Map<String, dynamic>>? gate;
   final metadata = <String, Map<String, dynamic>>{};
+  List<Map<String, dynamic>> episodes = [];
+  @override
+  Future<Map<String, dynamic>> getEpisodes(String seriesId, {String? seasonId, String? fields}) async =>
+      {'Items': episodes};
+
   int reads = 0;
   @override
   Future<Map<String, dynamic>> getItem(String id, {String? mediaSourceId, String? fields}) async {
@@ -303,6 +316,96 @@ class _OriginalResolver extends MediaStreamResolver {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('secondary text subtitles overlay without reopening, dedupe and clear on off, AI and next episode', () async {
+    final backend = _Backend(), client = _Client();
+    final manager = PlaybackManager()
+      ..setBackend(backend)
+      ..secondarySubtitleTrackSelector = (_, _) => 3;
+    final native = _Native(backend);
+    client.playbackApi.subtitles = [
+      {'Type': 'Subtitle', 'Index': 2, 'Codec': 'ass', 'Language': 'zh'},
+      {'Type': 'Subtitle', 'Index': 3, 'Codec': 'subrip', 'Language': 'eng'},
+      {'Type': 'Subtitle', 'Index': 4, 'Codec': 'webvtt', 'Language': 'jpn'},
+      {'Type': 'Subtitle', 'Index': 5, 'Codec': 'pgssub'},
+      {'Type': 'Subtitle', 'Index': 6, 'Codec': 'srt', 'IsExternal': true,
+        'DeliveryMethod': 'External', 'DeliveryUrl': '/Videos/movie/source/Subtitles/6/Stream.srt'},
+    ];
+    client.itemsApi.episodes = [
+      {'Id': 'movie', 'Type': 'Episode', 'SeriesId': 'series', 'Name': 'First'},
+      {'Id': 'next', 'Type': 'Episode', 'SeriesId': 'series', 'Name': 'Second'},
+    ];
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager, client: client, native: native, audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(request: (_, _) async =>
+          RedirectReply(302, Uri.parse('https://cdn.115.com/file'))),
+    );
+    addTearDown(() async { await adapter.dispose(); await native.events.close(); manager.dispose(); });
+    final session = adapter.open(const PlayTarget(itemId: 'movie', seriesId: 'series'));
+    await pumpEventQueue(times: 30);
+    final generation = session.snapshot.generation;
+    final primary = '$generation:2', english = '$generation:3', japanese = '$generation:4';
+    final pgs = '$generation:5', embyExternal = '$generation:6';
+    final input = session as PlaybackSubtitleInput;
+    final nas = await input.registerExternalSubtitle('file:///nas.srt', generation: generation,
+        codec: 'srt', source: PlaybackTrackSource.nas);
+    final online = await input.registerExternalSubtitle('file:///online.vtt', generation: generation,
+        codec: 'vtt', source: PlaybackTrackSource.online);
+
+    await session.selectSubtitle(primary);
+    expect(session.snapshot.subtitleTracks.where((track) => track.supportsSecondarySubtitle).map((track) => track.id),
+        unorderedEquals([english, japanese, embyExternal, nas, online]));
+    await expectLater(session.selectSecondarySubtitle(pgs), throwsA(isA<EmbyViewFailure>()));
+    await session.selectSecondarySubtitle(english);
+    expect(backend.secondaryPicks.last.$1, 2);
+    expect(session.snapshot.secondarySubtitleId, english);
+    expect(session.snapshot.selectedSubtitleId, primary);
+
+    await session.selectSubtitle(japanese);
+    expect(session.snapshot.secondarySubtitleId, english);
+    await expectLater(session.selectSecondarySubtitle(primary), throwsA(isA<EmbyViewFailure>()));
+    await session.selectSubtitle(nas);
+    expect(session.snapshot.secondarySubtitleId, english);
+    await session.selectSubtitle(english);
+    expect(session.snapshot.secondarySubtitleId, isNull);
+    expect(backend.secondaryPicks.last, (null, null));
+
+    await session.selectSecondarySubtitle(nas);
+    expect(backend.secondaryPicks.last, (null, 'file:///nas.srt'));
+    await session.selectSecondarySubtitle(online);
+    expect(backend.secondaryPicks.last, (null, 'file:///online.vtt'));
+    await session.selectSecondarySubtitle(embyExternal);
+    expect(backend.secondaryPicks.last.$1, isNull);
+    expect(backend.secondaryPicks.last.$2, contains('/Subtitles/6/Stream.srt'));
+    await session.selectSecondarySubtitle(null);
+    expect(session.snapshot.secondarySubtitleId, isNull);
+
+    await session.selectSecondarySubtitle(nas);
+    await session.selectSecondarySubtitle(english);
+    expect(session.snapshot.secondarySubtitleId, isNull);
+    await session.selectSecondarySubtitle(nas);
+    await session.selectSubtitle(null);
+    expect(session.snapshot.secondarySubtitleId, isNull);
+    await expectLater(session.selectSecondarySubtitle(nas), throwsA(isA<EmbyViewFailure>()));
+
+    await session.selectSubtitle(primary);
+    await session.selectSecondarySubtitle(nas);
+    await input.setLiveSubtitle('live', generation: generation, select: true);
+    expect(session.snapshot.secondarySubtitleId, isNull);
+    expect(session.snapshot.subtitleOverlayId, 'live');
+    await expectLater(session.selectSecondarySubtitle(nas), throwsA(isA<EmbyViewFailure>()));
+    await session.selectSubtitle(primary);
+    await session.selectSecondarySubtitle(english);
+    expect(backend.urls, hasLength(1));
+    expect(session.snapshot.generation, generation);
+
+    await session.playNext();
+    await pumpEventQueue(times: 30);
+    expect(session.snapshot.target.itemId, 'next');
+    expect(session.snapshot.generation, isNot(generation));
+    expect(session.snapshot.secondarySubtitleId, isNull);
+    expect(backend.secondaryOpenSelections, [null, null]);
+    await expectLater(session.selectSecondarySubtitle(english), throwsA(isA<EmbyViewFailure>()));
+  });
   test('receipt failure restores the previous sidecar and ignores a retired request', () async {
     final backend = _Backend(), client = _Client();
     final manager = PlaybackManager()..setBackend(backend);

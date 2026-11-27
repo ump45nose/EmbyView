@@ -33,6 +33,7 @@ class PlaybackTrack {
     this.layout,
     this.isForced = false,
     this.qualifiers = const [],
+    this.supportsSecondarySubtitle = false,
   });
 
   final String id;
@@ -42,6 +43,7 @@ class PlaybackTrack {
   final String? format;
   final String? layout;
   final bool isForced;
+  final bool supportsSecondarySubtitle;
 
   /// Display labels for subtitle variants reported by the server.
   final List<String> qualifiers;
@@ -93,6 +95,7 @@ class PlaybackSnapshot {
     this.subtitleTracks = const [],
     this.selectedAudioId,
     this.selectedSubtitleId,
+    this.secondarySubtitleId,
     this.subtitleOverlayId,
     this.subtitleSelectionNotice,
     this.volume = 1,
@@ -126,6 +129,7 @@ class PlaybackSnapshot {
   final List<PlaybackTrack> subtitleTracks;
   final String? selectedAudioId;
   final String? selectedSubtitleId;
+  final String? secondarySubtitleId;
 
   /// The live track allowed to draw over video after native captions are off.
   final String? subtitleOverlayId;
@@ -189,6 +193,13 @@ abstract interface class PlaybackSession {
 
   /// Select an available subtitle track, or turn subtitles off with null.
   Future<void> selectSubtitle(String? trackId);
+
+  /// Overlay a supported text track alongside the primary subtitle, or clear it.
+  Future<void> selectSecondarySubtitle(String? trackId) async {
+    if (trackId != null) {
+      throw const EmbyViewFailure('当前播放会话不支持副字幕。');
+    }
+  }
   Future<void> setAnime4k(bool enabled);
   Future<void> setAnime4kComparison(double? split);
   Future<void> setPictureInPicture(bool enabled);
