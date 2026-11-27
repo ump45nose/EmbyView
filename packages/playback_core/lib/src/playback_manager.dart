@@ -278,6 +278,7 @@ class PlaybackManager implements AudioOwnable {
   int _subtitleDelaySessionId = 0;
   Future<void>? _externalSubsLoaded;
   bool _verifyExternalSubtitles = false;
+  Future<void> Function(Object error)? _automaticExternalSubtitleFailure;
   final _mountedExternalSubtitles = <int, ({int ordinal, String url})>{};
   _TrackReopenSeek? _trackReopenSeek;
   int _seekRevision = 0;
@@ -1354,9 +1355,12 @@ class PlaybackManager implements AudioOwnable {
   /// Temporarily binds a user-scoped facade while keeping the original
   /// launcher's resolver configurator available when that facade is disposed.
   void Function() bindPlaybackSource(MediaStreamResolver resolver, PlayerService service,
-      {PlayerBackend? backend, bool verifyExternalSubtitles = false}) {
+      {PlayerBackend? backend, bool verifyExternalSubtitles = false,
+      Future<void> Function(Object error)? onAutomaticExternalSubtitleFailure}) {
     final previousVerification = _verifyExternalSubtitles;
+    final previousAutomaticFailure = _automaticExternalSubtitleFailure;
     _verifyExternalSubtitles = verifyExternalSubtitles;
+    _automaticExternalSubtitleFailure = onAutomaticExternalSubtitleFailure;
     final previousResolver = _resolver;
     final previousService = _service;
     final previousConfigurator = _resolverConfigurator;
@@ -1374,6 +1378,7 @@ class PlaybackManager implements AudioOwnable {
     return () {
       if (!identical(_resolverConfigurator, configure)) return;
       _verifyExternalSubtitles = previousVerification;
+      _automaticExternalSubtitleFailure = previousAutomaticFailure;
       _resolver = previousResolver; _service = previousService;
       _resolverConfigurator = previousConfigurator;
       sourceFailureRecovery = previousRecovery;
@@ -5717,17 +5722,7 @@ class PlaybackManager implements AudioOwnable {
         if (sessionToken != _playbackSessionToken) return;
         final mpvId = _mpvTrackIdForStream(_subtitleStreamIndex!, 'Subtitle');
         if (mpvId != null) {
-          await _backend?.setSubtitleTrack(
-            mpvId,
-            isBitmapSubtitle: isBitmap,
-            subtitleCodec: _subtitleCodecForStream(_subtitleStreamIndex!),
-            isExternalSubtitle: _isSubtitleDeliveredExternally(
-              _subtitleStreamIndex!,
-            ),
-            externalSubtitleUrl: _externalSubtitleUrlForStream(
-              _subtitleStreamIndex!,
-            ),
-          );
+          await _setAutomaticSubtitleTrack(sessionToken, _subtitleStreamIndex!, mpvId, isBitmap);
           if (sessionToken != _playbackSessionToken) return;
         }
       }
@@ -5799,13 +5794,28 @@ class PlaybackManager implements AudioOwnable {
     if (mpvId == null) return;
     await _applySubtitleRendererModeForStream(streamIndex);
     if (sessionToken != _playbackSessionToken) return;
-    await _backend?.setSubtitleTrack(
-      mpvId,
-      isBitmapSubtitle: _isSubtitleBitmap(streamIndex),
-      subtitleCodec: _subtitleCodecForStream(streamIndex),
-      isExternalSubtitle: true,
-      externalSubtitleUrl: _externalSubtitleUrlForStream(streamIndex),
-    );
+    await _setAutomaticSubtitleTrack(sessionToken, streamIndex, mpvId, _isSubtitleBitmap(streamIndex));
+  }
+
+  // A receipt-aware host can recover automatic selections without an
+  // unhandled error escaping this background task or failing media playback.
+  Future<void> _setAutomaticSubtitleTrack(int token, int streamIndex, int ordinal, bool bitmap) async {
+    final external = _isSubtitleDeliveredExternally(streamIndex);
+    try {
+      await _backend?.setSubtitleTrack(
+        ordinal,
+        isBitmapSubtitle: bitmap,
+        subtitleCodec: _subtitleCodecForStream(streamIndex),
+        isExternalSubtitle: external,
+        externalSubtitleUrl: _externalSubtitleUrlForStream(streamIndex),
+      );
+    } catch (error) {
+      final recover = _automaticExternalSubtitleFailure;
+      if (!external || recover == null) rethrow;
+      if (token == _playbackSessionToken && _subtitleStreamIndex == streamIndex) {
+        await recover(error);
+      }
+    }
   }
 
   void _waitAndAddExternalSubtitles(

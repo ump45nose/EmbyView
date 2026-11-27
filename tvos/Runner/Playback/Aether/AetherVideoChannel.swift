@@ -70,7 +70,7 @@ final class AetherVideoChannel: NSObject, FlutterStreamHandler {
                 return
             }
             #if os(macOS)
-            if ["setAnime4k", "setAnime4kComparison", "setPictureInPicture", "loadExternalSubtitle"].contains(call.method) {
+            if ["setAnime4k", "setAnime4kComparison", "setPictureInPicture", "loadExternalSubtitle", "cancelExternalSubtitleSelection"].contains(call.method) {
                 Task { @MainActor in
                     guard let self else { result(nil); return }
                     let args = call.arguments as? [String: Any] ?? [:]
@@ -85,9 +85,20 @@ final class AetherVideoChannel: NSObject, FlutterStreamHandler {
                                 throw NSError(domain: "EmbyView", code: 5,
                                     userInfo: [NSLocalizedDescriptionKey: "播放源已变更或尚未就绪"])
                             }
-                            try self.player.loadExternalSubtitle(url: url, title: args["title"] as? String,
+                            let receipt = try await self.player.loadExternalSubtitle(url: url, title: args["title"] as? String,
                                 language: args["language"] as? String, codec: args["codec"] as? String,
-                                select: args["select"] as? Bool ?? true)
+                                select: args["select"] as? Bool ?? true,
+                                requestID: (args["requestID"] as? NSNumber)?.intValue ?? 0)
+                            if let receipt {
+                                result(["sourceGeneration": receipt.sourceGeneration,
+                                        "requestID": receipt.requestID, "outcome": receipt.outcome.rawValue])
+                                return
+                            }
+                        case "cancelExternalSubtitleSelection":
+                            if let generation = (args["sourceGeneration"] as? NSNumber)?.intValue,
+                               let requestID = (args["requestID"] as? NSNumber)?.intValue {
+                                self.player.cancelExternalSubtitleSelection(sourceGeneration: generation, requestID: requestID)
+                            }
                         default: try self.player.setPictureInPicture(args["enabled"] as? Bool == true)
                         }
                         result(nil)

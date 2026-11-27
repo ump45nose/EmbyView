@@ -1,11 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter/services.dart';
 import 'package:playback_core/playback_core.dart';
 import 'package:playback_emby/playback_emby.dart';
 import 'package:server_core/server_core.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../../playback/aether_backend.dart';
 import '../../ui/widgets/aether_video_view.dart';
 import '../../util/fullscreen_helper.dart';
 import '../contracts/common.dart';
@@ -213,6 +215,9 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
             EmbyPlaySessionService(client),
             backend: native.backend,
             verifyExternalSubtitles: true,
+            onAutomaticExternalSubtitleFailure: (error) async {
+              await _active?._handleAutomaticExternalSubtitleFailure(error);
+            },
           );
           manager.autoAdvanceEnabled = autoNext;
           manager.sourceFailureRecovery = session._recoverSource;
@@ -307,6 +312,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   String? _liveSubtitleId, _previousSubtitleId;
   bool _wantsLiveSubtitle = false, _liveRendererReady = false;
   int _subtitleChoice = 0;
+  ({int revision, String message})? _subtitleSelectionNotice;
   int _audioChoice = 0, _transportRevision = 0;
   int? _previousTrackGeneration;
   bool _reopenedWithoutSubtitles = false;
@@ -548,6 +554,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     _cacheHit = address?.cacheHit;
     _openingAt = _intent.elapsed;
     _beforeSubtitleChoice = null;
+    _subtitleSelectionNotice = null;
     _previousTrackGeneration = null;
     final reopensForSubtitle = subtitleSwitchFrom != null &&
         _subtitleSource?.generation == subtitleSwitchFrom &&
@@ -834,6 +841,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       ],
       selectedAudioId: trackId(_manager.audioStreamIndex),
       subtitleOverlayId: _wantsLiveSubtitle && _liveRendererReady ? _liveSubtitleId : null,
+      subtitleSelectionNotice: _subtitleSelectionNotice,
       selectedSubtitleId: _wantsLiveSubtitle
           ? _liveSubtitleId
           : _selectedExternal != null
@@ -1034,13 +1042,57 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       if (current()) {
         _liveRendererReady = false;
         _emit();
-        await _selectNativeSubtitle(replacementId, generation, current);
+        try {
+          await _selectNativeSubtitle(replacementId, generation, current);
+        } catch (error) {
+          if (error is! ExternalSubtitleSelectionFailed && error is! ExternalSubtitleUnavailable) rethrow;
+          if (!current() || generation != _snapshot.generation) return;
+          final revision = _subtitleChoice;
+          var restore = _previousSubtitleId;
+          _clearLiveSubtitle();
+          bool stillCurrent() => _current && generation == _snapshot.generation &&
+              revision == _subtitleChoice;
+          try {
+            await _selectNativeSubtitle(restore, generation, stillCurrent, force: true);
+          } catch (_) {
+            if (!stillCurrent()) return;
+            restore = null;
+            await _selectNativeSubtitle(null, generation, stillCurrent, force: true);
+          }
+          if (stillCurrent()) {
+            final name = _snapshot.subtitleTracks.where((track) => track.id == restore).firstOrNull?.name;
+            _subtitleSelectionNotice = (revision: ++_subtitleChoice,
+                message: '字幕加载失败，已切回 ${name ?? '关闭字幕'}');
+            _emit();
+          }
+          return;
+        }
       }
       if (trackId == _liveSubtitleId) {
         _clearLiveSubtitle();
         _emit();
       }
     });
+  }
+
+  Future<void> _handleAutomaticExternalSubtitleFailure(Object error) async {
+    if (!_current || !_acceptNativeEvents || _beforeSubtitleChoice != null) return;
+    if (error is PlatformException &&
+        (error.code == 'stale_source' || error.code == 'stale_subtitle_selection')) return;
+    final generation = _snapshot.generation;
+    // An automatic selection has no confirmed predecessor on this source.
+    // Keep the media running with subtitles off, and report that fallback.
+    try {
+      final operation = selectSubtitle(null);
+      final revision = _subtitleChoice;
+      await operation;
+      if (!_current || !_acceptNativeEvents || generation != _snapshot.generation ||
+          revision != _subtitleChoice) return;
+      _subtitleSelectionNotice = (revision: revision, message: '字幕加载失败，已切回 关闭字幕');
+      _emit();
+    } catch (_) {
+      // A source change during the fallback belongs to the next session.
+    }
   }
 
   @override
@@ -1056,6 +1108,10 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       nativeEnableAttempts: _nativeEnableAttempts,
     );
     final choice = ++_subtitleChoice;
+    _subtitleSelectionNotice = null;
+    // Cancel a decode immediately, not when this choice reaches the serialized
+    // track-operation queue. Its eventual reply belongs to the retired choice.
+    unawaited(_owner.native.supersedeExternalSubtitleSelection().catchError((Object _) {}));
     final live = trackId != null && trackId == _liveSubtitleId;
     if (live && !_wantsLiveSubtitle) _previousSubtitleId = _snapshot.selectedSubtitleId;
     _wantsLiveSubtitle = live;
@@ -1081,8 +1137,14 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         await _selectNativeSubtitle(rendererId, targetGeneration, current);
         if (current()) _liveRendererReady = live;
       } catch (error) {
+        final receiptFailure = error is ExternalSubtitleSelectionFailed || error is ExternalSubtitleUnavailable;
+        final staleReceipt = error is PlatformException &&
+            (error.code == 'stale_source' || error.code == 'stale_subtitle_selection');
+        if (staleReceipt || (receiptFailure &&
+            (!current() || !_current || !_acceptNativeEvents || generation != _snapshot.generation))) return;
+        var restoredId = before.selected;
         if (current() && _current && generation == _snapshot.generation) {
-          final restoreLive = before.live && before.selected == _liveSubtitleId;
+          var restoreLive = before.live && before.selected == _liveSubtitleId;
           final restore = before.live ? before.previous : before.selected;
           _wantsLiveSubtitle = restoreLive;
           _previousSubtitleId = before.previous;
@@ -1090,15 +1152,36 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
           // renderer rejected the command. Reapply the last committed choice.
           // If only a disable was attempted, the native renderer was already
           // confirmed off for this live track and could never have turned on.
-          final sourceUntouched = error is ExternalSubtitleUnavailable || error is EmbyViewFailure &&
+          final managerIndex = _manager.subtitleStreamIndex;
+          final rendererSelection = _selectedExternal != null
+              ? _visibleExternalId(_selectedExternal!)
+              : managerIndex != null && managerIndex >= 0 ? '$generation:$managerIndex' : null;
+          final sourceUntouched = receiptFailure &&
+              _nativeEnableAttempts == before.nativeEnableAttempts + 1 &&
+              rendererSelection == before.selected || error is EmbyViewFailure &&
               (error.code == 'trackSourceUnavailable' || error.code == 'trackSwitchCancelled');
           if (!sourceUntouched && (!restoreLive || before.nativeEnableAttempts != _nativeEnableAttempts)) {
-            await _selectNativeSubtitle(restoreLive ? null : restore, generation, current, force: true);
+            try {
+              await _selectNativeSubtitle(restoreLive ? null : restore, generation, current, force: true);
+            } catch (_) {
+              if (!receiptFailure) rethrow;
+              if (!current() || !_current || generation != _snapshot.generation) return;
+              // The original sidecar may have become unreadable as well.
+              // In that case an explicit off is the only confirmed fallback.
+              await _selectNativeSubtitle(null, generation, current, force: true);
+              restoreLive = false;
+              restoredId = null;
+              _wantsLiveSubtitle = false;
+            }
           }
           if (current()) _liveRendererReady = restoreLive;
         }
-        if (error is ExternalSubtitleUnavailable) {
-          throw const EmbyViewFailure('外挂字幕载入失败，已保留原轨道。', retryable: true);
+        if (receiptFailure) {
+          if (!current() || !_current || generation != _snapshot.generation) return;
+          final name = _snapshot.subtitleTracks.where((track) => track.id == restoredId).firstOrNull?.name;
+          final message = '字幕加载失败，已切回 ${name ?? '关闭字幕'}';
+          _subtitleSelectionNotice = (revision: choice, message: message);
+          throw EmbyViewFailure(message, retryable: true, code: 'subtitleLoadFailed');
         }
         if (error is EmbyViewFailure && error.code == 'trackSwitchCancelled') return;
         rethrow;
@@ -1373,9 +1456,11 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
   }
   Future<void> _restoreExternalSubtitles() {
     _reloadExternal = false;
-    final generation = _snapshot.generation;
+    final generation = _snapshot.generation, choice = _subtitleChoice;
     return _subtitleOperation(() async {
-      if (!_current || generation != _snapshot.generation) return;
+      bool current() => _current && _acceptNativeEvents &&
+          generation == _snapshot.generation && choice == _subtitleChoice;
+      if (!current()) return;
       try {
         for (final subtitle in _externalSubtitles.toList()) {
           _checkSubtitleGeneration(generation);
@@ -1387,17 +1472,28 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
           }
         }
         _checkSubtitleGeneration(generation);
+        if (!current()) return;
         if (_pendingExternal case final index?) {
           await _loadExternal(_externalSubtitles[index], generation, select: true);
           _checkSubtitleGeneration(generation);
+          if (!current()) return;
           _selectedExternal = index;
           _pendingExternal = null;
           _emit();
         }
       } catch (_) {
-        if (_current && _acceptNativeEvents && generation == _snapshot.generation) {
+        if (current()) {
           _pendingExternal = null;
-          _emit(failure: const EmbyViewFailure('外挂字幕加载失败，请重新选择。', retryable: true));
+          try {
+            await _selectNativeSubtitle(null, generation, current, force: true);
+            if (current()) {
+              _subtitleSelectionNotice = (revision: ++_subtitleChoice,
+                  message: '字幕加载失败，已切回 关闭字幕');
+              _emit();
+            }
+          } catch (_) {
+            // Teardown or an unavailable renderer cannot confirm the fallback.
+          }
         }
       }
     });

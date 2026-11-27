@@ -115,6 +115,9 @@ class EmbyViewNativePlayback {
     select: select,
   );
 
+  Future<void> supersedeExternalSubtitleSelection() =>
+      backend.supersedeExternalSubtitleSelection();
+
   Future<void> dispose() async {
     await _subscription.cancel();
     await _changes.close();

@@ -1977,7 +1977,7 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
     }
 
     #if os(macOS)
-    func loadExternalSubtitle(url: URL, title: String?, language: String?, codec: String?, select: Bool = true) throws {
+    func loadExternalSubtitle(url: URL, title: String?, language: String?, codec: String?, select: Bool = true, requestID: Int) async throws -> ExternalSubtitleSelectionReceipt? {
         guard let engine = Self.sharedEngine(), engine.isSessionReady else {
             throw NSError(domain: "EmbyView", code: 5,
                 userInfo: [NSLocalizedDescriptionKey: "播放源尚未就绪"])
@@ -1993,13 +1993,30 @@ final class AetherPlayerWrapper: NSObject, ObservableObject {
                 addSubtitle(url: url, title: title, language: language, codec: codec)
             }
         }
-        guard externalSubIDsByURL[url.absoluteString] != nil else {
+        guard let id = externalSubIDsByURL[url.absoluteString] else {
             throw NSError(domain: "EmbyView", code: 6,
                 userInfo: [NSLocalizedDescriptionKey: "外挂字幕未能登记"])
         }
-        if select {
-            selectSubtitleTrack(1, externalUrl: url.absoluteString)
+        guard select else { return nil }
+        let generation = sourceGeneration
+        let receipt = await engine.selectExternalSubtitleWithReceipt(id: id,
+            sourceGeneration: generation, requestID: requestID)
+        if receipt.outcome == .selected, generation == sourceGeneration,
+           Self.sharedEngine() === engine {
+            primaryReloadSelection.remember(.text(1, url.absoluteString))
+            resetAssState()
+            subtitleOverlay.secondaryUsesTopFallback = primaryUsesAssTopFallback(id)
+            endNativePrimaryBridge(restoreNative: false)
+            nativePrimaryBridgeFailure = nil
+            updateNativePrimaryBridge()
         }
+        return receipt
+    }
+
+    func cancelExternalSubtitleSelection(sourceGeneration: Int, requestID: Int) {
+        guard self.sourceGeneration == sourceGeneration else { return }
+        Self.sharedEngine()?.cancelExternalSubtitleSelection(
+            sourceGeneration: sourceGeneration, requestID: requestID)
     }
 
     #endif

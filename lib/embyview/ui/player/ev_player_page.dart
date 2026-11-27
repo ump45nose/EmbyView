@@ -218,7 +218,14 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
       if (next.anime4k.state != Anime4kState.active && _compareActive && widget.initialCompareSplit == null) _compareActive = false;
     });
     if (closedPanel) _reclaimPlayerFocus();
-    if (!genChanged) _handleAnime4kTransition(prev.anime4k, next.anime4k);
+    if (!genChanged) {
+      _handleAnime4kTransition(prev.anime4k, next.anime4k);
+      final notice = next.subtitleSelectionNotice;
+      if (notice != null && notice != prev.subtitleSelectionNotice &&
+          widget.session.snapshot.subtitleSelectionNotice == notice) {
+        _showToast(notice.message, icon: EvIcons.info);
+      }
+    }
     _syncPauseState(next);
     if ((next.phase == PlaybackPhase.playing && prev.phase != PlaybackPhase.playing) ||
         (!genChanged && wasCredits && !nowCredits)) {
@@ -288,6 +295,9 @@ class _EvPlayerPageState extends State<EvPlayerPage> with SingleTickerProviderSt
     try {
       await (audio ? session.selectAudio(id!) : session.selectSubtitle(id));
     } catch (error) {
+      // Receipt failures are also emitted for automatic selections, so the
+      // playback snapshot owns this toast rather than each individual button.
+      if (error is EmbyViewFailure && error.code == 'subtitleLoadFailed') return;
       if (mounted && selection == _trackSelection && identical(widget.session, session) && session.snapshot.generation == generation) {
         _showToast(error is EmbyViewFailure ? error.reason : audio ? '无法切换音轨，请重试。' : '无法切换字幕，请重试。');
       }

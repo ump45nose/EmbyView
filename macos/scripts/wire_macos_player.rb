@@ -63,8 +63,8 @@ end
 # a frame timing fix and the Dolby Vision FEL curve fold that upstream doesn't
 # ship. An engine bump is a deliberate change rather than
 # something a resolve should pick up on its own.
-aether_remote_url = 'https://github.com/RadicalMuffinMan/AetherEngine'
-aether_revision = '34f149ba2dd483f490dca13a5a3027d58a9956f5'
+aether_remote_url = 'https://github.com/ump45nose/AetherEngine'
+aether_revision = 'f9972404b05f2e288bdaceb271b0c577d4c9c636'
 aether_local_path = File.expand_path(File.join(project_dir, '..', '..', 'AetherEngine'))
 use_local_aether = ENV['AETHER_LOCAL'] == '1'
 

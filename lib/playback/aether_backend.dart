@@ -23,6 +23,8 @@ import 'lossless_audio_bridge.dart';
 import 'server_transcode_capabilities.dart';
 import 'subtitle_fonts.dart';
 
+class ExternalSubtitleSelectionFailed implements Exception {}
+
 /// Playback backend driving the native AetherEngine wrapper over a method
 /// channel on iOS and macOS. Serves main playback there: video, live TV,
 /// music, audiobooks and offline playback. Unlike the tvOS sibling there is
@@ -74,6 +76,9 @@ class AetherBackend
   final _nativeEventStream = StreamController<Map<String, dynamic>>.broadcast();
   Map<String, dynamic> _nextSourceOptions = const {};
   int _nativeSourceGeneration = 0;
+  int _externalRequestSequence = 0;
+  ({int generation, int id})? _pendingExternalSelection;
+
   Stream<Map<String, dynamic>> get nativeEvents => _nativeEventStream.stream;
 
   /// Internal Mac adapter operations keep platform failures visible to their caller.
@@ -89,19 +94,49 @@ class AetherBackend
     bool select = true,
   }) async {
     final expected = sourceGeneration ?? _nativeSourceGeneration;
-    if (select) _pendingEmbeddedSubtitle = null;
-    await invokeNativeControl<void>('loadExternalSubtitle', {
-      'url': url,
-      'title': title,
-      'language': language,
-      'codec': codec,
-      'sourceGeneration': expected,
-      'select': select,
-    });
-    if (expected != _nativeSourceGeneration) {
-      throw PlatformException(code: 'stale_source', message: '播放源已变更');
+    final request = (generation: expected, id: ++_externalRequestSequence);
+    if (select) {
+      _pendingEmbeddedSubtitle = null;
+      _pendingExternalSelection = request;
     }
-    if (select) _activeSubtitleTrackIndex = 0;
+    try {
+      final receipt = await invokeNativeControl<Map<dynamic, dynamic>>('loadExternalSubtitle', {
+        'url': url,
+        'title': title,
+        'language': language,
+        'codec': codec,
+        'sourceGeneration': expected,
+        'select': select,
+        'requestID': request.id,
+      });
+      if (expected != _nativeSourceGeneration ||
+          (select && _pendingExternalSelection != request)) {
+        throw PlatformException(code: 'stale_source', message: '播放源或字幕选择已变更');
+      }
+      if (select) {
+        if (receipt?['sourceGeneration'] != expected ||
+            receipt?['requestID'] != request.id ||
+            receipt?['outcome'] == 'superseded') {
+          throw PlatformException(code: 'stale_subtitle_selection');
+        }
+        if (receipt?['outcome'] != 'selected') {
+          throw ExternalSubtitleSelectionFailed();
+        }
+        _activeSubtitleTrackIndex = 0;
+      }
+    } finally {
+      if (_pendingExternalSelection == request) _pendingExternalSelection = null;
+    }
+  }
+
+  Future<void> supersedeExternalSubtitleSelection() async {
+    final pending = _pendingExternalSelection;
+    if (pending == null) return;
+    _pendingExternalSelection = null;
+    await invokeNativeControl<void>('cancelExternalSubtitleSelection', {
+      'sourceGeneration': pending.generation,
+      'requestID': pending.id,
+    });
   }
 
   void configureNextNativeSource({
@@ -336,6 +371,7 @@ class AetherBackend
         ? mediaItem
         : payload['url']?.toString() ?? '';
     if (_disposed || url.isEmpty) return;
+    _pendingExternalSelection = null;
     final nativeOptions = _nextSourceOptions;
     _nativeSourceGeneration = (nativeOptions['sourceGeneration'] as int?) ?? 0;
     _nextSourceOptions = const {};
@@ -438,6 +474,7 @@ class AetherBackend
 
   @override
   Future<void> stop() async {
+    _pendingExternalSelection = null;
     _pendingEmbeddedSubtitle = null;
     await _invoke<void>('stop');
     _stopStallWatchdog();

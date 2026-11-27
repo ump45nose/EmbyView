@@ -20,7 +20,16 @@ void main() {
     var refuseExternal = false;
     messenger.setMockMethodCallHandler(control, (call) async {
       calls.add(call);
-      if (call.method == 'loadExternalSubtitle' && refuseExternal) throw PlatformException(code: 'registration_failed');
+      if (call.method == 'loadExternalSubtitle') {
+        if (refuseExternal) throw PlatformException(code: 'registration_failed');
+        if (call.arguments['select'] == true) {
+          return {
+            'sourceGeneration': call.arguments['sourceGeneration'],
+            'requestID': call.arguments['requestID'],
+            'outcome': 'selected',
+          };
+        }
+      }
       return null;
     });
     messenger.setMockMethodCallHandler(events, (_) async => null);
@@ -67,6 +76,64 @@ void main() {
       expect(calls.last.arguments['url'], 'file:///good.srt');
     } finally {
       await native.dispose();
+      backend.dispose();
+      prefs.dispose();
+      messenger.setMockMethodCallHandler(control, null);
+      messenger.setMockMethodCallHandler(events, null);
+    }
+  });
+  test('external selection accepts only the matching successful receipt', () async {
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const control = MethodChannel('moonfin/ios_aether_control');
+    const events = MethodChannel('moonfin/ios_aether_events');
+    final replies = <Completer<Map<String, dynamic>>>[];
+    final requests = <Map<dynamic, dynamic>>[];
+    messenger.setMockMethodCallHandler(control, (call) async {
+      if (call.method != 'loadExternalSubtitle' || call.arguments['select'] != true) return null;
+      requests.add(call.arguments as Map);
+      final completer = Completer<Map<String, dynamic>>();
+      replies.add(completer);
+      return completer.future;
+    });
+    messenger.setMockMethodCallHandler(events, (_) async => null);
+    SharedPreferences.setMockInitialValues({});
+    final store = PreferenceStore();
+    await store.init();
+    final prefs = UserPreferences(store);
+    final backend = AetherBackend(prefs);
+    Map<String, dynamic> reply(int i, String outcome, {int? generation}) => {
+      'sourceGeneration': generation ?? requests[i]['sourceGeneration'],
+      'requestID': requests[i]['requestID'],
+      'outcome': outcome,
+    };
+    try {
+      backend.configureNextNativeSource(sourceGeneration: 10);
+      await backend.play({'url': 'file:///video.mkv'});
+      await backend.setSubtitleTrack(1);
+      final failed = expectLater(backend.loadExternalSubtitle('http://127.0.0.1/bad.srt'),
+          throwsA(isA<ExternalSubtitleSelectionFailed>()));
+      await pumpEventQueue();
+      replies[0].complete(reply(0, 'failed'));
+      await failed;
+      expect(backend.activeSubtitleTrackIndex, 1);
+      final old = expectLater(backend.loadExternalSubtitle('http://127.0.0.1/old.sup'),
+          throwsA(isA<PlatformException>()));
+      await pumpEventQueue();
+      await backend.supersedeExternalSubtitleSelection();
+      final latest = backend.loadExternalSubtitle('http://127.0.0.1/new.srt');
+      await pumpEventQueue();
+      replies[2].complete(reply(2, 'selected'));
+      await latest;
+      replies[1].complete(reply(1, 'failed'));
+      await old;
+      expect(backend.activeSubtitleTrackIndex, 0);
+      final stale = expectLater(backend.loadExternalSubtitle('http://127.0.0.1/stale.srt'),
+          throwsA(isA<PlatformException>()));
+      await pumpEventQueue();
+      replies[3].complete(reply(3, 'selected', generation: 9));
+      await stale;
+      expect(backend.activeSubtitleTrackIndex, 0);
+    } finally {
       backend.dispose();
       prefs.dispose();
       messenger.setMockMethodCallHandler(control, null);

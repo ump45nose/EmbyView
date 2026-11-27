@@ -12,6 +12,7 @@ import 'package:moonfin/embyview/ui/kit.dart';
 import 'package:moonfin/embyview/ui/player/controls/ev_player_controls.dart';
 import 'package:moonfin/embyview/ui/player/ev_player_page.dart';
 import 'package:moonfin/embyview/ui/player/overlays/ev_credits_overlay.dart';
+import 'package:moonfin/embyview/ui/player/overlays/ev_player_toast.dart';
 
 final Uint8List _kPngBytes = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -79,6 +80,7 @@ class _TestSession implements PlaybackSession {
     String? selectedAudioId,
     String? selectedSubtitleId,
     bool clearSub = false,
+    ({int revision, String message})? subtitleSelectionNotice,
     bool? pip,
     bool? fullscreen,
     CreditsPromptState? creditsPrompt,
@@ -98,6 +100,7 @@ class _TestSession implements PlaybackSession {
     subtitleTracks: _snapshot.subtitleTracks,
     selectedAudioId: selectedAudioId ?? _snapshot.selectedAudioId,
     selectedSubtitleId: clearSub ? null : (selectedSubtitleId ?? _snapshot.selectedSubtitleId),
+    subtitleSelectionNotice: subtitleSelectionNotice,
     volume: volume ?? _snapshot.volume,
     muted: muted ?? _snapshot.muted,
     nextEpisode: _snapshot.nextEpisode,
@@ -220,6 +223,30 @@ PlaybackSnapshot _initialSnap() {
 }
 
 void main() {
+  testWidgets('subtitle failure uses the existing toast once on the active playback', (tester) async {
+    final session = _TestSession(_initialSnap()._withPhase(PlaybackPhase.playing));
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(size: Size(1440, 900), devicePixelRatio: 1.0),
+        child: Directionality(textDirection: TextDirection.ltr,
+          child: EvThemeScope(themeMode: ThemeMode.cinema,
+            child: EvPlayerPage(session: session))),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 900));
+    const notice = (revision: 1, message: '字幕加载失败，已切回 原轨');
+    session.emit(session._copy(subtitleSelectionNotice: notice));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text(notice.message), findsOneWidget);
+    session.emit(session._copy(subtitleSelectionNotice: notice));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 3400));
+    expect(tester.widget<EvPlayerToast>(find.byType(EvPlayerToast)).visible, isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await session.close();
+  });
+
   testWidgets('full EvPlayerPage lifecycle via entry.dart registration, controls, keyboard, credits, generation reset & Esc focus restore', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1440, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));

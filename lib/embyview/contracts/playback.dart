@@ -94,6 +94,7 @@ class PlaybackSnapshot {
     this.selectedAudioId,
     this.selectedSubtitleId,
     this.subtitleOverlayId,
+    this.subtitleSelectionNotice,
     this.volume = 1,
     this.muted = false,
     this.nextEpisode,
@@ -128,6 +129,9 @@ class PlaybackSnapshot {
 
   /// The live track allowed to draw over video after native captions are off.
   final String? subtitleOverlayId;
+
+  /// The latest failed subtitle selection, emitted once per selection revision.
+  final ({int revision, String message})? subtitleSelectionNotice;
   final double volume;
   final bool muted;
   final MediaCard? nextEpisode;

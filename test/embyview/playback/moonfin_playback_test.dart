@@ -136,6 +136,7 @@ class _Native extends Fake implements EmbyViewNativePlayback {
   final animeOptions = <bool>[];
   final externalLoads = <(int, String, bool)>[];
   Completer<void>? selecting, selectGate;
+  String? failingSelectionUrl;
   @override
   Future<void> loadExternalSubtitle(
     String url, {
@@ -150,9 +151,12 @@ class _Native extends Fake implements EmbyViewNativePlayback {
     if (select) {
       if (selecting?.isCompleted == false) selecting!.complete();
       await selectGate?.future;
+      if (url == failingSelectionUrl) throw ExternalSubtitleSelectionFailed();
     }
   }
 
+  @override
+  Future<void> supersedeExternalSubtitleSelection() async {}
   @override
   Stream<NativePlaybackSnapshot> get changes => events.stream;
   @override
@@ -299,6 +303,62 @@ class _OriginalResolver extends MediaStreamResolver {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('receipt failure restores the previous sidecar and ignores a retired request', () async {
+    final backend = _Backend(), client = _Client();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager, client: client, native: native, audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.115.com/file'))),
+    );
+    addTearDown(() async { await adapter.dispose(); await native.events.close(); manager.dispose(); });
+    final session = adapter.open(const PlayTarget(itemId: 'movie'));
+    await pumpEventQueue(times: 30);
+    final input = session as PlaybackSubtitleInput;
+    final generation = session.snapshot.generation;
+    final old = await input.registerExternalSubtitle('file:///old.srt', generation: generation, title: '原轨');
+    final bad = await input.registerExternalSubtitle('http://127.0.0.1/bad.srt', generation: generation, title: '损坏');
+    final newer = await input.registerExternalSubtitle('file:///new.srt', generation: generation, title: '新轨');
+    await session.selectSubtitle(old);
+    native.failingSelectionUrl = 'http://127.0.0.1/bad.srt';
+    await expectLater(session.selectSubtitle(bad), throwsA(isA<EmbyViewFailure>().having(
+      (failure) => failure.reason, 'message', '字幕加载失败，已切回 原轨')));
+    expect(session.snapshot.selectedSubtitleId, old);
+    expect(session.snapshot.subtitleSelectionNotice?.message, '字幕加载失败，已切回 原轨');
+    expect(backend.urls, hasLength(1));
+    native.selecting = Completer();
+    native.selectGate = Completer();
+    final pending = session.selectSubtitle(bad);
+    await native.selecting!.future;
+    final latest = session.selectSubtitle(newer);
+    native.selectGate!.complete();
+    await Future.wait([pending, latest]);
+    expect(session.snapshot.selectedSubtitleId, newer);
+    expect(session.snapshot.subtitleSelectionNotice, isNull);
+    expect(backend.urls, hasLength(1));
+  });
+  test('failed automatic external selection switches off without stopping playback', () async {
+    final backend = _Backend()..failSelectSubtitle = true;
+    final client = _Client();
+    final manager = PlaybackManager()..setBackend(backend);
+    final native = _Native(backend);
+    client.playbackApi.sourcePatch = {'DefaultSubtitleStreamIndex': 3};
+    client.playbackApi.subtitles.add({
+      'Type': 'Subtitle', 'Index': 3, 'Codec': 'srt', 'IsExternal': true,
+      'IsDefault': true, 'DeliveryMethod': 'External',
+      'DeliveryUrl': '/Videos/movie/source/Subtitles/3/Stream.srt',
+    });
+    final adapter = MoonfinPlaybackAdapter(manager: manager, client: client, native: native, audioInput: _Audio(),
+      redirectCache: PlaybackRedirectCache(request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.115.com/file'))));
+    addTearDown(() async { await adapter.dispose(); await native.events.close(); manager.dispose(); });
+    final session = adapter.open(const PlayTarget(itemId: 'movie'));
+    await session.changes.firstWhere((state) => state.subtitleSelectionNotice != null)
+        .timeout(const Duration(seconds: 5));
+    expect(session.snapshot.selectedSubtitleId, isNull);
+    expect(session.snapshot.subtitleSelectionNotice?.message, '字幕加载失败，已切回 关闭字幕');
+    expect(backend.playing, isTrue);
+    expect(backend.urls, hasLength(1));
+  });
   for (final (autoSelect, indexed) in [(true, false), (false, false), (false, true)]) {
     test('real playback registers all NAS sidecars, auto-select=$autoSelect, indexed=$indexed', () async {
       final directory = await Directory.current.createTemp('.subtitle-playback-');
@@ -734,7 +794,7 @@ void main() {
       final picks = backend.subtitlePicks.length;
       await expectLater(session.selectSubtitle('$gen:2'), throwsA(isA<EmbyViewFailure>()));
       backend.failSelectSubtitle = true;
-      await expectLater(session.selectSubtitle('$gen:4'), throwsA(isA<EmbyViewFailure>()));
+      await expectLater(session.selectSubtitle('$gen:4'), throwsA(isA<EmbyViewFailure>().having((e) => e.reason, 'failure message', contains('字幕加载失败，已切回'))));
       expect(backend.subtitlePicks, hasLength(picks));
       expect(session.snapshot.selectedSubtitleId, '$gen:3');
       expect(backend.urls, hasLength(1));
