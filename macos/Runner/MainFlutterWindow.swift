@@ -376,6 +376,7 @@ class MainFlutterWindow: NSWindow {
     self.embyViewAudioChannel = EmbyViewAudioChannel(messenger: messenger,
       wrapperProvider: { [weak aetherChannel] in aetherChannel?.player ?? AetherPlayerWrapper() })
     EmbyViewAsrChannel.register(messenger: messenger)
+    EmbyViewBackdropTextChannel.register(messenger: messenger)
     registerMediaFolderChannel(messenger: messenger)
     let menuChannel = FlutterMethodChannel(name: "embyview/menu", binaryMessenger: messenger)
     self.menuChannel = menuChannel

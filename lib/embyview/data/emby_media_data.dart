@@ -12,6 +12,7 @@ import '../../data/utils/bounded_concurrency.dart';
 
 import '../contracts/common.dart';
 import '../contracts/media.dart';
+import 'backdrop_text_selector.dart';
 import 'media_mapper.dart';
 import 'title_index.dart';
 
@@ -26,6 +27,7 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     Transliterate? transliterate,
     DateTime Function()? now,
     SharedPreferences? indexStorage,
+    BackdropTextDetector? backdropTextDetector,
   }) : _client = client,
        _serverId = serverId,
        _activeServerId = activeServerId,
@@ -38,11 +40,17 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
        _now = now ?? DateTime.now,
        _providedStorage = indexStorage {
     _check();
+    _backdrops = BackdropTextSelector(
+      storage: () => _storage,
+      cacheKey: _backdropTextCacheKey,
+      detector: backdropTextDetector,
+    );
     _mapper = MediaMapper(
       serverUrl: () => _client.baseUrl,
       serverId: _serverId,
       user: _user!,
       token: _token!,
+      orderBackdrops: _backdrops.order,
     );
   }
 
@@ -63,7 +71,10 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
   Future<void>? _restoreLoad;
   String get _cacheIdentity => _serverId ?? _initialServer;
   String get _cacheKey => "embyview.index.v1.${base64Url.encode(utf8.encode(jsonEncode([_cacheIdentity, _user])))}";
+  String get _backdropTextCacheKey =>
+      "embyview.backdrop_text.v1.${base64Url.encode(utf8.encode(jsonEncode([_cacheIdentity, _user])))}";
   final CancelToken _cancel = CancelToken();
+  late final BackdropTextSelector _backdrops;
   late final MediaMapper _mapper;
   bool _disposed = false;
   int _revision = 0;
@@ -182,6 +193,7 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     if (_disposed) return;
     _disposed = true;
     _cancel.cancel('Browse session ended');
+    _backdrops.dispose();
     _index = null;
     _visibleViews = const [];
     _recent.clear();
@@ -228,6 +240,7 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     } on DioException catch (e) {
       if (e.response?.statusCode == 401) {
         await (await _storage).remove(_cacheKey);
+        await _backdrops.clearPersistedCache();
         dispose();
         throw const EmbyViewFailure('登录已失效或没有访问权限', code: 'unauthorized');
       }
@@ -269,6 +282,7 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     } on DioException catch (e) {
       if (e.response?.statusCode == 401) {
         await (await _storage).remove(_cacheKey);
+        await _backdrops.clearPersistedCache();
         dispose();
         throw const EmbyViewFailure('登录已失效或没有访问权限', code: 'unauthorized');
       }
@@ -1024,21 +1038,72 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     );
   }
 
-  Future<HomeShelf> _shelf(String id, String title, WallQuery query, {int limit = 16}) async {
-    final listing = await openWall(query);
-    return HomeShelf(
+  Future<void> _prepareBackdrops(Iterable<Json> items, {Json? parent}) async {
+    _check();
+    final groups = [for (final item in items) _mapper.backdropCandidates(item, parent: parent)];
+    if (groups.every((g) => g.length <= 1)) return;
+    await _backdrops.prepare(
+      groups,
+      uriFor: (c) => _mapper.backdropUri(c, maxWidth: 512),
+      headers: {'X-Emby-Token': _token!},
+    );
+    _check();
+  }
+
+  void _prefetchBackdrops(Iterable<Json> items) {
+    if (_disposed || !_sessionMatches) return;
+    final groups = [for (final item in items) _mapper.backdropCandidates(item)];
+    if (groups.every((g) => g.length <= 1)) return;
+    unawaited(
+      _backdrops
+          .prepare(
+            groups,
+            uriFor: (c) => _mapper.backdropUri(c, maxWidth: 512),
+            headers: {'X-Emby-Token': _token!},
+            concurrency: 2,
+          )
+          .catchError((_) {}),
+    );
+  }
+
+  Future<({String id, String title, WallQuery more, int total, List<Json> rows, String? library})> _shelfRaw(
+    String id,
+    String title,
+    WallQuery query, {
+    int limit = 16,
+  }) async {
+    final listing = await openWall(query) as _Wall;
+    final page = await listing._rawPage(offset: 0, limit: limit);
+    return (
       id: id,
       title: title,
       more: query,
       total: listing.info.total,
-      items: (await listing.page(offset: 0, limit: limit)).items,
+      rows: page.rows,
+      library: listing.params['ParentId'] as String?,
     );
   }
+
+  Future<HomeShelf> _buildShelf(
+    ({String id, String title, WallQuery more, int total, List<Json> rows, String? library}) raw,
+  ) async => HomeShelf(
+    id: raw.id,
+    title: raw.title,
+    more: raw.more,
+    total: raw.total,
+    items: await _cards(raw.rows, library: raw.library),
+  );
+
+  Future<HomeShelf> _shelf(String id, String title, WallQuery query, {int limit = 16}) async =>
+      _buildShelf(await _shelfRaw(id, title, query, limit: limit));
 
   Future<ZoneTile> _tile(ZonePreference pref) async {
     final params = await _params(_query(WallScope.zone(pref.id), sort: WallSort.score));
     final result = await _get('items', params: {...params, 'Limit': 1, 'EnableTotalRecordCount': true});
     final representative = itemRecords(result).firstOrNull;
+    if (representative != null) {
+      await _prepareBackdrops([representative]);
+    }
     final card = representative == null
         ? null
         : (await _cards([
@@ -1075,6 +1140,16 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
         .map((c) => HomeRecommendation(card: c, reason: RecommendationReason.daily)),
   ];
 
+  List<Json> _recommendationCandidateRows(List<ResumeCard> resume, List<Json> sortedCandidates) {
+    final resumeIds = resume.map((r) => r.card.id).toSet();
+    final needed = math.max<int>(0, 6 - math.min<int>(3, resume.length));
+    if (needed == 0) return const [];
+    return sortedCandidates
+        .where((row) => _mapper.backdropCandidates(row).isNotEmpty && !resumeIds.contains(row['Id'].toString()))
+        .take(needed)
+        .toList();
+  }
+
   @override
   Future<ZoneData> zone(String zoneId) => _cached(_zoneCache, zoneId, () => _loadZone(zoneId));
 
@@ -1086,8 +1161,8 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     final month = DateTime(now.year, now.month).toUtc();
     final nextMonth = DateTime(now.year, now.month + 1).toUtc();
     final results = await Future.wait<Object>([
-      _shelf('latest', '最近添加', _query(scope, sort: WallSort.added)),
-      _shelf('score', '高分精选', _query(scope, sort: WallSort.score)),
+      _shelfRaw('latest', '最近添加', _query(scope, sort: WallSort.added)),
+      _shelfRaw('score', '高分精选', _query(scope, sort: WallSort.score)),
       wallFacets(_query(scope)),
       continueWatching(zoneId: zoneId),
       _tile(preference),
@@ -1097,17 +1172,34 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
         'MaxDateCreated': nextMonth.subtract(const Duration(microseconds: 1)).toIso8601String(),
       }),
     ]);
-    final latest = results[0] as HomeShelf;
-    final high = results[1] as HomeShelf;
+    final latestRaw = results[0] as ({String id, String title, WallQuery more, int total, List<Json> rows, String? library});
+    final highRaw = results[1] as ({String id, String title, WallQuery more, int total, List<Json> rows, String? library});
     final facets = results[2] as WallFacets;
     final resume = (results[3] as Page<ResumeCard>).items;
     final tile = results[4] as ZoneTile;
     final added = results[5] as int;
-    final genres = await mapBounded(
+    final recRows = _recommendationCandidateRows(resume, highRaw.rows);
+    final stageRows = <Json>[
+      ...recRows,
+      if (resume.isEmpty && recRows.isEmpty && latestRaw.rows.isNotEmpty) latestRaw.rows.first,
+      if (resume.isEmpty && recRows.isEmpty && latestRaw.rows.isEmpty && highRaw.rows.isNotEmpty) highRaw.rows.first,
+    ];
+    await _prepareBackdrops(stageRows);
+    final latest = await _buildShelf(latestRaw);
+    final high = await _buildShelf(highRaw);
+    final rawGenres = await mapBounded(
       facets.genres.where((e) => e.count != 0).toList(),
       4,
-      (g) => _shelf('genre:${g.value}', g.label, _query(scope, sort: WallSort.score, genre: g.value)),
+      (g) => _shelfRaw('genre:${g.value}', g.label, _query(scope, sort: WallSort.score, genre: g.value)),
     );
+    final genreShelves = <HomeShelf>[];
+    final prefetchRows = <Json>[...latestRaw.rows, ...highRaw.rows];
+    for (final raw in rawGenres) {
+      if (raw == null) continue;
+      genreShelves.add(await _buildShelf(raw));
+      prefetchRows.addAll(raw.rows);
+    }
+    _prefetchBackdrops(prefetchRows);
     return ZoneData(
       zone: tile,
       all: _query(scope),
@@ -1117,7 +1209,7 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
       continueWatching: resume,
       recommendations: _recommend(resume, high.items),
       genreCounts: facets.genres,
-      genres: genres.whereType<HomeShelf>().toList(),
+      genres: genreShelves,
       collage: latest.items
           .map((c) => c.art.poster.layers.firstOrNull?.source)
           .whereType<ArtworkRef>()
@@ -1134,20 +1226,39 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     ZonePreference? prefFor(Json v) =>
         prefs.where((p) => p.rule is LibraryZoneRule && (p.rule as LibraryZoneRule).libraryId == v['Id']).firstOrNull;
     final sort = [WallSort.added, WallSort.score, WallSort.title][seriesSort.index];
-    final shelves = <String, HomeShelf>{};
+    final rawShelves =
+        <String, ({String id, String title, WallQuery more, int total, List<Json> rows, String? library})>{};
     for (final v in views) {
       final pref = prefFor(v);
       if (pref == null) continue;
       final category = _homeCategory(v);
-      if (category == null || shelves.containsKey(category)) continue;
-      final shelf = await _shelf(
+      if (category == null || rawShelves.containsKey(category)) continue;
+      rawShelves[category] = await _shelfRaw(
         pref.id,
         pref.name,
         _query(WallScope.zone(pref.id), sort: category == 'anime' || category == 'series' ? sort : WallSort.added),
       );
-      shelves[category] = shelf;
     }
     final resume = (await continueWatching()).items;
+    final sortedCandidates = rawShelves.values.expand((s) => s.rows).toList()
+      ..sort(
+        (a, b) => ((b['CommunityRating'] as num?)?.toDouble() ?? 0).compareTo(
+          (a['CommunityRating'] as num?)?.toDouble() ?? 0,
+        ),
+      );
+    final docFallbackRows = [
+      for (final row in rawShelves['documentaries']?.rows ?? const <Json>[])
+        if (_mapper.image(row, 'Thumb') == null) row,
+    ];
+    await _prepareBackdrops([
+      ..._recommendationCandidateRows(resume, sortedCandidates),
+      ...docFallbackRows,
+    ]);
+    final shelves = <String, HomeShelf>{};
+    for (final entry in rawShelves.entries) {
+      shelves[entry.key] = await _buildShelf(entry.value);
+    }
+    _prefetchBackdrops(rawShelves.values.expand((s) => s.rows));
     Future<FeatureSpread> feature(HomeFeature f) async {
       final query = _query(WallScope.feature(f), sort: WallSort.score);
       final wall = await openWall(query);
@@ -1180,7 +1291,9 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
   Future<MediaCard?> randomInZone(String zoneId) async {
     final params = await _params(_query(WallScope.zone(zoneId), sort: WallSort.random));
     final row = itemRecords(await _get('items', params: {...params, 'Limit': 1})).firstOrNull;
-    return row == null ? null : (await _cards([row])).single;
+    if (row == null) return null;
+    await _prepareBackdrops([row]);
+    return (await _cards([row])).single;
   }
 
   Future<Json> _item(String id, {String? mediaSourceId}) async =>
@@ -1215,6 +1328,8 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
         // The episode can still supply its own season, number and series name.
       }
     }
+    await _prepareBackdrops([raw], parent: series);
+    if (children.isNotEmpty) _prefetchBackdrops(children);
     final card = _card(raw, parent: series, collection: children);
     Json? playable = raw['Type'] == 'Movie' || raw['Type'] == 'Episode' ? raw : null;
     if (raw['Type'] == 'Series') {
@@ -1285,6 +1400,7 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     if (season == null) {
       throw const EmbyViewFailure('这一季已不可用', code: 'season_missing');
     }
+    await _prepareBackdrops([series]);
     final rows = await _all({'SeasonId': seasonId, 'Fields': _fields}, resource: 'episodes', id: seriesId)
       ..sort(_episodeOrder);
     final cards = [
@@ -1428,6 +1544,7 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
         .toSet()
         .toList();
     final series = {for (final s in await _byIds(seriesIds)) s['Id'].toString(): s};
+    await _prepareBackdrops([for (final e in rows) series[e['SeriesId']] ?? e]);
     final cards = [
       for (final e in rows)
         ResumeCard(
@@ -1505,7 +1622,12 @@ class EmbyMediaData implements EmbyViewData, BrowseCacheInvalidator {
     final best = ranked.firstOrNull?.$1;
     final page = ranked.skip(offset).take(limit).map((r) => r.$1).toList();
     final ids = {if (best != null) best.id, ...page.map((e) => e.id)}.toList();
-    final cards = {for (final card in await _cards(await _byIds(ids))) card.id: card};
+    final fetched = await _byIds(ids);
+    if (best != null) {
+      final bestRow = fetched.where((r) => r['Id'].toString() == best.id).firstOrNull;
+      if (bestRow != null) await _prepareBackdrops([bestRow]);
+    }
+    final cards = {for (final card in await _cards(fetched)) card.id: card};
     final views = await _views();
     final groups = <SearchGroup>[];
     for (final v in views) {
@@ -1554,11 +1676,10 @@ class _Wall implements WallListing {
   final int revision;
   @override
   final WallInfo info;
-  @override
-  Future<Page<MediaCard>> page({required int offset, required int limit}) async {
+  Future<({List<Json> rows, int? nextOffset})> _rawPage({required int offset, required int limit}) async {
     owner._pageBounds(offset, limit);
     await owner._validateWall(this);
-    if (offset >= info.total) return Page(items: const [], total: info.total);
+    if (offset >= info.total) return (rows: const <Json>[], nextOffset: null);
     final requested = ids?.skip(offset).take(limit).toList();
     final response = requested == null
         ? await owner._get(
@@ -1575,12 +1696,21 @@ class _Wall implements WallListing {
       owner._invalidateBrowse();
       throw const EmbyViewFailure('片库条目已变化，请重新打开海报墙', retryable: true, code: 'wall_changed');
     }
-    final cards = await owner._cards(rows, library: params['ParentId'] as String?);
+    return (
+      rows: rows,
+      nextOffset: rows.isNotEmpty && offset + rows.length < info.total ? offset + rows.length : null,
+    );
+  }
+
+  @override
+  Future<Page<MediaCard>> page({required int offset, required int limit}) async {
+    final result = await _rawPage(offset: offset, limit: limit);
+    final cards = await owner._cards(result.rows, library: params['ParentId'] as String?);
     await owner._validateWall(this);
     return Page(
       items: cards,
       total: info.total,
-      nextOffset: rows.isNotEmpty && offset + rows.length < info.total ? offset + rows.length : null,
+      nextOffset: result.nextOffset,
     );
   }
 }

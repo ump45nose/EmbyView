@@ -23,6 +23,7 @@
 /* Begin PBXBuildFile section */
 		E5B1A0D10000000000000001 /* EmbyViewAudioChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1A0D10000000000000002 /* EmbyViewAudioChannel.swift */; };
 		E5B1A0D20000000000000001 /* EmbyViewAsrChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1A0D20000000000000002 /* EmbyViewAsrChannel.swift */; };
+		E5B1A0D30000000000000001 /* EmbyViewBackdropTextChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1A0D30000000000000002 /* EmbyViewBackdropTextChannel.swift */; };
 		73CC3B0EE504471A95C6C9E1 /* embedded-ass.mkv in Resources */ = {isa = PBXBuildFile; fileRef = 10F56E72F11141E59C1B2A30 /* embedded-ass.mkv */; };
 		008D0743212489872160F548 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 852AC4308EB5F442743449DD /* Pods_Runner.framework */; };
 		147CC97F1B187B39F508DCA8 /* AetherVideoChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C04BD1A91A9A76BD9478F8 /* AetherVideoChannel.swift */; };
@@ -85,6 +86,7 @@
 /* Begin PBXFileReference section */
 		E5B1A0D10000000000000002 /* EmbyViewAudioChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbyViewAudioChannel.swift; sourceTree = "<group>"; };
 		E5B1A0D20000000000000002 /* EmbyViewAsrChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbyViewAsrChannel.swift; sourceTree = "<group>"; };
+		E5B1A0D30000000000000002 /* EmbyViewBackdropTextChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbyViewBackdropTextChannel.swift; sourceTree = "<group>"; };
 		10F56E72F11141E59C1B2A30 /* embedded-ass.mkv */ = {isa = PBXFileReference; lastKnownFileType = file; name = "embedded-ass.mkv"; path = "Fixtures/embedded-ass.mkv"; sourceTree = "<group>"; };
 		10C04BD1A91A9A76BD9478F8 /* AetherVideoChannel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AetherVideoChannel.swift; path = ../../../tvos/Runner/Playback/Aether/AetherVideoChannel.swift; sourceTree = "<group>"; };
 		159DE08E3FAD670AB77FA219 /* PlayerTypes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PlayerTypes.swift; path = ../../../tvos/Runner/Playback/Aether/PlayerTypes.swift; sourceTree = "<group>"; };
@@ -222,6 +224,7 @@
 			children = (
 				33CC10F02044A3C60003C045 /* AppDelegate.swift */,
 				33CC11122044BFA00003C045 /* MainFlutterWindow.swift */,
+				E5B1A0D30000000000000002 /* EmbyViewBackdropTextChannel.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
 				33E51914231749380026EE4D /* Release.entitlements */,
 				33CC11242044D66E0003C045 /* Resources */,
@@ -525,6 +528,7 @@
 				671644C63A7634853A2706E9 /* MacosAetherVideoPlatformView.swift in Sources */,
 				E5B1A0D10000000000000001 /* EmbyViewAudioChannel.swift in Sources */,
 				E5B1A0D20000000000000001 /* EmbyViewAsrChannel.swift in Sources */,
+				E5B1A0D30000000000000001 /* EmbyViewBackdropTextChannel.swift in Sources */,
 				6C864DCF0EB7873D0D9E562A /* AetherPlayerWrapper.swift in Sources */,
 				147CC97F1B187B39F508DCA8 /* AetherVideoChannel.swift in Sources */,
 				7F2F20CDD44C0FF6F6D56C2B /* AssRenderer.swift in Sources */,

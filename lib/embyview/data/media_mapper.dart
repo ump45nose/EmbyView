@@ -5,6 +5,7 @@ import '../contracts/internal/authorized_resources.dart';
 import '../contracts/media.dart';
 import '../../data/models/aggregated_item.dart';
 import '../../util/subtitle_track_logic.dart' show isForcedSubtitleStream, isSdhSubtitleStream;
+import 'backdrop_text_selector.dart';
 
 typedef Json = Map<String, dynamic>;
 List<Json> records(dynamic value) =>
@@ -58,34 +59,88 @@ class MediaMapper {
     String? serverId,
     required this.user,
     required this.token,
+    List<BackdropCandidate> Function(List<BackdropCandidate>)? orderBackdrops,
   }) : assert(server != null || serverUrl != null, 'Either server or serverUrl is required.'),
        _fixedServer = server,
        _serverUrl = serverUrl,
-       _serverId = serverId;
+       _serverId = serverId,
+       _orderBackdrops = orderBackdrops;
 
   final String? _fixedServer;
   final String Function()? _serverUrl;
   final String? _serverId;
   final String user;
   final String token;
+  final List<BackdropCandidate> Function(List<BackdropCandidate>)? _orderBackdrops;
 
   String get server => _serverUrl?.call() ?? _fixedServer!;
   String get scope => '$server|$user';
+
+  Uri backdropUri(BackdropCandidate candidate, {int maxWidth = 1920}) =>
+      Uri.parse(
+        '${server.replaceFirst(RegExp(r'/$'), '')}/Items/${Uri.encodeComponent(candidate.itemId)}/Images/Backdrop/${candidate.index}',
+      ).replace(
+        queryParameters: {
+          'tag': candidate.tag,
+          'maxWidth': '$maxWidth',
+          // NetworkImage's cache key omits headers. Include the user in
+          // the resource identity without putting credentials in its URL.
+          'UserId': user,
+        },
+      );
+
+  List<BackdropCandidate> backdropCandidates(Json item, {Json? parent}) {
+    final ownTags = item['BackdropImageTags'] as List? ?? const [];
+    final ownId = item['Id']?.toString();
+    if (ownId != null && ownTags.isNotEmpty) {
+      final own = <BackdropCandidate>[
+        for (var i = 0; i < ownTags.length; i++)
+          if (ownTags[i] != null) (itemId: ownId, index: i, tag: ownTags[i].toString()),
+      ];
+      if (own.isNotEmpty) return own;
+    }
+    if (parent != null) {
+      final inherited = backdropCandidates(parent);
+      if (inherited.isNotEmpty) return inherited;
+    }
+    final parentId = item['ParentBackdropItemId']?.toString();
+    final parentTags = item['ParentBackdropImageTags'] as List? ?? const [];
+    if (parentId != null && parentTags.isNotEmpty) {
+      return [
+        for (var i = 0; i < parentTags.length; i++)
+          if (parentTags[i] != null) (itemId: parentId, index: i, tag: parentTags[i].toString()),
+      ];
+    }
+    return const [];
+  }
+
+  ArtworkRef _backdropRef(BackdropCandidate candidate) {
+    final currentServer = server;
+    final uri = backdropUri(candidate);
+    final key = '$currentServer|$user|${candidate.itemId}|Backdrop|${candidate.index}|${candidate.tag}';
+    return AuthorizedArtworkRef(
+      id: '${candidate.itemId}:Backdrop:${candidate.index}',
+      cacheKey: key,
+      image: NetworkImage(uri.toString(), headers: {'X-Emby-Token': token}),
+    );
+  }
 
   ArtworkRef? image(Json item, String type, {int index = 0}) {
     final tags = item['ImageTags'] as Map? ?? const {};
     final backdrops = item['BackdropImageTags'] as List? ?? const [];
     final tag = type == 'Backdrop' ? (index < backdrops.length ? backdrops[index] : null) : tags[type];
     if (tag == null) return null;
+    if (type == 'Backdrop') {
+      return _backdropRef((itemId: item['Id'].toString(), index: index, tag: tag.toString()));
+    }
     final currentServer = server;
     final id = item['Id'].toString();
-    final suffix = type == 'Backdrop' ? '/$index' : '';
     final uri =
-        Uri.parse('${currentServer.replaceFirst(RegExp(r'/$'), '')}/Items/${Uri.encodeComponent(id)}/Images/$type$suffix')
+        Uri.parse('${currentServer.replaceFirst(RegExp(r'/$'), '')}/Items/${Uri.encodeComponent(id)}/Images/$type')
             .replace(
               queryParameters: {
                 'tag': tag.toString(),
-                'maxWidth': type == 'Backdrop' ? '1920' : '900',
+                'maxWidth': '900',
                 // NetworkImage's cache key omits headers. Include the user in
                 // the resource identity without putting credentials in its URL.
                 'UserId': user,
@@ -111,20 +166,9 @@ class MediaMapper {
         : null;
     final parentLogo = parent == null || (episode && parent['Id'] != item['SeriesId']) ? null : image(parent, 'Logo');
     final logo = (episode ? null : image(item, 'Logo')) ?? parentLogo ?? inherited;
-    var backs = <ArtworkRef>[
-      for (var i = 0; i < (item['BackdropImageTags'] as List? ?? const []).length; i++)
-        image(item, 'Backdrop', index: i)!,
-    ];
-    if (backs.isEmpty && parent != null) {
-      backs = artwork(parent).backdrops.toList();
-    }
-    if (backs.isEmpty && item['ParentBackdropItemId'] != null) {
-      final inherited = {'Id': item['ParentBackdropItemId'], 'BackdropImageTags': item['ParentBackdropImageTags']};
-      for (var i = 0; i < (item['ParentBackdropImageTags'] as List? ?? const []).length; i++) {
-        final ref = image(inherited, 'Backdrop', index: i);
-        if (ref != null) backs.add(ref);
-      }
-    }
+    final rawCandidates = backdropCandidates(item, parent: parent);
+    final orderedCandidates = _orderBackdrops?.call(rawCandidates) ?? rawCandidates;
+    final backs = <ArtworkRef>[for (final c in orderedCandidates) _backdropRef(c)];
     final backdrop = backs.firstOrNull;
     ArtworkPlan plan(List<ArtworkLayer> layers, {List<ArtworkRef> stack = const []}) =>
         ArtworkPlan(layers: List.unmodifiable(layers), fallbackTitle: title, stack: stack);
