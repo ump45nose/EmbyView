@@ -452,6 +452,12 @@ void main() {
     expect(detail.collectionItems.map((c) => c.id), ['m1', 'm2', 'm3']);
     expect(detail.card.art.poster.stack.map((e) => e.id), ['m2:Primary:0', 'm3:Primary:0']);
     members.last['Collections'] = []; // Membership may change without the movie's DateLastSaved.
+    f.requests.clear();
+    final reused = await f.data.openWall(query());
+    await reused.page(offset: 0, limit: 20);
+    expect(f.requests.any((r) => r.queryParameters.containsKey('MinDateLastSaved')), isFalse);
+    // Explicit search reconciliation remains responsible for membership updates.
+    await f.data.search('Set');
     final refreshed = await f.data.openWall(query());
     expect(
       (await refreshed.page(
@@ -461,6 +467,108 @@ void main() {
       ['m3:Primary:0'],
     );
   });
+  test('zone, facets and sorted listings coalesce and invalidate with session state', () async {
+    final f = Fixture();
+    addTearDown(f.dispose);
+    var active = 0, peak = 0;
+    f.hook = (_) async {
+      active++;
+      if (active > peak) peak = active;
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+      active--;
+      return null;
+    };
+    final (zone, sameZone) = await (f.data.zone('movies'), f.data.zone('movies')).wait;
+    expect(sameZone, same(zone));
+    expect(peak, inInclusiveRange(2, 4));
+    final count = f.requests.length;
+    expect(await f.data.zone('movies'), same(zone));
+    final facets = await f.data.wallFacets(query());
+    expect(await f.data.wallFacets(query(sort: WallSort.score)), same(facets));
+    final listing = await f.data.openWall(query(sort: WallSort.added));
+    expect(await f.data.openWall(query(sort: WallSort.added)), same(listing));
+    expect(f.requests.length, count);
+
+    await f.data.setFavorite('b', true);
+    expect(await f.data.zone('movies'), isNot(same(zone)));
+    expect(await f.data.wallFacets(query()), isNot(same(facets)));
+    await expectLater(listing.page(offset: 0, limit: 1), throwsA(isA<EmbyViewFailure>()));
+
+    final beforeAddress = await f.data.zone('movies');
+    f.client.baseUrl = 'https://backup.test/emby';
+    final afterAddress = await f.data.zone('movies');
+    expect(afterAddress, isNot(same(beforeAddress)));
+    f.preferences.add(
+      const ZonePreference(id: 'movies', name: '新名称', iconKey: 'film', colorSlot: 1, rule: ZoneRule.library('movies')),
+    );
+    expect((await f.data.zone('movies')).zone.name, '新名称');
+    final beforeForbidden = await f.data.wallFacets(query());
+    f.rejectStatus = (o) => o.path.endsWith('/Items/b') ? 403 : null;
+    await expectLater(f.data.detail('b'), throwsA(isA<EmbyViewFailure>()));
+    expect(await f.data.wallFacets(query()), isNot(same(beforeForbidden)));
+    final beforeSwitch = f.requests.length;
+    f.client.userId = 'u2';
+    await expectLater(f.data.zone('movies'), throwsA(isA<EmbyViewFailure>()));
+    await expectLater(f.data.wallFacets(query()), throwsA(isA<EmbyViewFailure>()));
+    expect(f.requests.length, beforeSwitch);
+    final other = EmbyMediaData(client: f.client, transliterate: latin);
+    addTearDown(other.dispose);
+    expect(await other.zone('movies'), isNot(same(afterAddress)));
+  });
+
+  test('title walls reuse restored index and do not force global refresh', () async {
+    final f = Fixture();
+    addTearDown(f.dispose);
+    await f.data.openWall(query());
+    f.data.dispose();
+    final restored = EmbyMediaData(client: f.client, transliterate: (_) => throw StateError('unexpected indexing'));
+    addTearDown(restored.dispose);
+    f.requests.clear();
+    final first = await restored.openWall(query());
+    expect(first.info.total, 4);
+    final second = await restored.openWall(query());
+    expect(second, same(first));
+    await second.page(offset: 0, limit: 4);
+    expect(f.requests.where((r) => r.queryParameters['Fields'] == 'Id').length, 1);
+    expect(
+      f.requests.any(
+        (r) =>
+            r.queryParameters.containsKey('MinDateLastSaved') ||
+            r.queryParameters['Fields'].toString().contains('Collections'),
+      ),
+      isFalse,
+    );
+  });
+
+  test('stale index refresh is nonblocking and coalesced', () async {
+    final f = Fixture();
+    addTearDown(f.dispose);
+    var now = DateTime.utc(2026, 1, 1);
+    final data = EmbyMediaData(client: f.client, transliterate: latin, now: () => now);
+    addTearDown(data.dispose);
+    final initial = await data.openWall(query());
+    now = now.add(const Duration(minutes: 6));
+    final started = Completer<void>();
+    final release = Completer<void>();
+    addTearDown(() {
+      if (!release.isCompleted) release.complete();
+    });
+    f.hook = (o) async {
+      if (o.queryParameters['MinDateLastSaved'] != null) {
+        if (!started.isCompleted) started.complete();
+        await release.future;
+      }
+      return null;
+    };
+    expect(await data.openWall(query()), same(initial));
+    await started.future;
+    expect(await data.openWall(query()), same(initial));
+    expect(f.requests.where((r) => r.queryParameters['MinDateLastSaved'] != null).length, 1);
+    final search = data.search('Alpha');
+    release.complete();
+    expect((await search).bestMatch?.id, 'a');
+  });
+
   test('ID reconciliation is paged at 500 and persistent indexes isolate servers', () async {
     final f = Fixture();
     addTearDown(f.dispose);

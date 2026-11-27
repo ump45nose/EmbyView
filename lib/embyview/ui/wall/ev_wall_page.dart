@@ -108,12 +108,13 @@ class _EvWallPageState extends State<EvWallPage> {
   EmbyViewFailure? _error;
 
   int _generation = 0;
+  int _facetsGeneration = 0;
   final LinkedHashMap<int, List<MediaCard>> _pages = LinkedHashMap();
   final Map<int, _PageSignal> _pageNotifiers = {};
   final Set<int> _inFlightPages = {}, _pendingPages = {}, _failedPageIndices = {};
   final List<int> _pageQueue = [];
   bool _flushScheduled = false, _stageSeeded = false;
-  bool _facetsFailed = false;
+  bool _facetsFailed = false, _listingChanged = false;
   String? _facetsErrorMessage, _pageErrorMessage;
 
   _WallPopover _openPopover = _WallPopover.none;
@@ -255,13 +256,17 @@ class _EvWallPageState extends State<EvWallPage> {
 
   void _applyQuery(WallQuery next) {
     if (evSameWallQuery(_query, next)) return;
+    final reuseFacets = !_facetsFailed && evSameWallQuery(_query, (
+      scope: next.scope, sort: _query.sort, watched: next.watched,
+      genreId: next.genreId, years: next.years, technology: next.technology,
+    ));
     setState(() { _query = next; _measuredHeaderHeight = null; });
     if (_scrollController.hasClients && _scrollController.offset > 0) {
       _suppressScrollLetterSync = true;
       _scrollController.jumpTo(0.0);
       _suppressScrollLetterSync = false;
     }
-    _reloadAll();
+    _reloadAll(reuseFacets: reuseFacets);
     _syncShellChrome();
   }
 
@@ -293,7 +298,7 @@ class _EvWallPageState extends State<EvWallPage> {
     }
   }
 
-  void _reloadAll() {
+  void _reloadAll({bool reuseFacets = false}) {
     final data = _boundData;
     final gen = ++_generation;
     _scrollIdleTimer?.cancel();
@@ -306,26 +311,29 @@ class _EvWallPageState extends State<EvWallPage> {
     _pendingPages.clear();
     _pageQueue.clear();
     _failedPageIndices.clear();
-    _facetsFailed = false;
-    _facetsErrorMessage = null;
+    _listingChanged = false;
+    if (!reuseFacets) {
+      _facetsFailed = false;
+      _facetsErrorMessage = null;
+      _facets = const WallFacets();
+      _loadingFacets = data != null;
+    }
     _pageErrorMessage = null;
     _bannerError.value = null;
     _stageSeeded = false;
     _listing = null;
-    _facets = const WallFacets();
     _sortedOffsets = const [];
     _activeLetter.value = '';
     _scrolling.value = false;
     _error = null;
     _loadingWall = data != null;
-    _loadingFacets = data != null;
     if (mounted) {
       setState(() {});
       WidgetsBinding.instance.addPostFrameCallback((_) => _prunePageNotifiers());
     }
     if (data == null) return;
     unawaited(_loadListing(data, _query, gen));
-    unawaited(_loadFacets(data, _query, gen));
+    if (!reuseFacets) unawaited(_loadFacets(data, _query, ++_facetsGeneration));
   }
 
   Future<void> _loadListing(EmbyViewData data, WallQuery query, int gen) async {
@@ -353,13 +361,13 @@ class _EvWallPageState extends State<EvWallPage> {
   Future<void> _loadFacets(EmbyViewData data, WallQuery query, int gen) async {
     try {
       final facets = await data.wallFacets(query);
-      if (!mounted || gen != _generation) return;
+      if (!mounted || gen != _facetsGeneration) return;
       _facetsFailed = false;
       _facetsErrorMessage = null;
       _syncBannerError();
       setState(() { _facets = facets; _loadingFacets = false; });
     } catch (e) {
-      if (!mounted || gen != _generation) return;
+      if (!mounted || gen != _facetsGeneration) return;
       _facetsFailed = true;
       _facetsErrorMessage = e is EmbyViewFailure ? e.reason : '筛选项加载失败，请重试';
       _syncBannerError();
@@ -482,6 +490,7 @@ class _EvWallPageState extends State<EvWallPage> {
         _inFlightPages.remove(pageIndex);
         if (_isNearVisible(pageIndex)) {
           _failedPageIndices.add(pageIndex);
+          if (e is EmbyViewFailure && e.code == 'wall_changed') _listingChanged = true;
           _pageErrorMessage = e is EmbyViewFailure ? e.reason : '部分内容加载失败，请重试';
           _syncBannerError();
         }
@@ -500,13 +509,17 @@ class _EvWallPageState extends State<EvWallPage> {
   }
 
   void _retryBannerError() {
+    if (_listingChanged) {
+      _reloadAll();
+      return;
+    }
     final data = _boundData;
     if (_facetsFailed && data != null) {
       _facetsFailed = false;
       _facetsErrorMessage = null;
       _syncBannerError();
       setState(() => _loadingFacets = true);
-      unawaited(_loadFacets(data, _query, _generation));
+      unawaited(_loadFacets(data, _query, ++_facetsGeneration));
     }
     if (_failedPageIndices.isNotEmpty) {
       final pages = _failedPageIndices.toList()..sort();

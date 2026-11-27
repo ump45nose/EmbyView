@@ -1,4 +1,6 @@
 // dart format width=120
+import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -65,12 +67,102 @@ class EmbyMediaData implements EmbyViewData {
   late final MediaMapper _mapper;
   bool _disposed = false;
   int _revision = 0;
+  final _zoneCache = <String, Future<ZoneData>>{};
+  final _facetCache = <Object, Future<WallFacets>>{};
+  final _wallCache = <Object, Future<WallListing>>{};
+  final _titleWalls = <Object, _Wall>{};
+  final _requestWaiters = Queue<Completer<void>>();
+  int _activeRequests = 0;
+
+  void _invalidateBrowse() {
+    _revision++;
+    _zoneCache.clear();
+    _facetCache.clear();
+    _wallCache.clear();
+    _titleWalls.clear();
+  }
+
+  Object _queryKey(WallQuery q, {bool includeSort = true}) => (
+    switch (q.scope) {
+      ZoneWallScope(:final zoneId) => ('zone', zoneId),
+      FeatureWallScope(:final feature) => ('feature', feature),
+    },
+    includeSort ? q.sort : null,
+    q.watched,
+    q.genreId,
+    q.years?.from,
+    q.years?.to,
+    q.technology,
+  );
+
+  // Futures coalesce concurrent loads too. A failed or invalidated load cannot
+  // populate the cache for a newer revision.
+  Future<T> _cached<K, T>(Map<K, Future<T>> cache, K key, Future<T> Function() load) async {
+    _check();
+    await _preferences();
+    _check();
+    _refreshIndexInBackground();
+    final revision = _revision;
+    final cached = cache[key];
+    final future = cached ?? load();
+    if (cached == null) {
+      if (cache.length >= 64) cache.remove(cache.keys.first);
+      cache[key] = future;
+    }
+    try {
+      final result = await future;
+      _check();
+      if (revision != _revision) {
+        return await _cached(cache, key, load);
+      }
+      return result;
+    } catch (_) {
+      if (identical(cache[key], future)) cache.remove(key);
+      rethrow;
+    }
+  }
+
+  // Bound actual HTTP requests, including nested facet and shelf loads.
+  Future<T> _boundedRequest<T>(Future<T> Function() request) async {
+    if (_activeRequests < 4) {
+      _activeRequests++;
+    } else {
+      final waiter = Completer<void>();
+      _requestWaiters.add(waiter);
+      await waiter.future;
+    }
+    try {
+      _check();
+      return await request();
+    } finally {
+      if (_requestWaiters.isNotEmpty) {
+        _requestWaiters.removeFirst().complete();
+      } else {
+        _activeRequests--;
+      }
+    }
+  }
+
   String? _preferenceKey;
   Future<List<Json>>? _viewLoad;
   List<Json> _visibleViews = const [];
   Future<List<_IndexItem>>? _indexLoad;
   List<_IndexItem>? _index;
   DateTime? _indexedAt;
+  DateTime? _lastRefreshAttempt;
+  int _userDataRevision = 0;
+  static const _indexRefreshInterval = Duration(minutes: 5);
+
+  void _refreshIndexInBackground() {
+    if (_index == null || _indexedAt == null || _indexLoad != null) return;
+    final last = _lastRefreshAttempt ?? _indexedAt!;
+    if (_now().toUtc().difference(last) < _indexRefreshInterval) return;
+    _lastRefreshAttempt = _now().toUtc();
+    unawaited(_catalog(refresh: true).then<void>((_) {}, onError: (Object _) {
+      // Browsing can keep using the index; failed sync is retried after the
+      // interval, while authorization failures still invalidate via _get.
+    }));
+  }
   final List<String> _recent = [];
   final Map<String, List<Json>> _collectionArt = {};
   bool _collectionIndexReady = false;
@@ -91,7 +183,7 @@ class EmbyMediaData implements EmbyViewData {
     _visibleViews = const [];
     _recent.clear();
     _collectionArt.clear();
-    _revision++;
+    _invalidateBrowse();
   }
 
   bool get _sessionMatches =>
@@ -106,6 +198,7 @@ class EmbyMediaData implements EmbyViewData {
     final current = _client.baseUrl;
     if (current == _lastBaseUrl) return;
     _lastBaseUrl = current;
+    _invalidateBrowse();
     _viewLoad = null;
     _collectionArt.clear();
     _collectionIndexReady = false;
@@ -113,6 +206,7 @@ class EmbyMediaData implements EmbyViewData {
 
   void _check() {
     if (!_sessionMatches) {
+      dispose();
       throw const EmbyViewFailure('用户会话已改变，请重新打开页面', code: 'session_changed');
     }
     _syncBaseUrlIfChanged();
@@ -121,7 +215,9 @@ class EmbyMediaData implements EmbyViewData {
   Future<dynamic> _get(String resource, {String? id, Json params = const {}}) async {
     _check();
     try {
-      final result = await _client.itemsApi.browse(resource, itemId: id, parameters: params, cancelToken: _cancel);
+      final result = await _boundedRequest(
+        () => _client.itemsApi.browse(resource, itemId: id, parameters: params, cancelToken: _cancel),
+      );
       _check();
       if (resource == 'item' && id != null) _forbiddenScopes.remove(id);
       if (resource == 'items' && params['ParentId'] != null) _forbiddenScopes.remove(params['ParentId'].toString());
@@ -134,6 +230,7 @@ class EmbyMediaData implements EmbyViewData {
       }
       _check();
       if (e.response?.statusCode == 403) {
+        _invalidateBrowse();
         final scope = const ['item', 'seasons', 'episodes'].contains(resource)
             ? id
             : resource == 'items'
@@ -144,7 +241,6 @@ class EmbyMediaData implements EmbyViewData {
           _index = _index?.where((item) => !_isForbidden(item)).toList();
           _collectionArt.clear();
           _collectionIndexReady = false;
-          _revision++;
           await (await _storage).remove(_cacheKey);
         }
         throw const EmbyViewFailure('没有访问此资源的权限', code: 'forbidden');
@@ -175,6 +271,7 @@ class EmbyMediaData implements EmbyViewData {
       }
       _check();
       if (e.response?.statusCode == 403) {
+        _invalidateBrowse();
         throw const EmbyViewFailure('没有访问此资源的权限', code: 'forbidden');
       }
       final network =
@@ -191,7 +288,8 @@ class EmbyMediaData implements EmbyViewData {
   }
 
   Future<void> _syncUserData(String itemId, {bool? favorite, bool? played}) async {
-    _revision++;
+    _userDataRevision++;
+    _invalidateBrowse();
     final index = _index;
     if (index == null) return;
     var updated = false;
@@ -288,7 +386,9 @@ class EmbyMediaData implements EmbyViewData {
   }
 
   Future<List<ZonePreference>> _preferences() async {
+    _check();
     final views = await _views();
+    _check();
     final configured = _zonePreferences();
     final preferences = configured.isEmpty
         ? await defaultZonePreferences()
@@ -297,8 +397,10 @@ class EmbyMediaData implements EmbyViewData {
                 (p) => p.rule is! LibraryZoneRule || views.any((v) => v['Id'] == (p.rule as LibraryZoneRule).libraryId),
               )
               .toList();
-    final key = preferences.map((p) => '${p.id}:${_ruleKey(p.rule)}').join('|');
-    if (_preferenceKey != null && _preferenceKey != key) _revision++;
+    final key = jsonEncode([
+      for (final p in preferences) [p.id, p.name, p.iconKey, p.colorSlot, p.custom, _ruleKey(p.rule)],
+    ]);
+    if (_preferenceKey != null && _preferenceKey != key) _invalidateBrowse();
     _preferenceKey = key;
     return preferences;
   }
@@ -493,21 +595,28 @@ class EmbyMediaData implements EmbyViewData {
   Future<List<_IndexItem>> _catalog({bool refresh = false}) async {
     _check();
     await _restoreIndex();
+    if (!refresh && _index != null) {
+      _refreshIndexInBackground();
+      return _index!;
+    }
     if (_indexLoad != null) return _indexLoad!;
-    if (!refresh && _index != null) return _index!;
+    _lastRefreshAttempt = _now().toUtc();
     return _indexLoad = _refreshCatalog().whenComplete(() => _indexLoad = null);
   }
 
   Future<List<_IndexItem>> _refreshCatalog() async {
     final started = _now().toUtc();
+    final userDataRevision = _userDataRevision;
+    var changedIndex = false;
     final result = <_IndexItem>[];
     try {
-      _viewLoad = null;
+      if (_index != null) _viewLoad = null;
       final views = await _views();
       final libraries = views.map((v) => v['Id'].toString()).toSet();
       if (_index?.any((e) => !libraries.contains(e.library)) == true) {
         _index = _index!.where((e) => libraries.contains(e.library)).toList();
-        _revision++;
+        _indexCollections(_index!);
+        _invalidateBrowse();
       }
       for (final view in views) {
         final library = view['Id'].toString();
@@ -532,19 +641,29 @@ class EmbyMediaData implements EmbyViewData {
               'MinDateLastSaved': _indexedAt!.subtract(const Duration(seconds: 1)).toIso8601String(),
             });
             for (final row in changed) {
-              prior[row['Id'].toString()] = _IndexItem(row, library, _transliterate);
+              final id = row['Id'].toString();
+              if (jsonEncode(prior[id]?.raw) != jsonEncode(row)) changedIndex = true;
+              prior[id] = _IndexItem(row, library, _transliterate);
             }
             final visible = await _all({...params, 'Fields': 'Id,Collections'});
             for (final row in visible) {
-              if (row.containsKey('Collections')) prior[row['Id'].toString()]?.raw['Collections'] = row['Collections'];
+              final id = row['Id'].toString();
+              final old = prior[id];
+              if (old != null && row.containsKey('Collections') &&
+                  jsonEncode(old.raw['Collections']) != jsonEncode(row['Collections'])) {
+                changedIndex = true;
+                prior[id] = _IndexItem({...old.raw, 'Collections': row['Collections']}, library, (_) => old.title.latin);
+              }
             }
             final ids = visible.map((e) => e['Id'].toString()).toSet();
             if (prior.keys.any((id) => !ids.contains(id))) {
-              _revision++;
+              _invalidateBrowse();
               _index = _index!.where((e) => e.library != library || ids.contains(e.id)).toList();
+              _indexCollections(_index!);
             }
             result.addAll(prior.values.where((e) => ids.contains(e.id)));
             final missing = ids.difference(prior.keys.toSet()).toList();
+            if (missing.isNotEmpty) changedIndex = true;
             for (var i = 0; i < missing.length; i += 100) {
               final rows = await _all({...params, 'Ids': missing.skip(i).take(100).join(',')});
               result.addAll(rows.map((r) => _IndexItem(r, library, _transliterate)));
@@ -557,7 +676,14 @@ class EmbyMediaData implements EmbyViewData {
       _check();
       result.removeWhere(_isForbidden);
       final visible = result.map((e) => e.id).toSet();
-      if (_index?.any((e) => !visible.contains(e.id)) == true) _revision++;
+      if (_index?.any((e) => !visible.contains(e.id)) == true) _invalidateBrowse();
+      // A concurrent user mutation must not be overwritten by rows fetched
+      // before the write. Keep the live index and retry on the next sync.
+      if (userDataRevision != _userDataRevision) {
+        if (_index != null) return _index!;
+        return await _refreshCatalog();
+      }
+      if (changedIndex) _invalidateBrowse();
       _index = result;
       _indexCollections(result);
       _indexedAt = started;
@@ -606,7 +732,7 @@ class EmbyMediaData implements EmbyViewData {
   Future<List<MediaCard>> _cards(List<Json> rows, {String? library}) async {
     // Reuse the light, user-scoped index rather than opening every container.
     if (!_collectionIndexReady && rows.any((e) => e['Type'] == 'BoxSet')) {
-      final index = await _catalog(refresh: true);
+      final index = await _catalog();
       if (!_collectionIndexReady) _indexCollections(index);
     }
     return rows.map((row) => _card(row, library: library)).toList();
@@ -629,10 +755,35 @@ class EmbyMediaData implements EmbyViewData {
 
   @override
   Future<WallListing> openWall(WallQuery query) async {
+    // Random order is fresh per opening. For a previously opened title wall,
+    // validate the scope's count cheaply before reusing the sorted snapshot.
+    if (query.sort == WallSort.random) return _openWall(query);
+    if (query.sort == WallSort.title && query.scope is FeatureWallScope) return _openWall(query);
+    final key = _queryKey(query);
+    if (query.sort == WallSort.title) {
+      _check();
+      await _preferences();
+      final previous = _titleWalls[key];
+      if (previous != null) {
+        final total = await _count(previous.params);
+        _check();
+        if (previous.revision == _revision) {
+          if (total == previous.info.total) {
+            _refreshIndexInBackground();
+            return previous;
+          }
+          _invalidateBrowse();
+        }
+      }
+    }
+    return _cached(_wallCache, key, () => _openWall(query));
+  }
+
+  Future<WallListing> _openWall(WallQuery query) async {
     final frozen = query.sort == WallSort.title || query.sort == WallSort.random || query.scope is FeatureWallScope;
-    final index = query.sort == WallSort.title ? await _catalog(refresh: true) : null;
-    if (!frozen) _viewLoad = null;
+    final index = query.sort == WallSort.title ? await _catalog() : null;
     final params = await _params(query);
+    final revision = _revision;
     List<String>? ids;
     final letters = <String, int>{};
     if (frozen) {
@@ -648,8 +799,19 @@ class EmbyMediaData implements EmbyViewData {
         rows = rows.where((e) => _featureMatch(e, feature)).toList();
       }
       if (query.sort == WallSort.title) {
-        final keys = {for (final e in index!) e.id: e.title};
-        TitleKey key(Json row) => keys[row['Id']] ?? TitleKey(row['Name'] as String? ?? '', _transliterate);
+        final keys = {for (final e in index!) e.id: e};
+        final titles = <String, TitleKey>{};
+        TitleKey key(Json row) {
+          final id = row['Id'].toString();
+          return titles.putIfAbsent(id, () {
+            final old = keys[id];
+            final name = row['Name'] as String? ?? '';
+            return old != null && (row['Name'] == null || old.raw['Name'] == name)
+                ? old.title
+                : TitleKey(name, _transliterate);
+          });
+        }
+
         rows.sort((a, b) {
           final ak = key(a), bk = key(b);
           final group = (ak.letter == '#' ? 1 : 0).compareTo(bk.letter == '#' ? 1 : 0);
@@ -663,7 +825,32 @@ class EmbyMediaData implements EmbyViewData {
       ids = rows.map((r) => r['Id'].toString()).toList();
     }
     final total = ids?.length ?? await _count(params);
-    return _Wall(this, query, params, ids, _revision, WallInfo(total: total, letterOffsets: Map.unmodifiable(letters)));
+    _check();
+    if (revision != _revision) return _openWall(query);
+    final key = _queryKey(query);
+    if (query.sort == WallSort.title) {
+      final previous = _titleWalls[key];
+      if (previous != null && (previous.ids!.length != ids!.length || !previous.ids!.toSet().containsAll(ids))) {
+        _invalidateBrowse();
+      }
+    }
+    final wall = _Wall(
+      this,
+      query,
+      params,
+      ids,
+      _revision,
+      WallInfo(total: total, letterOffsets: Map.unmodifiable(letters)),
+    );
+    if (query.sort == WallSort.title) {
+      if (_titleWalls.length >= 64) {
+        final oldest = _titleWalls.keys.first;
+        _titleWalls.remove(oldest);
+        _wallCache.remove(oldest);
+      }
+      _titleWalls[key] = wall;
+    }
+    return wall;
   }
 
   Future<void> _validateWall(_Wall wall) async {
@@ -689,12 +876,7 @@ class EmbyMediaData implements EmbyViewData {
     return ids.map((id) => rows[id]).whereType<Json>().toList();
   }
 
-  Future<int> _queryCount(WallQuery query) async {
-    if (query.scope is FeatureWallScope) {
-      return (await openWall(query)).info.total;
-    }
-    return _count(await _params(query));
-  }
+  Future<int> _queryCount(WallQuery query) async => (await openWall(query)).info.total;
 
   Future<List<(TechFilter, String)>> _technologyOptions(Json params) async {
     if (params['IncludeItemTypes'] == 'Series' || params['IncludeItemTypes'] == 'BoxSet') return [];
@@ -732,7 +914,7 @@ class EmbyMediaData implements EmbyViewData {
 
   WallQuery _facet(WallQuery q, String group, Object? value) => (
     scope: q.scope,
-    sort: q.sort,
+    sort: group == 'sort' ? WallSort.score : q.sort,
     watched: group == 'watched' ? value as WatchFilter : q.watched,
     genreId: group == 'genre' ? value as String? : q.genreId,
     years: group == 'year' ? value as YearRange? : q.years,
@@ -747,20 +929,43 @@ class EmbyMediaData implements EmbyViewData {
       )).whereType<FacetOption<T>>().toList();
 
   @override
-  Future<WallFacets> wallFacets(WallQuery query) async {
+  Future<WallFacets> wallFacets(WallQuery query) =>
+      _cached(_facetCache, _queryKey(query, includeSort: false), () => _loadWallFacets(_facet(query, 'sort', null)));
+
+  Future<WallFacets> _loadWallFacets(WallQuery query) async {
     final params = await _params(query);
-    final genres = itemRecords(
-      await _get(
-        'genres',
-        params: {
-          if (params['ParentId'] != null) 'ParentId': params['ParentId'],
-          'Recursive': true,
-          'IncludeItemTypes': params['IncludeItemTypes'],
-        },
-      ),
+    Future<List<FacetOption<String>>> genreOptions() async {
+      final genres = itemRecords(
+        await _get(
+          'genres',
+          params: {
+            if (params['ParentId'] != null) 'ParentId': params['ParentId'],
+            'Recursive': true,
+            'IncludeItemTypes': params['IncludeItemTypes'],
+          },
+        ),
+      );
+      final rule = query.scope is ZoneWallScope ? (await _preference((query.scope as ZoneWallScope).zoneId)).rule : null;
+      return _options([
+        for (final g in genres)
+          if (rule is! GenreZoneRule || g['Id'] == rule.genreId) (g['Id'].toString(), g['Name'] as String? ?? ''),
+      ], (value) => _queryCount(_facet(query, 'genre', value)));
+    }
+
+    Future<List<FacetOption<TechFilter>>> technologyOptions() async => _options(
+      await _technologyOptions(params),
+      (value) => _queryCount(_facet(query, 'tech', value)),
     );
-    final rule = query.scope is ZoneWallScope ? (await _preference((query.scope as ZoneWallScope).zoneId)).rule : null;
-    final yearRows = await _all({...params, 'Fields': 'ProductionYear,$_featureFields', 'Years': null});
+
+    final results = await Future.wait<Object>([
+      _all({...params, 'Fields': 'ProductionYear,$_featureFields', 'Years': null}),
+      _options([
+        for (final w in WatchFilter.values) (w, ['全部', '未看', '已看', '收藏'][w.index]),
+      ], (value) => _queryCount(_facet(query, 'watched', value))),
+      genreOptions(),
+      technologyOptions(),
+    ]);
+    final yearRows = results[0] as List<Json>;
     final yearCounts = <int, int>{};
     for (final row in yearRows) {
       if (query.scope case FeatureWallScope(:final feature)) {
@@ -775,13 +980,8 @@ class EmbyMediaData implements EmbyViewData {
         for (final sort in WallSort.values)
           FacetOption(value: sort, label: ['标题', '最近添加', '年份', '评分', '随机'][sort.index]),
       ],
-      watched: await _options([
-        for (final w in WatchFilter.values) (w, ['全部', '未看', '已看', '收藏'][w.index]),
-      ], (value) => _queryCount(_facet(query, 'watched', value))),
-      genres: await _options([
-        for (final g in genres)
-          if (rule is! GenreZoneRule || g['Id'] == rule.genreId) (g['Id'].toString(), g['Name'] as String? ?? ''),
-      ], (value) => _queryCount(_facet(query, 'genre', value))),
+      watched: results[1] as List<FacetOption<WatchFilter>>,
+      genres: results[2] as List<FacetOption<String>>,
       years: [
         for (final y in years)
           FacetOption(
@@ -790,10 +990,7 @@ class EmbyMediaData implements EmbyViewData {
             count: yearCounts[y],
           ),
       ],
-      technologies: await _options(
-        await _technologyOptions(params),
-        (value) => _queryCount(_facet(query, 'tech', value)),
-      ),
+      technologies: results[3] as List<FacetOption<TechFilter>>,
     );
   }
 
@@ -876,34 +1073,48 @@ class EmbyMediaData implements EmbyViewData {
   ];
 
   @override
-  Future<ZoneData> zone(String zoneId) async {
+  Future<ZoneData> zone(String zoneId) => _cached(_zoneCache, zoneId, () => _loadZone(zoneId));
+
+  Future<ZoneData> _loadZone(String zoneId) async {
     final preference = await _preference(zoneId);
     final scope = WallScope.zone(zoneId);
-    final latest = await _shelf('latest', '最近添加', _query(scope, sort: WallSort.added));
-    final high = await _shelf('score', '高分精选', _query(scope, sort: WallSort.score));
     final params = await _params(_query(scope));
     final now = _now();
     final month = DateTime(now.year, now.month).toUtc();
     final nextMonth = DateTime(now.year, now.month + 1).toUtc();
-    final facets = await wallFacets(_query(scope));
-    final resume = (await continueWatching(zoneId: zoneId)).items;
-    return ZoneData(
-      zone: await _tile(preference),
-      all: _query(scope),
-      latest: latest,
-      highRated: high,
-      addedThisMonth: await _count({
+    final results = await Future.wait<Object>([
+      _shelf('latest', '最近添加', _query(scope, sort: WallSort.added)),
+      _shelf('score', '高分精选', _query(scope, sort: WallSort.score)),
+      wallFacets(_query(scope)),
+      continueWatching(zoneId: zoneId),
+      _tile(preference),
+      _count({
         ...params,
         'MinDateCreated': month.toIso8601String(),
         'MaxDateCreated': nextMonth.subtract(const Duration(microseconds: 1)).toIso8601String(),
       }),
+    ]);
+    final latest = results[0] as HomeShelf;
+    final high = results[1] as HomeShelf;
+    final facets = results[2] as WallFacets;
+    final resume = (results[3] as Page<ResumeCard>).items;
+    final tile = results[4] as ZoneTile;
+    final added = results[5] as int;
+    final genres = await mapBounded(
+      facets.genres.where((e) => e.count != 0).toList(),
+      4,
+      (g) => _shelf('genre:${g.value}', g.label, _query(scope, sort: WallSort.score, genre: g.value)),
+    );
+    return ZoneData(
+      zone: tile,
+      all: _query(scope),
+      latest: latest,
+      highRated: high,
+      addedThisMonth: added,
       continueWatching: resume,
       recommendations: _recommend(resume, high.items),
       genreCounts: facets.genres,
-      genres: [
-        for (final g in facets.genres.where((e) => e.count != 0))
-          await _shelf('genre:${g.value}', g.label, _query(scope, sort: WallSort.score, genre: g.value)),
-      ],
+      genres: genres.whereType<HomeShelf>().toList(),
       collage: latest.items
           .map((c) => c.art.poster.layers.firstOrNull?.source)
           .whereType<ArtworkRef>()
@@ -1358,11 +1569,13 @@ class _Wall implements WallListing {
         response is Map &&
             integer(response['TotalRecordCount']) != null &&
             integer(response['TotalRecordCount']) != info.total) {
-      owner._revision++;
+      owner._invalidateBrowse();
       throw const EmbyViewFailure('片库条目已变化，请重新打开海报墙', retryable: true, code: 'wall_changed');
     }
+    final cards = await owner._cards(rows, library: params['ParentId'] as String?);
+    await owner._validateWall(this);
     return Page(
-      items: await owner._cards(rows, library: params['ParentId'] as String?),
+      items: cards,
       total: info.total,
       nextOffset: rows.isNotEmpty && offset + rows.length < info.total ? offset + rows.length : null,
     );

@@ -420,11 +420,13 @@ void main() {
 
         // Select WallSort.score -> immediately updates sort, closes menu, hides alpha bar, resets scroll.
         final beforeScore = data.openWallCalls.length;
+        final facetsBeforeSort = data.facetsCalls.length;
         await tester.tap(find.byKey(const Key('ev_wall_sort_option_score')));
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('ev_wall_sort_menu')), findsNothing);
         expect(data.openWallCalls.length, beforeScore + 1);
         expect(data.openWallCalls.last.sort, WallSort.score);
+        expect(data.facetsCalls.length, facetsBeforeSort);
         expect(find.byKey(const Key('ev_alpha_bar')), findsNothing);
         expect(scrollController.offset, 0.0);
 
@@ -444,6 +446,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(data.openWallCalls.length, before4k + 1);
         expect(data.openWallCalls.last.technology, TechFilter.uhd4k);
+        expect(data.facetsCalls.length, facetsBeforeSort + 1);
         expect(find.text('9 部'), findsOneWidget);
         expect(find.byKey(const Key('ev_wall_filter_badge')), findsOneWidget);
         expect(find.text('盗梦空间'), findsOneWidget);
