@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../data/diagnostics_exporter.dart';
 import '../embyview.dart';
 import '../playback/playback_subtitle_input.dart';
+import '../playback/track_selection.dart';
 import 'ai/subtitle_ai.dart';
 import 'audio/subtitle_audio.dart';
 import 'emby_subtitle_library.dart';
@@ -300,28 +301,109 @@ class BoundSubtitlePanel implements SubtitlePanel {
       }
       _check(scope);
       final play = session.snapshot;
-      if (!preferences().autoSelectChineseSubtitle ||
-          play.subtitleTracks.any((track) => track.id == initiallySelected && isChineseSubtitle(track.language)) ||
+      final prefs = preferences();
+      if (prefs.subtitleAutoMode == SubtitleAutoMode.off ||
+          scope.source.subtitlesExplicitlyDisabled ||
           play.selectedSubtitleId != initiallySelected ||
           selection != input.subtitleSelectionRevision ||
           scope.userApplied) {
         return;
       }
-      final chinese = available.where((entry) => isChineseSubtitle(entry.$1.language) && !entry.$1.isForced);
-      final preferred =
-          chinese.where((entry) => entry.$1.isComplete).firstOrNull?.$2 ??
-          play.subtitleTracks
-              .where(
-                (track) =>
-                    !track.isForced &&
-                    isChineseSubtitle(track.language) &&
-                    (track.source == PlaybackTrackSource.embedded ||
-                        track.source == PlaybackTrackSource.embyExternal) &&
-                    (scope.retained[track.id]?.isComplete ?? true),
-              )
-              .firstOrNull
-              ?.id ??
-          chinese.firstOrNull?.$2;
+      if (prefs.subtitleAutoMode == SubtitleAutoMode.foreignOnly) {
+        final activeAudio = play.audioTracks
+            .where((track) => track.id == play.selectedAudioId)
+            .firstOrNull;
+        if (isNativeAudioForSubtitlePolicy(
+          prefs: prefs,
+          activeAudioLanguage: activeAudio?.language,
+          activeAudioTitle: activeAudio?.name,
+        )) {
+          return;
+        }
+      }
+      final preferredLanguages = prefs.subtitleLanguages;
+      if (preferredLanguages.isEmpty) return;
+
+      final currentTrack = initiallySelected == null
+          ? null
+          : play.subtitleTracks.where((track) => track.id == initiallySelected).firstOrNull;
+      final currentComplete =
+          currentTrack != null &&
+          !currentTrack.isForced &&
+          (scope.retained[currentTrack.id]?.isComplete ?? true);
+      final currentRank = currentTrack == null
+          ? null
+          : rankTrackLanguage(
+              preferredLanguages,
+              language: currentTrack.language,
+              title: currentTrack.name,
+            );
+
+      ({String id, TrackLanguageRank rank, bool complete, int sourcePriority})? best;
+      void consider({
+        required String id,
+        required TrackLanguageRank? rank,
+        required bool complete,
+        required int sourcePriority,
+      }) {
+        if (rank == null) return;
+        final current = best;
+        if (current == null) {
+          best = (id: id, rank: rank, complete: complete, sourcePriority: sourcePriority);
+          return;
+        }
+        final byRank = compareTrackLanguageRank(rank, current.rank);
+        if (byRank < 0 ||
+            (byRank == 0 && complete != current.complete && complete) ||
+            (byRank == 0 && complete == current.complete && sourcePriority < current.sourcePriority)) {
+          best = (id: id, rank: rank, complete: complete, sourcePriority: sourcePriority);
+        }
+      }
+
+      for (final (stored, id) in available) {
+        if (stored.isForced) continue;
+        consider(
+          id: id,
+          rank: rankTrackLanguage(
+            preferredLanguages,
+            language: stored.language,
+            title: stored.filename,
+          ),
+          complete: stored.isComplete,
+          sourcePriority: stored.isComplete ? 0 : 2,
+        );
+      }
+      for (final track in play.subtitleTracks) {
+        if (track.isForced) continue;
+        if (track.source != PlaybackTrackSource.embedded &&
+            track.source != PlaybackTrackSource.embyExternal) {
+          continue;
+        }
+        final complete = scope.retained[track.id]?.isComplete ?? true;
+        if (!complete) continue;
+        consider(
+          id: track.id,
+          rank: rankTrackLanguage(
+            preferredLanguages,
+            language: track.language,
+            title: track.name,
+          ),
+          complete: true,
+          sourcePriority: 1,
+        );
+      }
+
+      final chosen = best;
+      String? preferred;
+      if (chosen != null) {
+        final alreadyOptimal =
+            currentRank != null &&
+            currentComplete &&
+            compareTrackLanguageRank(chosen.rank, currentRank) >= 0;
+        if (!alreadyOptimal && chosen.id != initiallySelected) {
+          preferred = chosen.id;
+        }
+      }
       if (preferred != null) await session.selectSubtitle(preferred);
       EvDiagnosticsLog.instance.record(
         'subtitle',

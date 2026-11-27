@@ -8,6 +8,68 @@ enum NavigationStyle { icon, iconAndText, text }
 
 enum SecretKind { openAi, assrt, openSubtitles }
 
+enum SubtitleAutoMode { always, foreignOnly, off }
+
+typedef LanguageOption = ({String code, String label});
+
+const List<LanguageOption> defaultAudioLanguageOptions = [
+  (code: 'zh', label: '中文'),
+  (code: 'yue', label: '粤语'),
+  (code: 'ja', label: '日语'),
+  (code: 'en', label: '英语'),
+  (code: 'ko', label: '韩语'),
+  (code: 'fr', label: '法语'),
+  (code: 'de', label: '德语'),
+  (code: 'es', label: '西班牙语'),
+];
+
+const List<LanguageOption> defaultSubtitleLanguageOptions = [
+  (code: 'zh', label: '简体中文'),
+  (code: 'zh-hant', label: '繁体中文'),
+  (code: 'ja', label: '日语'),
+  (code: 'en', label: '英文'),
+  (code: 'ko', label: '韩语'),
+  (code: 'fr', label: '法语'),
+  (code: 'de', label: '德语'),
+  (code: 'es', label: '西班牙语'),
+];
+
+/// Normalizes a user preference language code into EmbyView's canonical form.
+String? normalizePreferenceLanguageCode(String? raw) {
+  final value = raw?.trim().toLowerCase().replaceAll('_', '-') ?? '';
+  if (value.isEmpty || value == 'und' || value == 'auto' || value == 'none') {
+    return null;
+  }
+  return switch (value) {
+    'zh' || 'zh-cn' || 'zh-sg' || 'zh-hans' || 'chi' || 'zho' || 'cmn' || 'chs' || 'zhs' => 'zh',
+    'zh-tw' || 'zh-hk' || 'zh-mo' || 'zh-hant' || 'cht' || 'zht' => 'zh-hant',
+    'yue' || 'zh-yue' => 'yue',
+    'ja' || 'jpn' || 'jp' => 'ja',
+    'en' || 'eng' => 'en',
+    'ko' || 'kor' => 'ko',
+    'fr' || 'fra' || 'fre' => 'fr',
+    'de' || 'deu' || 'ger' => 'de',
+    'es' || 'spa' => 'es',
+    _ => value,
+  };
+}
+
+String audioLanguageLabel(String code) {
+  final normalized = normalizePreferenceLanguageCode(code) ?? code;
+  for (final option in defaultAudioLanguageOptions) {
+    if (option.code == normalized) return option.label;
+  }
+  return normalized == 'zh-hant' ? '中文' : code;
+}
+
+String subtitleLanguageLabel(String code) {
+  final normalized = normalizePreferenceLanguageCode(code) ?? code;
+  for (final option in defaultSubtitleLanguageOptions) {
+    if (option.code == normalized) return option.label;
+  }
+  return normalized == 'yue' ? '粤语' : code;
+}
+
 const defaultTranslationBaseUrl = 'https://api.openai.com/v1';
 const defaultTranslationModel = 'gpt-5.4-mini';
 
@@ -72,8 +134,9 @@ class LocalPreferences {
     this.autoPlayNext = true,
     this.anime4kForAnime = true,
     this.anime4kForOther = false,
+    this.audioLanguages = const [],
     this.subtitleLanguages = const ['zh', 'ja', 'en'],
-    this.autoSelectChineseSubtitle = true,
+    this.subtitleAutoMode = SubtitleAutoMode.always,
     this.subtitleSources = const {
       SubtitleSource.xunlei,
       SubtitleSource.assrt,
@@ -110,8 +173,11 @@ class LocalPreferences {
   final bool autoPlayNext;
   final bool anime4kForAnime;
   final bool anime4kForOther;
+
+  /// Ordered preferred audio language codes. Empty means follow the media default.
+  final List<String> audioLanguages;
   final List<String> subtitleLanguages;
-  final bool autoSelectChineseSubtitle;
+  final SubtitleAutoMode subtitleAutoMode;
   final Set<SubtitleSource> subtitleSources;
   final String translationBaseUrl;
   final String translationModel;
@@ -139,8 +205,9 @@ class LocalPreferences {
     bool? autoPlayNext,
     bool? anime4kForAnime,
     bool? anime4kForOther,
+    List<String>? audioLanguages,
     List<String>? subtitleLanguages,
-    bool? autoSelectChineseSubtitle,
+    SubtitleAutoMode? subtitleAutoMode,
     Set<SubtitleSource>? subtitleSources,
     String? translationBaseUrl,
     String? translationModel,
@@ -171,9 +238,9 @@ class LocalPreferences {
     autoPlayNext: autoPlayNext ?? this.autoPlayNext,
     anime4kForAnime: anime4kForAnime ?? this.anime4kForAnime,
     anime4kForOther: anime4kForOther ?? this.anime4kForOther,
+    audioLanguages: audioLanguages ?? this.audioLanguages,
     subtitleLanguages: subtitleLanguages ?? this.subtitleLanguages,
-    autoSelectChineseSubtitle:
-        autoSelectChineseSubtitle ?? this.autoSelectChineseSubtitle,
+    subtitleAutoMode: subtitleAutoMode ?? this.subtitleAutoMode,
     subtitleSources: subtitleSources ?? this.subtitleSources,
     translationBaseUrl: translationBaseUrl ?? this.translationBaseUrl,
     translationModel: translationModel ?? this.translationModel,

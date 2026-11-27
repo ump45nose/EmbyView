@@ -126,8 +126,9 @@ class _FakePreferences implements EmbyViewPreferences {
     autoPlayNext: _current.autoPlayNext,
     anime4kForAnime: _current.anime4kForAnime,
     anime4kForOther: _current.anime4kForOther,
+    audioLanguages: _current.audioLanguages,
     subtitleLanguages: _current.subtitleLanguages,
-    autoSelectChineseSubtitle: _current.autoSelectChineseSubtitle,
+    subtitleAutoMode: _current.subtitleAutoMode,
     subtitleSources: _current.subtitleSources,
     translationBaseUrl: _current.translationBaseUrl,
     translationModel: _current.translationModel,
@@ -855,6 +856,29 @@ void main() {
       await tester.pumpAndSettle();
       expect(env.prefs.current.readAheadBytes, 1024 * 1024 * 1024);
 
+      // Default audio language preferences: add, reorder, remove, reset to default
+      expect(find.byKey(const Key('ev_audio_lang_default')), findsOneWidget);
+      await tester.ensureVisible(find.byKey(const Key('ev_audio_lang_add_ja')));
+      await tester.tap(find.byKey(const Key('ev_audio_lang_add_ja')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.audioLanguages, ['ja']);
+
+      await tester.ensureVisible(find.byKey(const Key('ev_audio_lang_add_zh')));
+      await tester.tap(find.byKey(const Key('ev_audio_lang_add_zh')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.audioLanguages, ['ja', 'zh']);
+
+      await tester.ensureVisible(find.byKey(const Key('ev_audio_lang_up_zh')));
+      await tester.tap(find.byKey(const Key('ev_audio_lang_up_zh')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.audioLanguages, ['zh', 'ja']);
+
+      await tester.ensureVisible(find.byKey(const Key('ev_audio_lang_reset')));
+      await tester.tap(find.byKey(const Key('ev_audio_lang_reset')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.audioLanguages, isEmpty);
+
+      await tester.ensureVisible(find.byKey(const Key('ev_toggle_autoplay_next')));
       await tester.tap(find.byKey(const Key('ev_toggle_autoplay_next')));
       await tester.pumpAndSettle();
       expect(env.prefs.current.autoPlayNext, isFalse);
@@ -970,10 +994,31 @@ void main() {
       expect(find.text('未挂载'), findsOneWidget);
       expect(find.textContaining('请先在访达中挂载 SMB 共享'), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('ev_toggle_auto_zh_sub')));
+      await tester.tap(find.byKey(const Key('ev_sub_auto_foreignOnly')));
       await tester.pumpAndSettle();
-      expect(env.prefs.current.autoSelectChineseSubtitle, isFalse);
+      expect(env.prefs.current.subtitleAutoMode, SubtitleAutoMode.foreignOnly);
 
+      await tester.tap(find.byKey(const Key('ev_sub_auto_off')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.subtitleAutoMode, SubtitleAutoMode.off);
+
+      // Interactive subtitle language priority list: add, reorder, remove (keeping at least 1)
+      await tester.ensureVisible(find.byKey(const Key('ev_sub_lang_add_zh-hant')));
+      await tester.tap(find.byKey(const Key('ev_sub_lang_add_zh-hant')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.subtitleLanguages, ['zh', 'ja', 'en', 'zh-hant']);
+
+      await tester.ensureVisible(find.byKey(const Key('ev_sub_lang_up_ja')));
+      await tester.tap(find.byKey(const Key('ev_sub_lang_up_ja')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.subtitleLanguages, ['ja', 'zh', 'en', 'zh-hant']);
+
+      await tester.ensureVisible(find.byKey(const Key('ev_sub_lang_remove_en')));
+      await tester.tap(find.byKey(const Key('ev_sub_lang_remove_en')));
+      await tester.pumpAndSettle();
+      expect(env.prefs.current.subtitleLanguages, ['ja', 'zh', 'zh-hant']);
+
+      await tester.ensureVisible(find.byKey(const Key('ev_toggle_sub_assrt')));
       await tester.tap(find.byKey(const Key('ev_toggle_sub_assrt')));
       await tester.pumpAndSettle();
       expect(

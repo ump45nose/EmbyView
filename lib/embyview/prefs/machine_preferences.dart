@@ -268,8 +268,9 @@ class MachinePreferences implements EmbyViewPreferences {
     'autoPlayNext': p.autoPlayNext,
     'anime4kAnime': p.anime4kForAnime,
     'anime4kOther': p.anime4kForOther,
+    'audioLanguages': p.audioLanguages,
     'subtitleLanguages': p.subtitleLanguages,
-    'autoChinese': p.autoSelectChineseSubtitle,
+    'subtitleAutoMode': p.subtitleAutoMode.name,
     'subtitleSources': p.subtitleSources.map((s) => s.name).toList(),
     'translationBaseUrl': p.translationBaseUrl,
     'translationModel': p.translationModel,
@@ -312,10 +313,19 @@ class MachinePreferences implements EmbyViewPreferences {
       autoPlayNext: p['autoPlayNext'] as bool,
       anime4kForAnime: p['anime4kAnime'] as bool,
       anime4kForOther: p['anime4kOther'] as bool,
-      subtitleLanguages: List.unmodifiable(
-        (p['subtitleLanguages'] as List).whereType<String>(),
+      audioLanguages: _decodeLanguages(
+        stored.containsKey('audioLanguages') ? stored['audioLanguages'] : d.audioLanguages,
+        d.audioLanguages,
       ),
-      autoSelectChineseSubtitle: p['autoChinese'] as bool,
+      subtitleLanguages: _decodeLanguages(
+        stored.containsKey('subtitleLanguages') ? stored['subtitleLanguages'] : d.subtitleLanguages,
+        d.subtitleLanguages,
+      ),
+      subtitleAutoMode: stored.containsKey('subtitleAutoMode')
+          ? _enum(SubtitleAutoMode.values, stored['subtitleAutoMode'], d.subtitleAutoMode)
+          : stored['autoChinese'] is bool
+          ? ((stored['autoChinese'] as bool) ? SubtitleAutoMode.always : SubtitleAutoMode.off)
+          : d.subtitleAutoMode,
       subtitleSources: Set.unmodifiable(
         SubtitleSource.values.where(
           (s) => (p['subtitleSources'] as List).contains(s.name),
@@ -399,6 +409,19 @@ class MachinePreferences implements EmbyViewPreferences {
       }
     }
     return Map.unmodifiable(out);
+  }
+
+  List<String> _decodeLanguages(Object? raw, List<String> fallback) {
+    if (raw is! List) return fallback;
+    final seen = <String>{};
+    final out = <String>[];
+    for (final item in raw) {
+      if (item is! String) continue;
+      final normalized = normalizePreferenceLanguageCode(item);
+      if (normalized == null || !seen.add(normalized)) continue;
+      out.add(normalized);
+    }
+    return List.unmodifiable(out);
   }
 
   T _enum<T extends Enum>(List<T> values, Object? name, T fallback) =>

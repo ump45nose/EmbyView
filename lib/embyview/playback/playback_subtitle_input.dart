@@ -16,6 +16,7 @@ class PlaybackSubtitleSource {
     this.itemFilePath,
     this.mediaSourceFilePath,
     this.subtitleSwitchFrom,
+    this.subtitlesExplicitlyDisabled = false,
   });
   final int generation;
   final PlayTarget target;
@@ -30,6 +31,9 @@ class PlaybackSubtitleSource {
 
   /// The source generation reopened by a subtitle selection on this media.
   final int? subtitleSwitchFrom;
+
+  /// True when the viewer or series preference explicitly disabled subtitles.
+  final bool subtitlesExplicitlyDisabled;
 }
 
 abstract interface class PlaybackSubtitleInput {

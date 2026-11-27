@@ -7,12 +7,17 @@ import 'package:playback_emby/playback_emby.dart';
 import 'package:server_core/server_core.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../../data/models/series_track_preference.dart';
 import '../../playback/aether_backend.dart';
+import '../../preference/user_preferences.dart';
 import '../../ui/widgets/aether_video_view.dart';
 import '../../util/fullscreen_helper.dart';
+import '../../util/playback_track_selection.dart';
+import '../../util/subtitle_track_logic.dart';
 import '../contracts/common.dart';
 import '../contracts/media.dart';
 import '../contracts/playback.dart';
+import '../contracts/preferences.dart';
 import '../data/diagnostics_exporter.dart';
 import '../data/media_mapper.dart';
 import 'native_playback.dart';
@@ -21,6 +26,7 @@ import 'playback_subtitle_input.dart';
 import 'playback_thumbnails.dart';
 import 'resolved_stream_resolver.dart';
 import 'source_resolution.dart';
+import 'track_selection.dart';
 
 /// User-scoped facade over the existing Moonfin manager. The manager remains
 /// the sole owner of queues and Emby start/progress/stop reports.
@@ -33,6 +39,9 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
     String? Function()? activeServerId,
     this.data,
     this.beforeOpen,
+    this.preferences,
+    this.userPreferences,
+    this.systemLocaleLanguage,
     this.userAgent = embyViewPlaybackUserAgent,
     this.prefetch115 = true,
     this.autoNext = true,
@@ -77,6 +86,9 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
   final String? Function()? _activeServerId;
   final EmbyViewData? data;
   final Future<void> Function()? beforeOpen;
+  final LocalPreferences Function()? preferences;
+  final UserPreferences? userPreferences;
+  final String? Function()? systemLocaleLanguage;
   final String userAgent;
   final bool prefetch115;
   final bool autoNext;
@@ -210,17 +222,8 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
           if (!_valid || !identical(_active, session) || session._closing) {
             return;
           }
-          _restoreManager ??= manager.bindPlaybackSource(
-            _resolver,
-            EmbyPlaySessionService(client),
-            backend: native.backend,
-            verifyExternalSubtitles: true,
-            restoreSecondarySubtitles: false,
-            onAutomaticExternalSubtitleFailure: (error) async {
-              await _active?._handleAutomaticExternalSubtitleFailure(error);
-            },
-          );
-          manager.autoAdvanceEnabled = autoNext;
+          _restoreManager ??= _bindManager();
+          manager.autoAdvanceEnabled = preferences?.call().autoPlayNext ?? autoNext;
           manager.sourceFailureRecovery = session._recoverSource;
           await beforeOpen?.call();
           if (_valid && identical(_active, session) && !session._closing) {
@@ -231,6 +234,142 @@ class MoonfinPlaybackAdapter implements EmbyViewPlayback {
           session._fail('播放无法打开，请重试。', 'openFailed');
         });
     return session;
+  }
+
+  void Function() _bindManager() {
+    final restoreSource = manager.bindPlaybackSource(
+      _resolver,
+      EmbyPlaySessionService(client),
+      backend: native.backend,
+      verifyExternalSubtitles: true,
+      restoreSecondarySubtitles: false,
+      onAutomaticExternalSubtitleFailure: (error) async {
+        await _active?._handleAutomaticExternalSubtitleFailure(error);
+      },
+    );
+    final prefsProvider = preferences;
+    if (prefsProvider == null) return restoreSource;
+
+    final previousAudioSelector = manager.audioTrackSelector;
+    final previousSubtitleSelector = manager.subtitleTrackSelector;
+    final previousAudioSelected = manager.onAudioTrackSelected;
+    final previousSubtitleSelected = manager.onSubtitleTrackSelected;
+
+    String? currentSeriesId() {
+      final series = playbackItemData(manager.queueService.currentItem)['SeriesId'] as String?;
+      return series != null && series.isNotEmpty ? series : null;
+    }
+
+    SessionTrackChoices sessionChoices({required bool includeExplicitAudio}) =>
+        SessionTrackChoices(
+          explicitAudioIndex:
+              includeExplicitAudio && manager.audioSelectionExplicit
+              ? manager.audioStreamIndex
+              : null,
+          audioLanguage: manager.lastExplicitAudioLanguage,
+          audioIndex: manager.lastExplicitAudioIndex,
+          audioTitle: manager.lastExplicitAudioTitle,
+          subtitleLanguage: manager.lastExplicitSubtitleLanguage,
+          subtitleEnabled: manager.lastExplicitSubtitleEnabled,
+        );
+
+    SeriesTrackPreference readSeriesAudio(String? seriesId) =>
+        seriesId != null && userPreferences != null
+        ? userPreferences!.getSeriesAudioPreference(seriesId)
+        : SeriesTrackPreference.empty;
+
+    SeriesTrackPreference readSeriesSubtitle(String? seriesId) =>
+        seriesId != null && userPreferences != null
+        ? userPreferences!.getSeriesSubtitlePreference(seriesId)
+        : SeriesTrackPreference.empty;
+
+    int? embyAudioSelector(
+      List<Map<String, dynamic>> audioStreams,
+      int? explicitIndex,
+    ) => selectEmbyViewAudioIndex(
+      audioStreams: audioStreams,
+      prefs: prefsProvider(),
+      explicitIndex: explicitIndex,
+      seriesPref: readSeriesAudio(currentSeriesId()),
+      session: sessionChoices(includeExplicitAudio: false),
+    );
+
+    int? embySubtitleSelector(
+      List<Map<String, dynamic>> subtitleStreams,
+      List<Map<String, dynamic>> audioStreams,
+      int? explicitIndex,
+    ) {
+      final seriesId = currentSeriesId();
+      return selectEmbyViewSubtitleIndex(
+        subtitleStreams: subtitleStreams,
+        audioStreams: audioStreams,
+        prefs: prefsProvider(),
+        explicitIndex: explicitIndex,
+        seriesAudioPref: readSeriesAudio(seriesId),
+        seriesSubtitlePref: readSeriesSubtitle(seriesId),
+        session: sessionChoices(includeExplicitAudio: true),
+        systemLocaleLanguage: systemLocaleLanguage?.call(),
+      );
+    }
+
+    void saveSeriesTrack(String kind, int index) {
+      final up = userPreferences;
+      final item = manager.queueService.currentItem;
+      if (up == null || item is! Map) return;
+      final seriesId = currentSeriesId();
+      if (seriesId == null) return;
+      final raw =
+          manager.currentResolution?.mediaStreams ??
+          item['MediaStreams'] as List? ??
+          const [];
+      final streams = raw
+          .whereType<Map>()
+          .map((e) => e.cast<String, dynamic>())
+          .where((s) => (s['Type'] as String?)?.toLowerCase() == kind)
+          .toList();
+      final pref = createSeriesTrackPreferenceFromStream(
+        streams: streams,
+        selectedIndex: index,
+      );
+      if (pref.isEmpty) return;
+      if (kind == 'audio') {
+        unawaited(up.setSeriesAudioPreference(seriesId, pref));
+      } else {
+        unawaited(up.setSeriesSubtitlePreference(seriesId, pref));
+      }
+    }
+
+    void embyAudioSelected(String itemId, int index) {
+      previousAudioSelected?.call(itemId, index);
+      saveSeriesTrack('audio', index);
+    }
+
+    void embySubtitleSelected(String itemId, int index) {
+      previousSubtitleSelected?.call(itemId, index);
+      saveSeriesTrack('subtitle', index);
+    }
+
+    manager
+      ..audioTrackSelector = embyAudioSelector
+      ..subtitleTrackSelector = embySubtitleSelector
+      ..onAudioTrackSelected = embyAudioSelected
+      ..onSubtitleTrackSelected = embySubtitleSelected;
+
+    return () {
+      if (identical(manager.audioTrackSelector, embyAudioSelector)) {
+        manager.audioTrackSelector = previousAudioSelector;
+      }
+      if (identical(manager.subtitleTrackSelector, embySubtitleSelector)) {
+        manager.subtitleTrackSelector = previousSubtitleSelector;
+      }
+      if (identical(manager.onAudioTrackSelected, embyAudioSelected)) {
+        manager.onAudioTrackSelected = previousAudioSelected;
+      }
+      if (identical(manager.onSubtitleTrackSelected, embySubtitleSelected)) {
+        manager.onSubtitleTrackSelected = previousSubtitleSelected;
+      }
+      restoreSource();
+    };
   }
 
   void _resolved(
@@ -595,6 +734,11 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
         .whereType<Map>()
         .where((source) => source['Id'].toString() == result.mediaSourceId)
         .firstOrNull;
+    final seriesId = _target.seriesId ?? _raw['SeriesId'] as String?;
+    final seriesSubOff =
+        seriesId != null &&
+        seriesId.isNotEmpty &&
+        (_owner.userPreferences?.getSeriesSubtitlePreference(seriesId).isNone ?? false);
     _subtitleSource = PlaybackSubtitleSource(
       generation: generation,
       target: _target,
@@ -605,6 +749,7 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       itemFilePath: playbackItemPath(item),
       subtitleSwitchFrom: reopensForSubtitle ? subtitleSwitchFrom : null,
       mediaSourceFilePath: source?['Path'] as String?,
+      subtitlesExplicitlyDisabled: _manager.lastExplicitSubtitleEnabled == false || seriesSubOff,
     );
     _snapshot = PlaybackSnapshot(
       generation: generation,

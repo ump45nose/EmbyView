@@ -22,6 +22,7 @@ import '../data/offline/connectivity_aware_media_server_client.dart';
 import '../data/services/media_server_client_factory.dart';
 import '../data/services/theme_music_service.dart';
 import '../playback/aether_backend.dart';
+import '../preference/user_preferences.dart';
 import 'data/accounts.dart';
 import 'data/build_info.dart';
 import 'data/diagnostics_exporter.dart';
@@ -1146,6 +1147,10 @@ Future<EmbyViewEntry> _createMoonfinEntry() async {
         activeServerId: () => sessions.activeServerId,
         data: data,
         beforeOpen: immersion.stop,
+        preferences: () => preferences.current,
+        userPreferences: dependencies.isRegistered<UserPreferences>()
+            ? dependencies<UserPreferences>()
+            : null,
         prefetch115: settings.preResolve115,
         autoNext: settings.autoPlayNext,
         sessionCacheByteBudget: settings.readAheadBytes,

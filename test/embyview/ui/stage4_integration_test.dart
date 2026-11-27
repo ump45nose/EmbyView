@@ -126,8 +126,9 @@ LocalPreferences _copyPrefs(LocalPreferences b, {List<ZonePreference>? zones}) =
   backgroundVideo: b.backgroundVideo, backgroundVideoDelay: b.backgroundVideoDelay, detailTrailerDelay: b.detailTrailerDelay,
   themeMusic: b.themeMusic, themeVolume: b.themeVolume, quickLook: b.quickLook, hideUnwatchedOverview: b.hideUnwatchedOverview,
   preResolve115: b.preResolve115, readAheadBytes: b.readAheadBytes, autoPlayNext: b.autoPlayNext,
-  anime4kForAnime: b.anime4kForAnime, anime4kForOther: b.anime4kForOther, subtitleLanguages: b.subtitleLanguages,
-  autoSelectChineseSubtitle: b.autoSelectChineseSubtitle, subtitleSources: b.subtitleSources,
+  anime4kForAnime: b.anime4kForAnime, anime4kForOther: b.anime4kForOther,
+  audioLanguages: b.audioLanguages, subtitleLanguages: b.subtitleLanguages,
+  subtitleAutoMode: b.subtitleAutoMode, subtitleSources: b.subtitleSources,
   translationBaseUrl: b.translationBaseUrl, translationModel: b.translationModel, monthlyBudgetMicros: b.monthlyBudgetMicros,
   mediaFolder: b.mediaFolder, zones: zones ?? b.zones,
 );

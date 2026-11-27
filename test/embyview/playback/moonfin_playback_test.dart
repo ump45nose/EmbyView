@@ -224,6 +224,7 @@ class _PlaybackApi extends Fake implements PlaybackApi {
   Map<String, dynamic> sourcePatch = {};
   Map<String, dynamic> audio = {'Type': 'Audio', 'Index': 1, 'Language': 'jpn'};
   List<Map<String, dynamic>> subtitles = [];
+  List<Map<String, dynamic>>? streamsOverride;
   @override
   Future<Map<String, dynamic>> getPlaybackInfo(
     String itemId, {
@@ -241,11 +242,12 @@ class _PlaybackApi extends Fake implements PlaybackApi {
         'Protocol': 'Http',
         'SupportsDirectPlay': true,
         ...sourcePatch,
-        'MediaStreams': [
-          {'Type': 'Video', 'Index': 0, 'Width': 1920},
-          audio,
-          ...subtitles,
-        ],
+        'MediaStreams': streamsOverride ??
+            [
+              {'Type': 'Video', 'Index': 0, 'Width': 1920},
+              audio,
+              ...subtitles,
+            ],
       },
     ],
   };
@@ -524,7 +526,9 @@ void main() {
           readTranslationKey: (_) async => null,
           meter: <T>(_, invoke) async => (await invoke()).value,
         ),
-        preferences: () => LocalPreferences(autoSelectChineseSubtitle: autoSelect),
+        preferences: () => LocalPreferences(
+          subtitleAutoMode: autoSelect ? SubtitleAutoMode.always : SubtitleAutoMode.off,
+        ),
         onClosed: () {},
         boundaries: const Stream.empty(),
       );
@@ -1622,6 +1626,100 @@ void main() {
     expect(session.snapshot.failure?.isRateLimited, isFalse);
     expect(session.snapshot.failure?.code, isNot('rateLimited115'));
     expect(session.snapshot.failure?.sourceLabel, isNull);
+    await session.close();
+  });
+
+  test('startup audio and subtitle selectors apply LocalPreferences and restore previous selectors on close', () async {
+    final backend = _Backend();
+    int? prevAudio(List<Map<String, dynamic>> s, int? e) => 99;
+    int? prevSub(List<Map<String, dynamic>> s, List<Map<String, dynamic>> a, int? e) => 88;
+    final manager = PlaybackManager()
+      ..setBackend(backend)
+      ..audioTrackSelector = prevAudio
+      ..subtitleTrackSelector = prevSub;
+    final native = _Native(backend);
+    final client = _Client();
+    client.playbackApi.streamsOverride = [
+      {'Type': 'Video', 'Index': 0, 'Width': 1920},
+      {'Type': 'Audio', 'Index': 1, 'Language': 'eng', 'Channels': 6, 'IsDefault': true},
+      {'Type': 'Audio', 'Index': 2, 'Language': 'jpn', 'Channels': 2},
+      {'Type': 'Subtitle', 'Index': 3, 'Language': 'eng', 'Codec': 'srt', 'IsDefault': true},
+      {'Type': 'Subtitle', 'Index': 4, 'Language': 'chi', 'Title': '简体中文', 'Codec': 'ass'},
+      {'Type': 'Subtitle', 'Index': 5, 'Language': 'jpn', 'Codec': 'srt'},
+    ];
+    var currentPrefs = const LocalPreferences(
+      audioLanguages: ['ja', 'en'],
+      subtitleLanguages: ['zh', 'en'],
+      subtitleAutoMode: SubtitleAutoMode.always,
+    );
+    final adapter = MoonfinPlaybackAdapter(
+      manager: manager,
+      client: client,
+      native: native,
+      audioInput: _Audio(),
+      preferences: () => currentPrefs,
+      redirectCache: PlaybackRedirectCache(
+        request: (_, _) async => RedirectReply(302, Uri.parse('https://cdn.test/movie')),
+      ),
+    );
+    addTearDown(() async {
+      await adapter.dispose();
+      await native.events.close();
+      manager.dispose();
+    });
+
+    Future<PlaybackSession> openReady() async {
+      final session = adapter.open(const PlayTarget(itemId: 'movie'));
+      await pumpEventQueue(times: 30);
+      expect(session.snapshot.phase, isNot(PlaybackPhase.failed));
+      expect(session.snapshot.generation, greaterThan(0));
+      return session;
+    }
+
+    // 1. Selects preferred audio (jpn -> 2) and preferred subtitle (chi -> 4).
+    var session = await openReady();
+    expect(session.snapshot.selectedAudioId, '${session.snapshot.generation}:2');
+    expect(session.snapshot.selectedSubtitleId, '${session.snapshot.generation}:4');
+
+    // Manual switch takes effect immediately without selector overriding it.
+    await session.selectSubtitle('${session.snapshot.generation}:5');
+    expect(session.snapshot.selectedSubtitleId, '${session.snapshot.generation}:5');
+    await session.close();
+
+    // Closing session restores previous upstream selectors.
+    expect(identical(manager.audioTrackSelector, prevAudio), isTrue);
+    expect(identical(manager.subtitleTrackSelector, prevSub), isTrue);
+
+    // 2. foreignOnly with native audio (jpn matches preferred audio ['ja']) keeps subtitles off.
+    currentPrefs = const LocalPreferences(
+      audioLanguages: ['ja'],
+      subtitleLanguages: ['zh', 'en'],
+      subtitleAutoMode: SubtitleAutoMode.foreignOnly,
+    );
+    session = await openReady();
+    expect(session.snapshot.selectedAudioId, '${session.snapshot.generation}:2');
+    expect(session.snapshot.selectedSubtitleId, isNull);
+    await session.close();
+
+    // 3. foreignOnly with foreign audio (eng audio when user prefers zh) enables zh subtitle.
+    currentPrefs = const LocalPreferences(
+      audioLanguages: [],
+      subtitleLanguages: ['zh', 'en'],
+      subtitleAutoMode: SubtitleAutoMode.foreignOnly,
+    );
+    session = await openReady();
+    expect(session.snapshot.selectedAudioId, '${session.snapshot.generation}:1'); // IsDefault eng
+    expect(session.snapshot.selectedSubtitleId, '${session.snapshot.generation}:4'); // zh
+    await session.close();
+
+    // 4. SubtitleAutoMode.off leaves subtitles disabled.
+    currentPrefs = const LocalPreferences(
+      audioLanguages: ['ja'],
+      subtitleLanguages: ['zh', 'en'],
+      subtitleAutoMode: SubtitleAutoMode.off,
+    );
+    session = await openReady();
+    expect(session.snapshot.selectedSubtitleId, isNull);
     await session.close();
   });
 }

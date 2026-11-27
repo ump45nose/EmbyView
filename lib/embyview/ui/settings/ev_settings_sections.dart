@@ -24,6 +24,161 @@ EvSettingsRow _toggleRow(String key, String title, String? sub, bool value, Valu
   trailing: EvToggle(key: Key(key), semanticLabel: title, value: value, onChanged: onChanged),
 );
 
+/// Interactive ordered language preference editor compatible with cinema/paper
+/// themes and keyboard focus navigation.
+class _LanguagePriorityEditor extends StatelessWidget {
+  const _LanguagePriorityEditor({
+    required this.keyPrefix,
+    required this.languages,
+    required this.options,
+    required this.labelFor,
+    required this.allowEmpty,
+    required this.onChanged,
+    this.emptyLabel,
+  });
+
+  final String keyPrefix;
+  final List<String> languages;
+  final List<LanguageOption> options;
+  final String Function(String code) labelFor;
+  final bool allowEmpty;
+  final String? emptyLabel;
+  final ValueChanged<List<String>> onChanged;
+
+  void _move(int index, int delta) {
+    final target = index + delta;
+    if (index < 0 || index >= languages.length || target < 0 || target >= languages.length) return;
+    final next = [...languages];
+    next.insert(target, next.removeAt(index));
+    onChanged(List.unmodifiable(next));
+  }
+
+  void _remove(int index) {
+    if (index < 0 || index >= languages.length) return;
+    if (!allowEmpty && languages.length <= 1) return;
+    final next = [...languages]..removeAt(index);
+    onChanged(List.unmodifiable(next));
+  }
+
+  void _add(String code) {
+    if (languages.contains(code)) return;
+    onChanged(List.unmodifiable([...languages, code]));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = EvTheme.of(context), s = EvScale.of(context);
+    final remaining = [for (final opt in options) if (!languages.contains(opt.code)) opt];
+    final canRemove = allowEmpty || languages.length > 1;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (languages.isNotEmpty) ...[
+          Container(
+            decoration: BoxDecoration(
+              color: t.isPaper ? const Color(0xFFF7F5EF) : t.fill,
+              borderRadius: BorderRadius.circular(s.rem(0.75)),
+              border: Border.all(color: t.line, width: 1),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (var i = 0; i < languages.length; i++) () {
+                  final code = languages[i];
+                  return Column(
+                    key: Key('${keyPrefix}_item_$code'),
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (i > 0) SizedBox(height: 1, child: ColoredBox(color: t.line)),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: s.rem(0.75), vertical: s.rem(0.4375)),
+                        child: Row(children: [
+                          Container(
+                            width: s.rem(1.5),
+                            height: s.rem(1.5),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: t.fill2,
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              '${i + 1}',
+                              style: t.bodyStyle(s.font(0.8125), fontWeight: FontWeight.w600, color: t.ink2)
+                                  .copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
+                            ),
+                          ),
+                          SizedBox(width: s.rem(0.625)),
+                          Expanded(
+                            child: Text(
+                              labelFor(code),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: t.bodyStyle(s.font(0.9375), fontWeight: FontWeight.w500, color: t.ink),
+                            ),
+                          ),
+                          EvButton.ghost(
+                            key: Key('${keyPrefix}_up_$code'),
+                            small: true,
+                            round: true,
+                            tooltip: '上移',
+                            onPressed: i > 0 ? () => _move(i, -1) : null,
+                            child: EvChevronIcon(up: true, size: s.rem(0.9375), color: t.ink),
+                          ),
+                          SizedBox(width: s.rem(0.25)),
+                          EvButton.ghost(
+                            key: Key('${keyPrefix}_down_$code'),
+                            small: true,
+                            round: true,
+                            tooltip: '下移',
+                            onPressed: i < languages.length - 1 ? () => _move(i, 1) : null,
+                            child: EvChevronIcon(up: false, size: s.rem(0.9375), color: t.ink),
+                          ),
+                          if (canRemove) ...[
+                            SizedBox(width: s.rem(0.25)),
+                            EvButton.ghost(
+                              key: Key('${keyPrefix}_remove_$code'),
+                              small: true,
+                              round: true,
+                              tooltip: '移除',
+                              onPressed: () => _remove(i),
+                              child: EvIcon(EvIcons.x, size: s.rem(0.875), color: t.ink2),
+                            ),
+                          ],
+                        ]),
+                      ),
+                    ],
+                  );
+                }(),
+              ],
+            ),
+          ),
+          if (remaining.isNotEmpty) SizedBox(height: s.rem(0.625)),
+        ],
+        if (remaining.isNotEmpty || (allowEmpty && languages.isEmpty))
+          Wrap(
+            spacing: s.rem(0.5),
+            runSpacing: s.rem(0.5),
+            children: [
+              if (allowEmpty && languages.isEmpty)
+                EvSettingsChip(
+                  key: Key('${keyPrefix}_default'),
+                  label: emptyLabel ?? '跟随影片默认',
+                  selected: true,
+                  onTap: () => onChanged(const []),
+                ),
+              for (final opt in remaining)
+                EvSettingsChip(
+                  key: Key('${keyPrefix}_add_${opt.code}'),
+                  label: languages.isEmpty ? opt.label : '+ ${opt.label}',
+                  onTap: () => _add(opt.code),
+                ),
+            ],
+          ),
+      ],
+    );
+  }
+}
+
 /// 1. Account & server pane (`account`).
 class EvAccountSettingsPane extends StatefulWidget {
   const EvAccountSettingsPane({
@@ -787,6 +942,34 @@ class EvPlaySettingsPane extends StatelessWidget {
             ])),
         EvSettingsRow(title: '本地文件', subtitle: 'Emby 静态流，不转码', trailing: evValueText(t, s, '直接播放')),
       ]),
+      EvSettingsGroup(title: '默认音轨', children: [
+        EvSettingsRow(
+          title: '默认音轨语言',
+          subtitle: prefs.audioLanguages.isEmpty
+              ? '按影片自带默认音轨起播；点选下方语言可设优先顺序'
+              : '优先 ${prefs.audioLanguages.map(audioLanguageLabel).join(' → ')}，无匹配时跟随影片默认',
+          trailing: prefs.audioLanguages.isEmpty
+              ? evValueText(t, s, '跟随影片默认')
+              : EvButton.ghost(
+                  key: const Key('ev_audio_lang_reset'),
+                  small: true,
+                  label: '跟随默认',
+                  onPressed: () => onUpdatePrefs(prefs.copyWith(audioLanguages: const [])),
+                ),
+          bottom: Padding(
+            padding: EdgeInsets.only(top: s.rem(0.75)),
+            child: _LanguagePriorityEditor(
+              keyPrefix: 'ev_audio_lang',
+              languages: prefs.audioLanguages,
+              options: defaultAudioLanguageOptions,
+              labelFor: audioLanguageLabel,
+              allowEmpty: true,
+              emptyLabel: '跟随影片默认',
+              onChanged: (next) => onUpdatePrefs(prefs.copyWith(audioLanguages: next)),
+            ),
+          ),
+        ),
+      ]),
       EvSettingsGroup(title: '进度', children: [
         EvSettingsRow(title: '回传 Emby', subtitle: '播放进度与已看状态自动同步到所有设备', trailing: evValueText(t, s, '自动同步')),
         EvSettingsRow(title: '看完判定', subtitle: '播放到片尾字幕前标为已看', trailing: evValueText(t, s, '90%')),
@@ -892,16 +1075,46 @@ class _EvSubtitlesSettingsPaneState extends State<EvSubtitlesSettingsPane> {
       (SubtitleSource.openSubtitles, 'OpenSubtitles', '需要 API Key'),
       (SubtitleSource.anime, '动画字幕组', '北宇治、SweetSub、Jimaku、Kitsunekko、ACG.RIP'),
     ];
-    final langs = prefs.subtitleLanguages.isEmpty ? '简体中文 → 繁体中文 → 英文' : prefs.subtitleLanguages.map((c) => switch (c.toLowerCase()) {
-      'zh' || 'zh-cn' || 'zh-hans' || 'chi' || 'zho' => '简体中文', 'zh-tw' || 'zh-hk' || 'zh-hant' => '繁体中文', 'ja' || 'jpn' => '日语', 'en' || 'eng' => '英文', _ => c,
-    }).join(' → ');
+    final langs = prefs.subtitleLanguages.isEmpty
+        ? '未指定，仅跟随影片默认字幕'
+        : prefs.subtitleLanguages.map(subtitleLanguageLabel).join(' → ');
+    final autoModeDesc = switch (prefs.subtitleAutoMode) {
+      SubtitleAutoMode.always => '起播与读取 NAS 字幕时，按下方首选语言自动打开字幕',
+      SubtitleAutoMode.foreignOnly => '仅当播放音轨为外语时自动打开字幕，母语音轨保持关闭',
+      SubtitleAutoMode.off => '起播时不自动打开字幕，仍可在播放器内手动选择',
+    };
 
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       evPaneTitle(t, s, '字幕'),
       EvSettingsGroup(title: '偏好', children: [
-        EvSettingsRow(title: '首选语言', trailing: evValueText(t, s, langs)),
-        _toggleRow('ev_toggle_auto_zh_sub', '自动选择', '有中文字幕时自动打开',
-          prefs.autoSelectChineseSubtitle, (v) => widget.onUpdatePrefs(prefs.copyWith(autoSelectChineseSubtitle: v))),
+        EvSettingsRow(
+          title: '自动加载字幕',
+          subtitle: autoModeDesc,
+          trailing: EvSegmentedControl<SubtitleAutoMode>(
+            value: prefs.subtitleAutoMode,
+            onChanged: (v) => widget.onUpdatePrefs(prefs.copyWith(subtitleAutoMode: v)),
+            options: const [
+              EvSegmentOption(key: Key('ev_sub_auto_always'), value: SubtitleAutoMode.always, label: '自动匹配'),
+              EvSegmentOption(key: Key('ev_sub_auto_foreignOnly'), value: SubtitleAutoMode.foreignOnly, label: '仅外语'),
+              EvSegmentOption(key: Key('ev_sub_auto_off'), value: SubtitleAutoMode.off, label: '关闭'),
+            ],
+          ),
+        ),
+        EvSettingsRow(
+          title: '首选语言',
+          subtitle: '按顺序匹配内封、Emby 外挂与 NAS 字幕：$langs',
+          bottom: Padding(
+            padding: EdgeInsets.only(top: s.rem(0.75)),
+            child: _LanguagePriorityEditor(
+              keyPrefix: 'ev_sub_lang',
+              languages: prefs.subtitleLanguages,
+              options: defaultSubtitleLanguageOptions,
+              labelFor: subtitleLanguageLabel,
+              allowEmpty: false,
+              onChanged: (next) => widget.onUpdatePrefs(prefs.copyWith(subtitleLanguages: next)),
+            ),
+          ),
+        ),
       ]),
       EvSettingsGroup(title: '在线检索来源', children: [
         for (final (src, title, sub) in sources)

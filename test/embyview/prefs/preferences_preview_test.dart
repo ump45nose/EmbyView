@@ -71,7 +71,62 @@ void main() {
     expect(prefs.current.theme, ThemeMode.paper);
     expect(prefs.current.translationBaseUrl, 'https://api.openai.com/v1');
     expect(prefs.current.translationModel, 'gpt-5.4-mini');
+    expect(prefs.current.audioLanguages, isEmpty);
+    expect(prefs.current.subtitleLanguages, ['zh', 'ja', 'en']);
+    expect(prefs.current.subtitleAutoMode, SubtitleAutoMode.always);
     await prefs.close();
+  });
+
+  test('audio and subtitle preferences persist and migrate legacy autoChinese cleanly', () async {
+    // Legacy autoChinese: false migrates to SubtitleAutoMode.off.
+    SharedPreferences.setMockInitialValues({
+      'embyview.machine.v1': '{"autoChinese":false,"subtitleLanguages":["zh-TW","jpn","eng","zh-hant"]}',
+    });
+    var prefs = await MachinePreferences.open();
+    expect(prefs.current.audioLanguages, isEmpty);
+    expect(prefs.current.subtitleAutoMode, SubtitleAutoMode.off);
+    expect(prefs.current.subtitleLanguages, ['zh-hant', 'ja', 'en']);
+    await prefs.close();
+
+    // Legacy autoChinese: true migrates to SubtitleAutoMode.always.
+    SharedPreferences.setMockInitialValues({'embyview.machine.v1': '{"autoChinese":true}'});
+    prefs = await MachinePreferences.open();
+    expect(prefs.current.subtitleAutoMode, SubtitleAutoMode.always);
+    await prefs.close();
+
+    // Explicit subtitleAutoMode wins over legacy autoChinese and survives round-trip.
+    SharedPreferences.setMockInitialValues({
+      'embyview.machine.v1': '{"autoChinese":false,"subtitleAutoMode":"foreignOnly","audioLanguages":["jpn","zh-CN","yue","ja"]}',
+    });
+    prefs = await MachinePreferences.open();
+    expect(prefs.current.subtitleAutoMode, SubtitleAutoMode.foreignOnly);
+    expect(prefs.current.audioLanguages, ['ja', 'zh', 'yue']);
+
+    await prefs.update(
+      prefs.current.copyWith(
+        audioLanguages: const ['yue', 'zh'],
+        subtitleLanguages: const ['zh', 'zh-hant', 'en'],
+        subtitleAutoMode: SubtitleAutoMode.foreignOnly,
+      ),
+    );
+    await prefs.close();
+
+    final restored = await MachinePreferences.open();
+    expect(restored.current.audioLanguages, ['yue', 'zh']);
+    expect(restored.current.subtitleLanguages, ['zh', 'zh-hant', 'en']);
+    expect(restored.current.subtitleAutoMode, SubtitleAutoMode.foreignOnly);
+    await restored.close();
+
+    // Corrupt language / enum fields fall back to defaults without losing unrelated choices.
+    SharedPreferences.setMockInitialValues({
+      'embyview.machine.v1': '{"theme":"paper","audioLanguages":"bad","subtitleLanguages":123,"subtitleAutoMode":"bogus"}',
+    });
+    final repaired = await MachinePreferences.open();
+    expect(repaired.current.theme, ThemeMode.paper);
+    expect(repaired.current.audioLanguages, isEmpty);
+    expect(repaired.current.subtitleLanguages, ['zh', 'ja', 'en']);
+    expect(repaired.current.subtitleAutoMode, SubtitleAutoMode.always);
+    await repaired.close();
   });
 
   test('machine choices and zone order survive reopening', () async {

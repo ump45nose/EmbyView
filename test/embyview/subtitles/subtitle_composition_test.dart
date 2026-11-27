@@ -534,6 +534,112 @@ void main() {
     }
     await started;
   });
+
+  test('NAS auto-selection follows subtitleLanguages priority and SubtitleAutoMode', () async {
+    final fixture = await _Fixture.open();
+    addTearDown(fixture.close);
+    fixture.mount();
+    await File('${fixture.root.path}/movie.zh.srt').writeAsString(_srt);
+    await File('${fixture.root.path}/movie.ja.srt').writeAsString(_srt);
+    await File('${fixture.root.path}/movie.en.srt').writeAsString(_srt);
+
+    var gen = 2;
+    void resetItem() => fixture.playback.open(const PlayTarget(itemId: 'other'), gen++);
+
+    // 1. Prefers Japanese over Chinese when subtitleLanguages is ['ja', 'zh'].
+    resetItem();
+    fixture.subtitleLanguages = const ['ja', 'zh'];
+    fixture.subtitleAutoMode = SubtitleAutoMode.always;
+    final g1 = gen++;
+    final pickedJaFuture = fixture.panel.changes
+        .firstWhere((s) => s.generation == g1 && s.selectedTrackId != null)
+        .timeout(const Duration(seconds: 3));
+    fixture.playback.open(
+      _movie,
+      g1,
+      audio: [PlaybackTrack(id: '$g1:1', name: 'Japanese', language: 'jpn', source: PlaybackTrackSource.embedded)],
+      selectedAudioId: '$g1:1',
+    );
+    await pickedJaFuture;
+    final pickedJa = fixture.playback.snapshot.subtitleTracks
+        .singleWhere((t) => t.id == fixture.playback.snapshot.selectedSubtitleId);
+    expect(pickedJa.language, 'ja');
+
+    // 2. Upgrades a lower-priority initially selected English embedded track when NAS Chinese is higher priority.
+    resetItem();
+    fixture.subtitleLanguages = const ['zh', 'en'];
+    fixture.subtitleAutoMode = SubtitleAutoMode.always;
+    final g2 = gen++;
+    final upgradedFuture = fixture.panel.changes
+        .firstWhere((s) => s.generation == g2 && s.selectedTrackId != null && s.selectedTrackId != '$g2:5')
+        .timeout(const Duration(seconds: 3));
+    fixture.playback.open(
+      _movie,
+      g2,
+      subtitles: [
+        PlaybackTrack(id: '$g2:5', name: 'English', language: 'eng', source: PlaybackTrackSource.embedded),
+      ],
+      selectedSubtitleId: '$g2:5',
+      audio: [PlaybackTrack(id: '$g2:1', name: 'English', language: 'eng', source: PlaybackTrackSource.embedded)],
+      selectedAudioId: '$g2:1',
+    );
+    await upgradedFuture;
+    final upgradedZh = fixture.playback.snapshot.subtitleTracks
+        .singleWhere((t) => t.id == fixture.playback.snapshot.selectedSubtitleId);
+    expect(upgradedZh.language, 'zh');
+
+    // 3. foreignOnly skips auto-selection when active audio matches user's native language.
+    resetItem();
+    fixture.audioLanguages = const ['zh'];
+    fixture.subtitleLanguages = const ['zh', 'en'];
+    fixture.subtitleAutoMode = SubtitleAutoMode.foreignOnly;
+    final g3 = gen++;
+    final loadedNativeFuture = fixture.panel.changes
+        .firstWhere((s) => s.generation == g3 && s.tracks.length == 3)
+        .timeout(const Duration(seconds: 3));
+    fixture.playback.open(
+      _movie,
+      g3,
+      audio: [PlaybackTrack(id: '$g3:1', name: '国语', language: 'chi', source: PlaybackTrackSource.embedded)],
+      selectedAudioId: '$g3:1',
+    );
+    await loadedNativeFuture;
+    await pumpEventQueue(times: 10);
+    expect(fixture.playback.snapshot.selectedSubtitleId, isNull);
+
+    // 4. foreignOnly enables preferred NAS subtitle when active audio is foreign.
+    resetItem();
+    final g4 = gen++;
+    final foreignZhFuture = fixture.panel.changes
+        .firstWhere((s) => s.generation == g4 && s.selectedTrackId != null)
+        .timeout(const Duration(seconds: 3));
+    fixture.playback.open(
+      _movie,
+      g4,
+      audio: [PlaybackTrack(id: '$g4:1', name: 'Japanese', language: 'jpn', source: PlaybackTrackSource.embedded)],
+      selectedAudioId: '$g4:1',
+    );
+    await foreignZhFuture;
+    final foreignZh = fixture.playback.snapshot.subtitleTracks
+        .singleWhere((t) => t.id == fixture.playback.snapshot.selectedSubtitleId);
+    expect(foreignZh.language, 'zh');
+
+    // 5. Explicit off carried from previous episode prevents NAS auto-selection.
+    resetItem();
+    fixture.subtitleAutoMode = SubtitleAutoMode.always;
+    final g5 = gen++;
+    final explicitOffFuture = fixture.panel.changes
+        .firstWhere((s) => s.generation == g5 && s.tracks.length == 3)
+        .timeout(const Duration(seconds: 3));
+    fixture.playback.open(
+      _movie,
+      g5,
+      subtitlesExplicitlyDisabled: true,
+    );
+    await explicitOffFuture;
+    await pumpEventQueue(times: 10);
+    expect(fixture.playback.snapshot.selectedSubtitleId, isNull);
+  });
 }
 
 class _Fixture {
@@ -547,7 +653,11 @@ class _Fixture {
   final documents = <int, SubtitleDocument>{};
   final audioBoundaries = StreamController<SubtitleAudioBoundary>.broadcast(sync: true);
   Future<http.Response> Function(http.Request)? aiRequest;
-  bool autoSelect = true;
+  bool get autoSelect => subtitleAutoMode != SubtitleAutoMode.off;
+  set autoSelect(bool value) => subtitleAutoMode = value ? SubtitleAutoMode.always : SubtitleAutoMode.off;
+  SubtitleAutoMode subtitleAutoMode = SubtitleAutoMode.always;
+  List<String> audioLanguages = const [];
+  List<String> subtitleLanguages = const ['zh', 'ja', 'en'];
   Completer<SubtitleItem>? lookup;
   Completer<http.Response>? download;
   final downloading = Completer<void>();
@@ -587,8 +697,10 @@ class _Fixture {
         clientFactory: () => MockClient(fixture.aiRequest ?? (_) async => http.Response('', 503)),
       ),
       preferences: () => LocalPreferences(
+        audioLanguages: fixture.audioLanguages,
+        subtitleLanguages: fixture.subtitleLanguages,
+        subtitleAutoMode: fixture.subtitleAutoMode,
         subtitleSources: const {SubtitleSource.xunlei},
-        autoSelectChineseSubtitle: fixture.autoSelect,
       ),
       onClosed: () {},
       boundaries: fixture.audioBoundaries.stream,
@@ -653,11 +765,13 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     PlayTarget target,
     int generation, {
     List<PlaybackTrack> subtitles = const [],
+    String? selectedSubtitleId,
     List<PlaybackTrack> audio = const [],
     String? selectedAudioId,
     Duration duration = const Duration(seconds: 10),
     Duration position = Duration.zero,
     int? subtitleSwitchFrom,
+    bool subtitlesExplicitlyDisabled = false,
   }) {
     subtitleSource = PlaybackSubtitleSource(
       generation: generation,
@@ -666,6 +780,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
       address: Uri.https('example.test', '/media'),
       itemFilePath: '/mnt/media/${target.itemId}.strm',
       subtitleSwitchFrom: subtitleSwitchFrom,
+      subtitlesExplicitlyDisabled: subtitlesExplicitlyDisabled,
       headers: const {},
       userAgent: 'Mozilla/5.0',
     );
@@ -680,6 +795,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
       duration: duration,
       position: position,
       subtitleTracks: subtitles,
+      selectedSubtitleId: selectedSubtitleId,
       audioTracks: audio,
       selectedAudioId: selectedAudioId,
     );
