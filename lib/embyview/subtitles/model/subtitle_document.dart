@@ -102,7 +102,7 @@ String? normalizeSubtitleLanguage(String? language) {
   if (input == null || input.isEmpty || input == 'und') return null;
   final parts = input.split('-');
   final code = switch (parts.first) {
-    'chi' || 'zho' || 'cmn' || 'chs' || 'cht' => 'zh',
+    'chi' || 'zho' || 'zhi' || 'cmn' || 'chs' || 'cht' => 'zh',
     'jpn' => 'ja',
     'eng' => 'en',
     'kor' => 'ko',

@@ -43,6 +43,7 @@ const _bibliographicCodes = {
   'baq': 'eus',
   'bur': 'mya',
   'chi': 'zho',
+  'zhi': 'zho', // Emby uses this nonstandard alias for Chinese.
   'cze': 'ces',
   'dut': 'nld',
   'fre': 'fra',

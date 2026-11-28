@@ -143,7 +143,7 @@ final class SubtitleAiProcessor {
       return SubtitleAiSegment(
         coverage: window,
         cues: heard.cues,
-        language: _languageCode(language) ?? _languageCode(heard.language),
+        language: _languageCode(heard.language) ?? _languageCode(language),
       );
     } finally {
       SubtitleAiTiming(

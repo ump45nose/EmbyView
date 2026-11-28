@@ -1411,6 +1411,19 @@ void main() {
     expect(repeated, externalId);
     expect(session.snapshot.subtitleTracks, hasLength(1));
     expect(session.snapshot.subtitleTracks.last.source, PlaybackTrackSource.ai);
+    await input.setLiveSubtitle(externalId, generation: source.generation, select: true);
+    expect(session.snapshot.subtitleTracks, hasLength(1));
+    expect(session.snapshot.subtitleOverlayId, externalId);
+    final enlarged = await input.registerExternalSubtitle(
+      'file:///subtitles/chinese-resumed.srt', generation: source.generation, title: '中文',
+      source: PlaybackTrackSource.ai, liveTrackId: externalId, contentKey: 'zh:resumed',
+    );
+    expect(enlarged, externalId);
+    expect(session.snapshot.subtitleTracks, hasLength(1));
+    await input.endLiveSubtitle(externalId, replacementId: enlarged);
+    expect(session.snapshot.selectedSubtitleId, externalId);
+    expect(session.snapshot.subtitleTracks, hasLength(1));
+    expect(native.externalLoads.last.$2, 'file:///subtitles/chinese-resumed.srt');
     await session.selectSubtitle(null);
     expect(session.snapshot.selectedSubtitleId, isNull);
     await session.selectSubtitle(externalId);

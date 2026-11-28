@@ -17,6 +17,7 @@ extension SubtitleAiPipeline on SubtitleAiProcessor {
     LocalPreferences Function()? translationPreferences,
     void Function(EpisodeJobState)? onStage,
     String? language,
+    int realtimeBatchWindows = 2,
     String mediaContext = '',
   }) async {
     var pending = <SubtitleAiSegment>[];
@@ -112,7 +113,7 @@ extension SubtitleAiPipeline on SubtitleAiProcessor {
         if (realtime) {
           if (++liveWindowCount >= liveBatchSize) {
             // Silent windows contribute to the deadline, but need no request.
-            if (pending.isNotEmpty) liveBatchSize = 2;
+            if (pending.isNotEmpty) liveBatchSize = realtimeBatchWindows;
             await flush();
             liveWindowCount = 0;
           }

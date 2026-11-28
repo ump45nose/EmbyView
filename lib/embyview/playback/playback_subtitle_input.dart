@@ -46,6 +46,7 @@ abstract interface class PlaybackSubtitleInput {
 
   /// Replace the previous run's row. A timeline restart follows the viewer's
   /// current choice, while an explicit start selects the new row immediately.
+  /// A previously saved AI track ID may be reused as the overlay.
   Future<void> setLiveSubtitle(
     String trackId, {
     required int generation,
@@ -56,7 +57,8 @@ abstract interface class PlaybackSubtitleInput {
   Future<void> endLiveSubtitle(String trackId, {String? replacementId});
 
   /// Register a playable sidecar without changing the selected subtitle.
-  /// The returned ID is immediately available in the session snapshot.
+  /// The returned ID is immediately available in the session snapshot. If
+  /// [liveTrackId] represents a saved AI sidecar, update its delivery in place.
   Future<String> registerExternalSubtitle(
     String url, {
     required int generation,

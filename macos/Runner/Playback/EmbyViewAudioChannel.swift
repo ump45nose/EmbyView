@@ -9,7 +9,8 @@ import FlutterMacOS
 import Foundation
 
 /// The engine's lossy PCM tap plus a bounded, acknowledgement-driven Flutter bridge.
-/// At most 16 packets (512 KiB) wait here and one batch (128 KiB) is in flight.
+/// The engine can deliver its ten-second cached lead in one burst. Keep that
+/// burst bounded (at most 256 packets / 8 MiB) plus one acknowledged batch.
 /// Seek, source, audio selection and pipeline rebuilds retire the old timeline.
 @MainActor
 final class EmbyViewAudioChannel: NSObject, FlutterStreamHandler {
@@ -246,7 +247,7 @@ final class EmbyViewAudioChannel: NSObject, FlutterStreamHandler {
             let frames = min(8192, total - start)
             let sourceTime = packet.sourceTime + Double(start) / 48000
             let data = Data(bytes: samples.advanced(by: start), count: frames * MemoryLayout<Float>.size)
-            if queue.count >= 16 { queue.removeFirst(); needsDiscontinuity = true }
+            if queue.count >= 256 { queue.removeFirst(); needsDiscontinuity = true }
             queue.append([
                 "pcm": FlutterStandardTypedData(bytes: data), "sampleRate": 48000, "channels": 1,
                 "format": "float32le", "sourceGeneration": activeSourceGeneration,
@@ -257,6 +258,7 @@ final class EmbyViewAudioChannel: NSObject, FlutterStreamHandler {
                 "dialogue": packet.channels == .dialogue,
             ])
         }
+        drain()
     }
     private func drain() {
         guard let sink, inFlight == nil, !queue.isEmpty else { return }

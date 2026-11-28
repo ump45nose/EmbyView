@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import '../../contracts/common.dart';
 import '../../contracts/subtitles.dart';
+import '../../data/diagnostics_exporter.dart';
 import '../audio/subtitle_audio.dart';
 import 'subtitle_ai_processor.dart';
 import 'subtitle_ai_types.dart';
@@ -36,6 +37,7 @@ final class SubtitleAiRunController {
     required Stream<SubtitleAudioSegment> audio,
     required bool followsPlayhead,
     bool realtime = true,
+    int realtimeBatchWindows = 2,
     required bool Function() isCurrent,
     String? language,
     String mediaContext = '',
@@ -44,7 +46,7 @@ final class SubtitleAiRunController {
   }) async {
     if (_closed) throw StateError('The subtitle run controller is closed');
     _active?.cancellation.cancel();
-    final work = _ActiveRun(generation, position, isCurrent, cancellation ?? SubtitleAiCancellation());
+    final work = _ActiveRun(generation, position, isCurrent, cancellation ?? SubtitleAiCancellation(), followsPlayhead);
     if (initialOutput != null) {
       work.coverage = initialOutput.coverage;
       work.cues.addAll(initialOutput.cues);
@@ -79,6 +81,7 @@ final class SubtitleAiRunController {
         next: buffer.next,
         cancellation: work.cancellation,
         realtime: realtime,
+        realtimeBatchWindows: realtimeBatchWindows,
         language: language,
         mediaContext: mediaContext,
         onResult: (result) {
@@ -100,6 +103,18 @@ final class SubtitleAiRunController {
         final failure = error is EmbyViewFailure
             ? error
             : const EmbyViewFailure('无法继续生成字幕。', retryable: true, code: 'subtitle_ai_failed');
+        EvDiagnosticsLog.instance.record(
+          'subtitle',
+          'ai_pipeline_failed',
+          level: 'WARN',
+          details: {
+            'gen': generation,
+            'code': failure.code,
+            'httpStatus': failure.httpStatus,
+            'errorType': error.runtimeType,
+            'coveredWindows': work.coverage.length,
+          },
+        );
         _publish(work, AiRunState.failed, failure: failure);
         return _subtitles;
       }
@@ -121,13 +136,14 @@ final class SubtitleAiRunController {
     final run = _run;
     if (run == null) return;
     final range = _coverageAtPosition(run.coverage);
-    if (range?.start == run.coverageStart && range?.end == run.coverageEnd) {
+    final state = _stateForCoverage(run.state, range, _active?.followsPlayhead == true);
+    if (range?.start == run.coverageStart && range?.end == run.coverageEnd && state == run.state) {
       return;
     }
     _emit(
       AiRun(
         generation: run.generation,
-        state: run.state,
+        state: state,
         startedAt: run.startedAt,
         coverageStart: range?.start,
         coverageEnd: range?.end,
@@ -176,6 +192,11 @@ final class SubtitleAiRunController {
     return null;
   }
 
+  AiRunState _stateForCoverage(AiRunState state, TimeRange? range, bool followsPlayhead) {
+    if (!followsPlayhead || (state != AiRunState.generating && state != AiRunState.catchingUp)) return state;
+    return range != null && range.end > _position ? AiRunState.generating : AiRunState.catchingUp;
+  }
+
   void _publish(_ActiveRun work, AiRunState state, {EmbyViewFailure? failure}) {
     _checkpoint = work.coverage.isEmpty
         ? null
@@ -184,7 +205,7 @@ final class SubtitleAiRunController {
     _emit(
       AiRun(
         generation: work.generation,
-        state: state,
+        state: _stateForCoverage(state, range, work.followsPlayhead),
         startedAt: work.startedAt,
         coverageStart: range?.start,
         coverageEnd: range?.end,
@@ -203,12 +224,13 @@ final class SubtitleAiRunController {
 }
 
 final class _ActiveRun {
-  _ActiveRun(this.generation, this.startedAt, this.isCurrent, this.cancellation);
+  _ActiveRun(this.generation, this.startedAt, this.isCurrent, this.cancellation, this.followsPlayhead);
 
   final int generation;
   final Duration startedAt;
   final bool Function() isCurrent;
   final SubtitleAiCancellation cancellation;
+  final bool followsPlayhead;
   final cues = <SubtitleCue>[];
   List<TimeRange> coverage = const [];
   String? language;

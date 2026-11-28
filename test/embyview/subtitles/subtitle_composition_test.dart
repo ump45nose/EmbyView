@@ -215,7 +215,9 @@ void main() {
       );
       await f.playback.selectSubtitle('2:1');
       final gate = f.playback.registrationGate = Completer<void>();
+      final liveRow = f.panel.changes.firstWhere((state) => state.selectedTrackId?.contains(':live-') == true);
       final pending = f.panel.startAi();
+      await liveRow;
       final live = f.playback.snapshot.selectedSubtitleId!;
       expect(live, isNot('2:1'));
       expect(f.playback.snapshot.subtitleTracks.last.name, '简体中文 · AI 生成');
@@ -388,6 +390,216 @@ void main() {
     });
   }
 
+  test('serial 115 audio uses the playback cache, leads playback and resumes one saved AI result', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final f = await _Fixture.open();
+    addTearDown(f.close);
+    f.mount();
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const audio = MethodChannel('embyview/audio_control'), asr = MethodChannel('embyview/asr');
+    var originReads = 0, transcriptions = 0;
+    messenger.setMockMethodCallHandler(audio, (_) async {
+      originReads++;
+      throw StateError('Serial playback must not open another origin reader');
+    });
+    messenger.setMockMethodCallHandler(asr, (call) async {
+      if (call.method == 'modelStatus') return {'state': 'ready', 'receivedBytes': 1, 'totalBytes': 1};
+      transcriptions++;
+      return {
+        'language': 'fr',
+        'segments': [
+          {'startUs': 0, 'endUs': 1000000, 'text': 'Bonjour $transcriptions'},
+        ],
+      };
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(audio, null);
+      messenger.setMockMethodCallHandler(asr, null);
+    });
+    f.aiRequest = (_) async => http.Response(
+      jsonEncode({
+        'choices': [
+          {
+            'finish_reason': 'stop',
+            'message': {'content': '{"lines":[{"id":0,"text":"你好"}]}'},
+          },
+        ],
+      }),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+    f.playback.open(
+      _movie,
+      2,
+      duration: const Duration(seconds: 16),
+      address: Uri.https('cdn.115cdn.net', '/media'),
+      audio: const [PlaybackTrack(id: '2:1', name: 'Japanese', language: 'ja', source: PlaybackTrackSource.embedded)],
+      selectedAudioId: '2:1',
+    );
+    void packet(int second) => f.playback.audioInput.pcm.add(
+      NativePcmPacket(
+        sourceGeneration: 2,
+        timelineGeneration: 0,
+        sourceTime: Duration(seconds: second),
+        playbackTime: Duration(seconds: second),
+        pcm: Uint8List(48000 * 4 * 4),
+        discontinuity: false,
+        dialogue: true,
+      ),
+    );
+    final first = f.panel.startAi();
+    await f.playback.audioInput.started.future;
+    final live = f.playback.snapshot.selectedSubtitleId!;
+    final ahead = f.panel.changes.firstWhere((state) => state.ai?.coverageEnd == const Duration(seconds: 8));
+    packet(0);
+    packet(4);
+    expect((await ahead).ai!.state, AiRunState.generating);
+    expect(f.playback.snapshot.position, Duration.zero);
+    final savedPartial = f.panel.changes.firstWhere(
+      (state) => state.tracks.any((t) => t.save == SubtitleSaveState.saved),
+    );
+    f.playback.audioInput.pcm.addError(PlatformException(code: 'audioTapInterrupted'));
+    await first;
+    await savedPartial;
+    expect(f.panel.snapshot.ai?.state, AiRunState.failed);
+    expect(f.panel.snapshot.tracks.single.trackId, live);
+    expect(f.panel.snapshot.cues, hasLength(2));
+    final partial = await f.store.scan(
+      SubtitleMedia.fromPlayback(f.playback.subtitleSource, duration: const Duration(seconds: 16)),
+    );
+    expect(partial.nasTracks.map((t) => t.language), unorderedEquals(['fr', 'zh']));
+    final pair = partial.nasTracks.first.pairId;
+    expect(pair, isNotNull);
+
+    f.playback.audioInput.started = Completer<void>();
+    final retry = f.panel.startAi();
+    await f.playback.audioInput.started.future;
+    expect(f.panel.snapshot.tracks.single.trackId, live);
+    expect(f.panel.snapshot.cues, hasLength(2));
+    final finished = f.panel.changes.firstWhere((state) => state.ai?.coverageEnd == const Duration(seconds: 16));
+    for (final second in [0, 4, 8, 12]) {
+      packet(second);
+    }
+    await finished;
+    final saved = f.panel.changes.firstWhere(
+      (state) =>
+          state.ai?.state == AiRunState.completed &&
+          state.tracks.length == 1 &&
+          state.tracks.single.trackId != live &&
+          state.tracks.single.save == SubtitleSaveState.saved,
+    );
+    await f.playback.audioInput.pcm.close();
+    await retry;
+    await saved;
+    expect(originReads, 0);
+    expect(transcriptions, 4);
+    expect(f.playback.registered, hasLength(1));
+    final complete = await f.store.scan(
+      SubtitleMedia.fromPlayback(f.playback.subtitleSource, duration: const Duration(seconds: 16)),
+    );
+    expect(complete.nasTracks, hasLength(2));
+    expect(complete.nasTracks.every((t) => t.pairId == pair && t.isComplete), isTrue);
+    expect(complete.nasTracks.singleWhere((t) => t.language == 'fr').document.cues, hasLength(4));
+  });
+
+  test('reopening an episode resumes a saved paired result under its existing track ID', () async {
+    final f = await _Fixture.open();
+    addTearDown(f.close);
+    f.mount();
+    f.autoSelect = false;
+    final media = SubtitleMedia.fromPlayback(f.playback.subtitleSource, duration: const Duration(seconds: 8));
+    for (final (language, text) in [('fr', 'Bonjour'), ('zh', '你好')]) {
+      final track = await f.store.retain(
+        media,
+        SubtitleDocument.parse(utf8.encode(_srt.replaceFirst('中文字幕', text)), format: 'srt'),
+        language: language,
+        origin: SubtitleOrigin.ai,
+        pairId: 'saved-pair',
+        coverage: const [TimeRange(start: Duration.zero, end: Duration(seconds: 4))],
+      );
+      expect((await f.store.save(track)).state, SubtitleSaveState.saved);
+    }
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const audio = MethodChannel('embyview/audio_control'), asr = MethodChannel('embyview/asr');
+    var reads = 0, transcriptions = 0;
+    messenger.setMockMethodCallHandler(audio, (_) async {
+      reads++;
+      throw StateError('Unexpected independent read');
+    });
+    messenger.setMockMethodCallHandler(asr, (call) async {
+      if (call.method == 'modelStatus') return {'state': 'ready', 'receivedBytes': 1, 'totalBytes': 1};
+      transcriptions++;
+      return {
+        'language': 'fr',
+        'segments': [
+          {'startUs': 0, 'endUs': 1000000, 'text': 'Encore'},
+        ],
+      };
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(audio, null);
+      messenger.setMockMethodCallHandler(asr, null);
+    });
+    f.aiRequest = (_) async => http.Response(
+      '''{"choices":[{"finish_reason":"stop","message":{"content":"{\\"lines\\":[{\\"id\\":0,\\"text\\":\\"Again\\"}]}"}}]}''',
+      200,
+    );
+    final discovered = f.panel.changes.firstWhere(
+      (state) =>
+          state.generation == 2 &&
+          state.tracks.length == 2 &&
+          state.tracks.every((track) => track.save == SubtitleSaveState.saved),
+    );
+    f.playback.open(
+      _movie,
+      2,
+      duration: const Duration(seconds: 8),
+      address: Uri.https('115.com', '/movie'),
+      audio: const [PlaybackTrack(id: '2:1', name: 'French', language: 'fre', source: PlaybackTrackSource.embedded)],
+      selectedAudioId: '2:1',
+    );
+    await discovered;
+    final chinese = f.playback.snapshot.subtitleTracks.singleWhere((t) => t.language == 'zh').id;
+    final run = f.panel.startAi();
+    await f.playback.audioInput.started.future;
+    expect(f.panel.snapshot.selectedTrackId, chinese);
+    expect(f.panel.snapshot.tracks, hasLength(2));
+    expect(f.panel.snapshot.cues?.single.text, 'Bonjour');
+    final ahead = f.panel.changes.firstWhere((state) => state.ai?.coverageEnd == const Duration(seconds: 8));
+    for (final second in [0, 4]) {
+      f.playback.audioInput.pcm.add(
+        NativePcmPacket(
+          sourceGeneration: 2,
+          timelineGeneration: 0,
+          sourceTime: Duration(seconds: second),
+          playbackTime: Duration(seconds: second),
+          pcm: Uint8List(48000 * 4 * 4),
+          discontinuity: false,
+          dialogue: true,
+        ),
+      );
+    }
+    await ahead;
+    final saving = f.panel.changes.firstWhere(
+      (state) => state.tracks.any((t) => t.trackId == chinese && t.save == SubtitleSaveState.saving),
+    );
+    final finishing = f.playback.audioInput.pcm.close();
+    await saving;
+    final saved = f.panel.changes.firstWhere(
+      (state) => state.tracks.any((t) => t.trackId == chinese && t.save == SubtitleSaveState.saved),
+    );
+    await finishing;
+    await run;
+    await saved;
+    expect(reads, 0);
+    expect(transcriptions, 1);
+    expect(f.playback.snapshot.selectedSubtitleId, chinese);
+    expect(f.playback.registered, hasLength(2));
+    final scan = await f.store.scan(media);
+    expect(scan.nasTracks.every((track) => track.pairId == 'saved-pair' && track.isComplete), isTrue);
+    expect(scan.nasTracks.singleWhere((track) => track.language == 'zh').document.cues, hasLength(2));
+  });
+
   test('normal playback end flushes a short final segment in the following mode', () async {
     final fixture = await _Fixture.open();
     addTearDown(fixture.close);
@@ -454,7 +666,7 @@ void main() {
       (call) async => call.method == 'modelStatus'
           ? {'state': 'ready', 'receivedBytes': 1, 'totalBytes': 1}
           : {
-              'language': 'en',
+              'language': streamIndex == 1 ? 'ja' : 'en',
               'segments': [
                 {'startUs': 0, 'endUs': 100000, 'text': 'Hello'},
               ],
@@ -817,12 +1029,13 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     Duration position = Duration.zero,
     int? subtitleSwitchFrom,
     bool subtitlesExplicitlyDisabled = false,
+    Uri? address,
   }) {
     subtitleSource = PlaybackSubtitleSource(
       generation: generation,
       target: target,
       mediaSourceId: 'source',
-      address: Uri.https('example.test', '/media'),
+      address: address ?? Uri.https('example.test', '/media'),
       itemFilePath: '/mnt/media/${target.itemId}.strm',
       subtitleSwitchFrom: subtitleSwitchFrom,
       subtitlesExplicitlyDisabled: subtitlesExplicitlyDisabled,
@@ -884,7 +1097,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     final selected = select || previous != null && snapshot.selectedSubtitleId == previous;
     if (selected) subtitleSelectionRevision++;
     _publish(selected ? trackId : snapshot.selectedSubtitleId, [
-      ...snapshot.subtitleTracks.where((t) => t.id != previous),
+      ...snapshot.subtitleTracks.where((t) => t.id != previous && t.id != trackId),
       PlaybackTrack(id: trackId, name: '简体中文 · AI 生成', language: 'zh', source: PlaybackTrackSource.ai),
     ]);
   }
@@ -895,7 +1108,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
     liveTrack = null;
     _publish(
       snapshot.selectedSubtitleId == trackId ? replacementId ?? previousTrack : snapshot.selectedSubtitleId,
-      snapshot.subtitleTracks.where((t) => t.id != trackId).toList(),
+      snapshot.subtitleTracks.where((t) => t.id != trackId || replacementId == trackId).toList(),
     );
   }
 
@@ -917,14 +1130,15 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
   }) async {
     if (!registrationStarted.isCompleted) registrationStarted.complete();
     await registrationGate?.future;
-    final id = '$generation:external${registered.length}';
+    final id = liveTrackId != null && registered.containsKey(liveTrackId)
+        ? liveTrackId : '$generation:external${registered.length}';
     final text = await File.fromUri(Uri.parse(url)).readAsString();
     if (generation != snapshot.generation || liveTrackId != null && liveTrackId != liveTrack) {
       throw const EmbyViewFailure('播放或生成已变更。');
     }
     registered[id] = text;
     _publish(snapshot.selectedSubtitleId, [
-      ...snapshot.subtitleTracks,
+      ...snapshot.subtitleTracks.where((track) => track.id != id),
       PlaybackTrack(id: id, name: title ?? 'subtitle', language: language, source: source, format: codec),
     ]);
     return id;
@@ -942,7 +1156,7 @@ class _Playback implements PlaybackSession, PlaybackSubtitleInput {
 }
 
 class _Audio extends NativePlaybackAudioInput {
-  final started = Completer<void>();
+  var started = Completer<void>();
   final pcm = StreamController<NativePcmPacket>.broadcast(sync: true);
   @override
   Stream<NativePcmPacket> get packets => pcm.stream;

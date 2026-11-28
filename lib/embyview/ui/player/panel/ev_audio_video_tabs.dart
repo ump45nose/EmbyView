@@ -22,7 +22,7 @@ class EvAudioTab extends StatelessWidget {
     if (s.isEmpty) return null;
     final tokens = s.split(RegExp(r'[^a-z]+')).where((w) => w.isNotEmpty).toSet();
     if (s.contains('中') || s.contains('简') || s.contains('繁') || s.contains('国语') || s.contains('粤语') ||
-        tokens.any((w) => w == 'zh' || w == 'chi' || w == 'zho' || w == 'cmn' || w == 'yue' || w == 'chinese')) {
+        tokens.any((w) => w == 'zh' || w == 'chi' || w == 'zho' || w == 'zhi' || w == 'cmn' || w == 'yue' || w == 'chinese')) {
       return '中';
     }
     if (s.contains('日') || tokens.any((w) => w == 'ja' || w == 'jpn' || w == 'jp' || w == 'japanese')) return '日';

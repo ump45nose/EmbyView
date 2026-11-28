@@ -19,8 +19,10 @@ const _expired = EmbyViewFailure('字幕所属的播放或用户已变更。', r
 const _unreadable = EmbyViewFailure('此轨没有可取得的文本原文。', code: 'subtitle_text_unavailable');
 const _window = Duration(seconds: 20);
 const _minimumLead = Duration(seconds: 12);
+// Aether's cache tap releases at most ten seconds ahead of playback.
+const _serialWindow = Duration(seconds: 4);
 
-typedef _RunCheckpoint = ({Duration start, int? audioIndex, SubtitleAiOutput? output});
+typedef _RunCheckpoint = ({Duration start, int? audioIndex, SubtitleAiOutput? output, String pairId});
 
 class BoundSubtitlePanel implements SubtitlePanel {
   BoundSubtitlePanel({
@@ -100,7 +102,12 @@ class BoundSubtitlePanel implements SubtitlePanel {
         final output = _ai.checkpoint ?? _scope?.checkpoint?.output;
         final start = _ai.run?.startedAt ?? _preparing?.startedAt ?? _scope?.checkpoint?.start;
         if (start != null) {
-          checkpoint = (start: start, audioIndex: _scope?.runAudioIndex, output: output);
+          checkpoint = (
+            start: start,
+            audioIndex: _scope?.runAudioIndex,
+            output: output,
+            pairId: _scope!.aiPairId ?? const Uuid().v4(),
+          );
         }
       }
       _scope?.close();
@@ -110,6 +117,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
       if (restoring) _scope!.userApplied = true;
       if (resumeAi) {
         _scope!.checkpoint = checkpoint;
+        _scope!.aiPairId = checkpoint?.pairId;
         _scope!.runAudioIndex = checkpoint?.audioIndex;
         _scope!.resumeAi = true;
         _scope!.reselectRevision = reselect ? input.subtitleSelectionRevision : null;
@@ -133,7 +141,8 @@ class BoundSubtitlePanel implements SubtitlePanel {
               play.phase == PlaybackPhase.paused ||
               play.phase == PlaybackPhase.buffering)) {
         scope.scanning = true;
-        unawaited(_loadNas(scope, play.selectedSubtitleId));
+        scope.nasLoading = _loadNas(scope, play.selectedSubtitleId);
+        unawaited(scope.nasLoading!);
       }
       if (scope.resumeAi &&
           !scope.aiResumeScheduled &&
@@ -144,10 +153,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
         scheduleMicrotask(() {
           if (identical(scope, _scope) && scope.resumeAi) {
             unawaited(
-              _startAi(
-                resume: scope.reselectRevision != input.subtitleSelectionRevision,
-                checkpoint: scope.checkpoint,
-              ),
+              _startAi(resume: scope.reselectRevision != input.subtitleSelectionRevision, checkpoint: scope.checkpoint),
             );
           }
         });
@@ -291,6 +297,8 @@ class BoundSubtitlePanel implements SubtitlePanel {
       }
       for (final track in scan.nasTracks) {
         _check(scope);
+        // A resumed live row already represents this partial Chinese file.
+        if (scope.aiPairId != null && track.pairId == scope.aiPairId && isChineseSubtitle(track.language)) continue;
         if (indexed[track.id] case final id?) {
           available.add((track, id));
           continue;
@@ -571,14 +579,21 @@ class BoundSubtitlePanel implements SubtitlePanel {
   }
 
   Future<void> _save(_PanelScope scope, String id, StoredSubtitle track, {StoredSubtitle? original}) async {
-    if (scope.saves[id]?.state == SubtitleSaveState.saving) return;
-    scope.saves[id] = const SubtitleSaveResult(state: SubtitleSaveState.saving);
-    _emit();
+    if (identical(scope.retained[id], track) && scope.saves[id]?.state == SubtitleSaveState.saving) return;
     void update(SubtitleSaveResult state) {
-      scope.saves[id] = state;
+      if (identical(scope.retained[id], track)) scope.saves[id] = state;
+      if (state.state == SubtitleSaveState.failed) {
+        EvDiagnosticsLog.instance.record(
+          'subtitle',
+          'save_failed',
+          level: 'WARN',
+          details: {'itemId': scope.source.target.itemId, 'code': state.failure?.code, 'reason': state.failure?.reason},
+        );
+      }
       if (identical(scope, _scope)) _emit();
     }
 
+    update(const SubtitleSaveResult(state: SubtitleSaveState.saving));
     try {
       if (original != null) {
         final result = await store.save(original);
@@ -602,7 +617,14 @@ class BoundSubtitlePanel implements SubtitlePanel {
     if (track == null || scope.saves[trackId]?.state != SubtitleSaveState.failed) {
       return;
     }
-    await _save(scope, trackId, track, original: scope.originals[trackId]);
+    final original = scope.originals[trackId];
+    if (original != null) {
+      final save = scope.aiSave.then((_) => _save(scope, trackId, track, original: original));
+      scope.aiSave = save;
+      await save;
+    } else {
+      await _save(scope, trackId, track);
+    }
   }
 
   @override
@@ -724,7 +746,55 @@ class BoundSubtitlePanel implements SubtitlePanel {
   }
 
   @override
-  Future<void> startAi() => _startAi();
+  Future<void> startAi() async {
+    final scope = _active;
+    if (scope.checkpoint == null && _liveTrackId == null) {
+      // Join the initial NAS scan so an already saved, paired result can be
+      // resumed even after leaving and reopening the episode.
+      scope.userApplied = true;
+      if (scope.nasLoading case final loading?) await scope.guard(loading);
+      _check(scope);
+      _restoreSavedAi(scope);
+    }
+    await _startAi();
+  }
+
+  void _restoreSavedAi(_PanelScope scope) {
+    final play = session.snapshot;
+    final audio = play.audioTracks.where((track) => track.id == play.selectedAudioId).firstOrNull;
+    final language = normalizeSubtitleLanguage(audio?.language);
+    if (language == null) return;
+    for (final entry in scope.retained.entries) {
+      final chinese = entry.value;
+      final coverage = chinese.coverage;
+      if (chinese.origin != SubtitleOrigin.ai ||
+          !isChineseSubtitle(chinese.language) ||
+          chinese.pairId == null ||
+          coverage == null ||
+          coverage.isEmpty) {
+        continue;
+      }
+      final original = scope.retained.values
+          .where(
+            (track) =>
+                track.origin == SubtitleOrigin.ai &&
+                track.pairId == chinese.pairId &&
+                track.language == language &&
+                track.id != chinese.id,
+          )
+          .firstOrNull;
+      final cues = scope.dialogue[entry.key];
+      if (original == null || cues == null || cues.isEmpty || cues.any((cue) => cue.translation == null)) continue;
+      scope.checkpoint = (
+        start: coverage.first.start < play.position ? coverage.first.start : play.position,
+        audioIndex: int.tryParse(audio?.id.split(':').last ?? ''),
+        output: SubtitleAiOutput(coverage: coverage, cues: cues, language: original.language),
+        pairId: chinese.pairId!,
+      );
+      scope.resumeTrackId = entry.key;
+      return;
+    }
+  }
 
   Future<void> _startAi({Duration? position, int? streamIndex, bool resume = false, _RunCheckpoint? checkpoint}) async {
     final scope = _active;
@@ -732,16 +802,22 @@ class BoundSubtitlePanel implements SubtitlePanel {
     ++_runNumber;
     final play = session.snapshot, timeline = _timeline;
     final index = streamIndex ?? int.tryParse(play.selectedAudioId?.split(':').last ?? '');
-    scope.runAudioIndex = index;
+    // Retry an interrupted run from its original start, including silent
+    // windows. Only carry results from the same selected audio stream.
+    checkpoint ??= scope.checkpoint;
     scope.checkpoint = checkpoint?.audioIndex == index ? checkpoint : null;
     final seed = scope.checkpoint;
+    scope.runAudioIndex = index;
+    final pair = scope.aiPairId = seed?.pairId ?? const Uuid().v4();
     final start = seed?.start ?? position ?? play.position;
     final covered = seed?.output?.coverage ?? const <TimeRange>[];
     final language = play.audioTracks.where((track) => track.id == '${play.generation}:$index').firstOrNull?.language;
     _run?.cancel();
     _ai.invalidate();
-    final liveId = _liveTrackId = resume && _liveTrackId != null
+    final liveId = _liveTrackId = (resume || seed != null) && _liveTrackId != null
         ? _liveTrackId!
+        : seed != null && scope.resumeTrackId != null
+        ? scope.resumeTrackId!
         : '${play.generation}:live-${const Uuid().v4()}';
     scope.userApplied = true;
     final cancellation = _run = SubtitleAiCancellation();
@@ -761,11 +837,14 @@ class BoundSubtitlePanel implements SubtitlePanel {
       details: {
         'itemId': scope.source.target.itemId,
         'gen': play.generation,
-        'resume': resume,
+        'resume': resume || seed != null,
         'startSec': start.inSeconds,
       },
     );
-    final reader = StreamIterator(_audio(scope.source, start, play.duration, index, cancellation, covered: covered));
+    final serial = usesSerialSubtitleOrigin(scope.source);
+    final reader = serial
+        ? null
+        : StreamIterator(_audio(scope.source, start, play.duration, index, cancellation, covered: covered));
     var independent = false;
     try {
       await input.setLiveSubtitle(liveId, generation: play.generation, select: !resume);
@@ -776,11 +855,11 @@ class BoundSubtitlePanel implements SubtitlePanel {
       var hasAudio = false;
       try {
         final measured = Stopwatch()..start();
-        hasAudio = await reader.moveNext();
+        hasAudio = await (reader?.moveNext() ?? Future.value(false));
         independent = hasAudio
             ? seed != null ||
                   measured.elapsed <= _window - _minimumLead &&
-                      reader.current.end - session.snapshot.position >= _minimumLead
+                      reader!.current.end - session.snapshot.position >= _minimumLead
             : seed != null &&
                   play.duration != null &&
                   missingSubtitleCoverage(play.duration!, [
@@ -790,15 +869,20 @@ class BoundSubtitlePanel implements SubtitlePanel {
       } catch (_) {
         // Unavailable independent audio uses the existing playback tap.
       }
-      if (!independent) await reader.cancel();
+      if (!independent) await reader?.cancel();
       if (!current()) return;
       Stream<SubtitleAudioSegment> ahead() async* {
         if (!hasAudio) return;
         do {
-          yield reader.current;
+          yield reader!.current;
         } while (await reader.moveNext());
       }
 
+      EvDiagnosticsLog.instance.record(
+        'subtitle',
+        'ai_audio_mode',
+        details: {'gen': play.generation, 'serial': serial, 'independent': independent},
+      );
       final audio = independent
           ? ahead()
           : playbackSubtitleAudio(
@@ -806,6 +890,7 @@ class BoundSubtitlePanel implements SubtitlePanel {
               sourceGeneration: play.generation,
               start: start,
               finish: finished.future,
+              segmentDuration: serial ? _serialWindow : _window,
             );
       _preparing = null;
       final output = await _ai.start(
@@ -815,21 +900,27 @@ class BoundSubtitlePanel implements SubtitlePanel {
         initialOutput: seed?.output,
         audio: covered.isEmpty ? audio : audio.expand((segment) => _uncoveredPcm(segment, covered)),
         followsPlayhead: !independent,
+        realtimeBatchWindows: serial ? 1 : 2,
         isCurrent: current,
         language: language,
         mediaContext: mediaContext,
         cancellation: cancellation,
       );
+      if (current()) {
+        scope.checkpoint = (start: start, audioIndex: index, output: _ai.checkpoint ?? seed?.output, pairId: pair);
+      }
       if (output != null && current()) {
-        await _persistAi(scope, output, current, liveId: session.snapshot.phase == PlaybackPhase.ended ? null : liveId);
+        await _persistAi(
+          scope,
+          output,
+          current,
+          pair: pair,
+          liveId: session.snapshot.phase == PlaybackPhase.ended ? null : liveId,
+        );
         EvDiagnosticsLog.instance.record(
           'subtitle',
-          'ai_completed',
-          details: {
-            'itemId': scope.source.target.itemId,
-            'gen': play.generation,
-            'cues': output.cues.length,
-          },
+          _ai.run?.state == AiRunState.completed ? 'ai_completed' : 'ai_partial',
+          details: {'itemId': scope.source.target.itemId, 'gen': play.generation, 'cues': output.cues.length},
         );
       }
     } catch (error) {
@@ -839,19 +930,25 @@ class BoundSubtitlePanel implements SubtitlePanel {
           'subtitle',
           'ai_failed',
           level: 'WARN',
-          details: {
-            'itemId': scope.source.target.itemId,
-            'gen': play.generation,
-            'code': failure.code ?? 'ai_failed',
-          },
+          details: {'itemId': scope.source.target.itemId, 'gen': play.generation, 'code': failure.code ?? 'ai_failed'},
         );
-        _preparing = AiRun(generation: play.generation, state: AiRunState.failed, startedAt: start, failure: failure);
+        final retained = scope.checkpoint?.output;
+        _preparing = AiRun(
+          generation: play.generation,
+          state: AiRunState.failed,
+          startedAt: start,
+          coverage: retained?.coverage ?? const [],
+          cues: retained?.cues ?? const [],
+          failure: failure,
+        );
         _emit();
       }
     } finally {
-      await reader.cancel();
+      await reader?.cancel();
       try {
-        if (current() && _liveTrackId == liveId) await _retireLive(liveId);
+        final failed = (_preparing ?? _ai.run)?.state == AiRunState.failed;
+        final hasCheckpoint = scope.checkpoint?.output?.cues.isNotEmpty == true;
+        if (current() && _liveTrackId == liveId && !(failed && hasCheckpoint)) await _retireLive(liveId);
       } finally {
         if (identical(_run, cancellation)) {
           _tapFinished = null;
@@ -862,8 +959,14 @@ class BoundSubtitlePanel implements SubtitlePanel {
     }
   }
 
-  Future<void> _persistAi(_PanelScope scope, SubtitleAiOutput output, bool Function() current, {String? liveId}) async {
-    final pair = const Uuid().v4(), media = await _media(scope);
+  Future<void> _persistAi(
+    _PanelScope scope,
+    SubtitleAiOutput output,
+    bool Function() current, {
+    required String pair,
+    String? liveId,
+  }) async {
+    final media = await _media(scope);
     Future<StoredSubtitle> retain(SubtitleDocument document, String? language) => store.retain(
       media,
       document,
@@ -876,15 +979,32 @@ class BoundSubtitlePanel implements SubtitlePanel {
     final chinese = await retain(output.chinese, 'zh');
     if (!current()) return;
     if (liveId == null) {
-      final saved = await store.save(original);
-      if (saved.state == SubtitleSaveState.saved) await store.save(chinese);
+      final save = scope.aiSave.then((_) async {
+        final saved = await store.save(original);
+        if (saved.state == SubtitleSaveState.saved) await store.save(chinese);
+      });
+      scope.aiSave = save;
+      await save;
       return;
     }
-    final id = await _register(scope, chinese, cues: output.cues, liveTrackId: liveId);
+    final complete = _ai.run?.state == AiRunState.completed;
+    // The old row's saved state belongs to its earlier bytes.
+    scope.saves.remove(liveId);
+    // Keep partial dialogue on the same selectable overlay row until all
+    // windows finish. Retaining another external row here would duplicate it
+    // on retry and freeze the rendered cues at the old checkpoint.
+    final id = complete ? await _register(scope, chinese, cues: output.cues, liveTrackId: liveId) : liveId;
     if (!current()) return;
+    scope.retained[id] = chinese;
+    scope.dialogue[id] = output.cues;
     scope.originals[id] = original;
-    unawaited(_save(scope, id, chinese, original: original));
-    if (_ai.run?.state == AiRunState.completed) {
+    scope.saves.remove(id);
+    // Saving an earlier checkpoint may still be waiting for Emby indexing.
+    // Queue the newer superset so it cannot be skipped or overwritten.
+    final save = scope.aiSave.then((_) => _save(scope, id, chinese, original: original));
+    scope.aiSave = save;
+    unawaited(save);
+    if (complete) {
       await input.endLiveSubtitle(liveId, replacementId: id);
       if (_liveTrackId == liveId) _liveTrackId = null;
     }
@@ -894,11 +1014,15 @@ class BoundSubtitlePanel implements SubtitlePanel {
   Future<void> cancelAi() async {
     final scope = _scope, timeline = _timeline, runNumber = _runNumber;
     final seed = scope?.checkpoint?.output;
+    final start = _preparing?.startedAt ?? _ai.run?.startedAt ?? scope?.checkpoint?.start;
     final resuming = scope?.resumeAi == true || _run != null;
+    final checkpoint = _ai.checkpoint ?? seed;
     final output = _ai.cancel() ?? (resuming && seed?.cues.isNotEmpty == true ? seed : null);
     if (scope != null) {
       scope.resumeAi = false;
-      scope.checkpoint = null;
+      scope.checkpoint = start == null || checkpoint == null || scope.aiPairId == null
+          ? null
+          : (start: start, audioIndex: scope.runAudioIndex, output: checkpoint, pairId: scope.aiPairId!);
     }
     _resumeAfterBoundary = false;
     _run?.cancel();
@@ -911,14 +1035,11 @@ class BoundSubtitlePanel implements SubtitlePanel {
     EvDiagnosticsLog.instance.record(
       'subtitle',
       'ai_cancelled',
-      details: {
-        if (scope != null) 'itemId': scope.source.target.itemId,
-        'persisted': output != null,
-      },
+      details: {if (scope != null) 'itemId': scope.source.target.itemId, 'persisted': output != null},
     );
     bool current() => identical(scope, _scope) && timeline == _timeline && runNumber == _runNumber;
     if (scope != null && output != null) {
-      await _persistAi(scope, output, current);
+      await _persistAi(scope, output, current, pair: scope.aiPairId ?? const Uuid().v4());
     }
   }
 
@@ -1000,8 +1121,12 @@ class _PanelScope {
   final edits = <SubtitleAiCancellation>{};
   Future<SubtitleItem>? item;
   Future<SubtitleScan>? scan;
+  Future<void>? nasLoading;
+  String? resumeTrackId;
   bool resumeAi = false;
   _RunCheckpoint? checkpoint;
+  String? aiPairId;
+  Future<void> aiSave = Future.value();
   int? runAudioIndex;
   int? reselectRevision;
   var selectionRequest = 0;

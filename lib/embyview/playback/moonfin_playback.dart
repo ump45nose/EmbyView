@@ -1021,11 +1021,11 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       chapters: List.unmodifiable(_chapters),
       audioTracks: _tracks(resolution?.mediaStreams ?? [], 'Audio'),
       subtitleTracks: [
-        ..._tracks(resolution?.mediaStreams ?? [], 'Subtitle'),
+        ..._tracks(resolution?.mediaStreams ?? [], 'Subtitle').where((track) => track.id != _liveSubtitleId),
         if (_liveSubtitleId case final liveId?)
           PlaybackTrack(id: liveId, name: '简体中文 · AI 生成', language: 'zh', source: PlaybackTrackSource.ai),
         for (var i = 0; i < _externalSubtitles.length; i++)
-          if (_indexedExternalIds[_externalSubtitles[i].contentKey] == null)
+          if (_indexedExternalIds[_externalSubtitles[i].contentKey] == null && _externalId(i) != _liveSubtitleId)
             PlaybackTrack(
               id: _externalId(i),
               name: _externalSubtitles[i].title ?? '外挂字幕',
@@ -1655,9 +1655,14 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
     if (_indexedExternalIds[contentKey] case final index?) {
       return '$generation:$index';
     }
-    final existing = _externalSubtitles.indexWhere((track) =>
+    // A saved AI row can become the live overlay on resume. Replace its
+    // delivery in the same slot when its enlarged result is registered.
+    final replacement = source == PlaybackTrackSource.ai && liveTrackId != null
+        ? _retainedSubtitleIndex(liveTrackId) ?? -1
+        : -1;
+    final existing = replacement >= 0 ? replacement : _externalSubtitles.indexWhere((track) =>
         track.url == url || contentKey != null && track.contentKey == contentKey);
-    final subtitle = existing >= 0
+    final subtitle = existing >= 0 && replacement < 0
         ? _externalSubtitles[existing]
         : _SessionSubtitle(url, title, language, codec, contentKey, source);
     try {
@@ -1670,7 +1675,23 @@ class MoonfinPlaybackSession with WindowListener implements PlaybackSession, Pla
       _reloadExternal = true;
     }
     checkRegistration();
-    if (existing >= 0) return _visibleExternalId(existing);
+    if (existing >= 0) {
+      if (replacement >= 0) {
+        final old = _externalSubtitles[existing];
+        final indexed = _indexedExternalIds.remove(old.contentKey);
+        if (indexed != null && contentKey != null) _indexedExternalIds[contentKey] = indexed;
+        _externalSubtitles[existing] = subtitle;
+        _emit();
+      }
+      return _visibleExternalId(existing);
+    }
+    // Reuse the indexed Emby row as the visible ID if the saved result was
+    // never registered separately (its former delivery was server text).
+    if (source == PlaybackTrackSource.ai && liveTrackId != null && contentKey != null &&
+        _tracks(_manager.currentResolution?.mediaStreams ?? [], 'Subtitle').any((track) =>
+          track.id == liveTrackId && track.source == PlaybackTrackSource.embyExternal)) {
+      _indexedExternalIds[contentKey] = _trackIndex(liveTrackId);
+    }
     final index = _externalSubtitles.length;
     _externalSubtitles.add(subtitle);
     _emit();

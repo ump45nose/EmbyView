@@ -37,6 +37,15 @@ final Stream<SubtitleAudioBoundary> subtitleAudioBoundaries = const EventChannel
 bool isSubtitleStrm(PlaybackSubtitleSource source) =>
     [source.itemFilePath, source.mediaSourceFilePath].any((path) => path?.toLowerCase().endsWith('.strm') ?? false);
 
+/// Match the native Aether serial-origin policy. A foreground tap consumes
+/// already-buffered media without opening an additional origin connection.
+bool usesSerialSubtitleOrigin(PlaybackSubtitleSource source) {
+  final address = source.address;
+  if (source.generation <= 0 || !const {'http', 'https'}.contains(address.scheme)) return false;
+  final host = address.host.toLowerCase();
+  return const ['115.com', '115cdn.net', '115cdn.com'].any((domain) => host == domain || host.endsWith('.$domain'));
+}
+
 const _sampleRate = 48000;
 const _bytesPerFrame = 4;
 const _maxWindow = Duration(seconds: 30);
@@ -310,6 +319,16 @@ class SubtitleAudioReader {
                   discontinuity: index != 0,
                 ),
             ];
+          }
+        } on PlatformException catch (error) {
+          checkCancelled();
+          if (!reading.preempted) {
+            throw EmbyViewFailure(
+              error.code == 'audioHttp' && error.details is int ? '独立音频读取失败（HTTP ${error.details}）。' : '独立音频读取失败。',
+              code: error.code,
+              httpStatus: error.code == 'audioHttp' && error.details is int ? error.details as int : null,
+              retryable: true,
+            );
           }
         } catch (_) {
           checkCancelled();
